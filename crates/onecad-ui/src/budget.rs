@@ -34,11 +34,17 @@ pub enum Kind {
     Other,
     Display,
     DisplaySource,
+    DisplayGeometry,
     Preview,
     PreviewSource,
+    PreviewGeometry,
     Preparation,
+    PreparedGeometry,
     Contour,
     Highlight,
+    LibraryDraft,
+    LibraryArchive,
+    LibraryArchiveScratch,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
@@ -262,14 +268,12 @@ impl Default for HostBudget {
 pub struct Lease {
     budget: Arc<HostBudget>,
     id: u64,
-    bytes: usize,
 }
 impl std::fmt::Debug for Lease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Lease")
             .field("id", &self.id)
-            .field("bytes", &self.bytes)
             .finish()
     }
 }
@@ -323,7 +327,6 @@ impl HostBudget {
         Ok(Lease {
             budget: self.clone(),
             id,
-            bytes,
         })
     }
 }
@@ -332,20 +335,69 @@ fn exhausted() -> String {
         .into()
 }
 impl Lease {
+    pub fn carve_shared(&self, bytes: usize, kind: Kind) -> Result<Arc<Lease>, String> {
+        let mut state = self.budget.authority.state();
+        if state.degraded {
+            return Err("Native CPU budget ledger unavailable".into());
+        }
+        let original = state
+            .portions
+            .get(&self.id)
+            .cloned()
+            .ok_or("Native CPU budget portion missing")?;
+        if bytes > original.bytes {
+            return Err("Native reservation split exceeds admitted bytes".into());
+        }
+        let id = state.next_id()?;
+        state
+            .portions
+            .get_mut(&self.id)
+            .ok_or("Native CPU budget portion missing")?
+            .bytes -= bytes;
+        state.portions.insert(
+            id,
+            Portion {
+                id,
+                admission: original.admission,
+                owner: original.owner,
+                kind,
+                bytes,
+            },
+        );
+        Ok(Arc::new(Lease {
+            budget: self.budget.clone(),
+            id,
+        }))
+    }
+    /// Release unused admission while keeping the retained portion's identity.
+    pub fn shrink_to(&self, bytes: usize) -> Result<(), String> {
+        let mut state = self.budget.authority.state();
+        if state.degraded {
+            return Err("Native CPU budget ledger unavailable".into());
+        }
+        let Some(portion) = state.portions.get_mut(&self.id) else {
+            state.degraded = true;
+            return Err("Native CPU budget portion missing".into());
+        };
+        if bytes > portion.bytes {
+            return Err("Native reservation cannot grow without admission".into());
+        }
+        portion.bytes = bytes;
+        drop(state);
+        self.budget.wake();
+        Ok(())
+    }
     #[cfg(test)]
     pub fn split(self, first_bytes: usize) -> Result<(Self, Self), String> {
         self.split_kinds(first_bytes, Kind::Other, Kind::Other)
     }
     /// Both portions retain one admission identity; no capacity is released or reacquired.
     pub fn split_kinds(
-        mut self,
+        self,
         first_bytes: usize,
         first_kind: Kind,
         second_kind: Kind,
     ) -> Result<(Self, Self), String> {
-        if first_bytes > self.bytes {
-            return Err("Native reservation split exceeds admitted bytes".into());
-        }
         let mut state = self.budget.authority.state();
         if state.degraded {
             return Err("Native CPU budget ledger unavailable".into());
@@ -354,13 +406,17 @@ impl Lease {
             state.degraded = true;
             return Err("Native CPU budget portion missing".into());
         };
+        if first_bytes > original.bytes {
+            return Err("Native reservation split exceeds admitted bytes".into());
+        }
+        let second_bytes = original.bytes - first_bytes;
         let second_id = state.next_id()?;
         let second = Portion {
             id: second_id,
             admission: original.admission,
             owner: original.owner,
             kind: second_kind,
-            bytes: self.bytes - first_bytes,
+            bytes: second_bytes,
         };
         original.bytes = first_bytes;
         original.kind = first_kind;
@@ -369,9 +425,7 @@ impl Lease {
         let second = Self {
             budget: self.budget.clone(),
             id: second_id,
-            bytes: self.bytes - first_bytes,
         };
-        self.bytes = first_bytes;
         drop(state);
         Ok((self, second))
     }
@@ -384,6 +438,39 @@ impl Drop for Lease {
         }
         drop(state);
         self.budget.wake();
+    }
+}
+
+/// Carves retained allocations from one already-admitted peak reservation.
+pub(crate) struct LeasePool {
+    remaining: Option<Lease>,
+    kind: Kind,
+    remainder_kind: Kind,
+}
+impl LeasePool {
+    pub fn new(lease: Lease, kind: Kind, remainder_kind: Kind) -> Self {
+        Self {
+            remaining: Some(lease),
+            kind,
+            remainder_kind,
+        }
+    }
+    pub fn carve(&mut self, bytes: usize) -> Result<Arc<Lease>, String> {
+        let remaining = self
+            .remaining
+            .take()
+            .ok_or("Native reservation pool exhausted")?;
+        let (allocated, rest) = remaining.split_kinds(bytes, self.kind, self.remainder_kind)?;
+        self.remaining = Some(rest);
+        Ok(Arc::new(allocated))
+    }
+    pub fn finish(mut self, bytes: usize) -> Result<Arc<Lease>, String> {
+        let remaining = self
+            .remaining
+            .take()
+            .ok_or("Native reservation pool exhausted")?;
+        remaining.shrink_to(bytes)?;
+        Ok(Arc::new(remaining))
     }
 }
 pub fn charge(total: &mut usize, bytes: usize, limit: usize, kind: &str) -> Result<(), String> {
@@ -399,3 +486,19 @@ mod tests;
 
 #[cfg(test)]
 mod admission_tests;
+
+/// Adapts the shared native ledger to archive allocations owned by the app layer.
+pub(crate) struct ArchiveBudgetAdapter(pub Arc<HostBudget>);
+impl onecad_app::resource_admission::ArchiveAdmission for ArchiveBudgetAdapter {
+    fn reserve(
+        &self,
+        bytes: usize,
+        purpose: onecad_app::resource_admission::ArchiveUse,
+    ) -> Result<onecad_app::resource_admission::Retention, String> {
+        let kind = match purpose {
+            onecad_app::resource_admission::ArchiveUse::Retained => Kind::LibraryArchive,
+            onecad_app::resource_admission::ArchiveUse::Scratch => Kind::LibraryArchiveScratch,
+        };
+        Ok(Arc::new(self.0.reserve_kind(bytes, kind)?))
+    }
+}

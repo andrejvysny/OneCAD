@@ -17,6 +17,7 @@ pub fn record(op: KnownOperation) -> OperationRecord {
 }
 pub fn primary(body: BodyId, kind: ElementKind, id: &str) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             kind,

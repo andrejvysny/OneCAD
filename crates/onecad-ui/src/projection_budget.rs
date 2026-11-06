@@ -44,7 +44,7 @@ impl Counter {
         Ok(())
     }
 }
-pub fn check(projection: &DocumentProjection) -> Result<(), String> {
+pub fn check(projection: &DocumentProjection) -> Result<usize, String> {
     if projection.bodies.len() > crate::budget::MAX_BODIES
         || projection.sketches.len() > 128
         || projection.features.len() > 512
@@ -110,7 +110,7 @@ pub fn check(projection: &DocumentProjection) -> Result<(), String> {
             count.text(text)?;
         }
     }
-    Ok(())
+    Ok(count.bytes)
 }
 fn feature_metadata(
     count: &mut Counter,

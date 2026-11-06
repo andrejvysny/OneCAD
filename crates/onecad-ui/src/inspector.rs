@@ -60,6 +60,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                                     sketch_options(app, ui);
                                     crate::inspector_props::properties(app, ui, chrome.inspector);
                                     crate::component_instances::panel(app, ui);
+                                    crate::assembly_controls::panel(app, ui);
                                     crate::explorer::selected_sketch_edit_button(app, ui);
                                     crate::inspector_history::edit_button(app, ui);
                                     crate::constraint_authoring::dimension_list(app, ui);

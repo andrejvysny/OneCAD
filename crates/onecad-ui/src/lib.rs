@@ -9,6 +9,7 @@
 #![cfg_attr(all(test, not(feature = "desktop")), allow(dead_code))]
 mod app;
 mod appearance;
+mod assembly_controls;
 mod automation;
 mod autosave_status;
 mod bars;

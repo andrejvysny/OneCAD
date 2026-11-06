@@ -104,16 +104,17 @@ async fn prepare(
             "Native edit preview body count budget exceeded".into(),
         ));
     }
-    let retention = onecad_render::PreparationRetention {
-        source: delivery
+    let guards = (
+        delivery
             .lease
-            .clone()
-            .map(|lease| lease as Arc<dyn Send + Sync>),
-        preparation: Some(preparation),
-    };
+            .as_ref()
+            .ok_or_else(|| ApiError::Internal("Preview admission missing".into()))?
+            .clone(),
+        preparation,
+    );
     let meshes = std::mem::take(&mut result.meshes);
     let (meshes, prepared, scene) =
-        super::prepare_meshes(backend, generation, tag.clone(), meshes, retention)
+        super::prepare_meshes(backend, generation, tag.clone(), meshes, guards)
             .await
             .map_err(ApiError::Internal)?;
     result.meshes = meshes;

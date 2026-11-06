@@ -7,6 +7,9 @@ pub struct RecordBudget {
     bytes: usize,
 }
 impl RecordBudget {
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
     pub fn charge(&mut self, record: &OperationRecord) -> Result<(), String> {
         let mut counter = BoundedCounter::default();
         // OperationRecord's wire serializer builds an intermediate Value; count its

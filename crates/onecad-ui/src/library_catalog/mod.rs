@@ -68,6 +68,7 @@ pub(crate) enum Request {
     },
     Prepare {
         sequence: u64,
+        generation: Option<u64>,
         request: Box<onecad_app::library::PlaceComponentRequest>,
     },
     Classify {

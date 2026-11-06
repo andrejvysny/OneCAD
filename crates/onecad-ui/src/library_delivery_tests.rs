@@ -44,7 +44,7 @@ async fn start_page_lists_the_seeded_library_from_the_real_service() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_home_app(area.path()).await;
     let library = area.path().join("qa").join("data").join("library");
-    onecad_app::library::seed_and_reindex_at(&library);
+    onecad_app::library::seed_and_reindex_at(&library).unwrap();
     let mut frame = eframe::Frame::_new_kittest();
 
     app.ui.start_open = true;

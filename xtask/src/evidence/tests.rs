@@ -1,6 +1,6 @@
 use super::{
     captures, host,
-    host_names::{HOST_TESTS, SERVICE_TESTS},
+    host_names::{BACKEND_TESTS, HOST_TESTS, SERVICE_TESTS},
     kernelbench,
 };
 use serde_json::{json, Value};
@@ -45,7 +45,7 @@ fn accepted() -> String {
 }
 #[test]
 fn host_inventory_requires_exact_current_names() {
-    assert_eq!(HOST_TESTS.len(), 135);
+    assert_eq!(HOST_TESTS.len(), 141);
     let inventory = HOST_TESTS
         .iter()
         .map(|name| format!("{name}: test\n"))
@@ -99,7 +99,7 @@ fn host_separate_stderr_and_extra_adapter_setup_valid() {
 }
 #[test]
 fn host_service_selection_requires_its_own_exact_inventory_and_count() {
-    assert_eq!(SERVICE_TESTS.len(), 4);
+    assert_eq!(SERVICE_TESTS.len(), 6);
     let services = &host::SERVICES;
     let inventory = SERVICE_TESTS
         .iter()
@@ -115,8 +115,8 @@ fn host_service_selection_requires_its_own_exact_inventory_and_count() {
         assert!(host::inventory(&output, services).is_err());
     }
     let summary =
-        "test result: ok. 4 passed; 0 failed; 0 ignored; 58 filtered out; finished in 1s\n";
-    // Service tests emit no adapter record, so none is required here.
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 58 filtered out; finished in 1s\n";
+    // Service verification does not infer renderer qualification from its log.
     let passed = SERVICE_TESTS
         .iter()
         .map(|name| format!("test {name} ... ok\n"))
@@ -127,8 +127,8 @@ fn host_service_selection_requires_its_own_exact_inventory_and_count() {
         "test result: ok. 0 passed; 0 failed; 0 ignored;".into(),
         passed.replacen("... ok\n", "... FAILED\n", 1),
         passed.replace(
-            "4 passed; 0 failed; 0 ignored;",
-            "3 passed; 0 failed; 1 ignored;",
+            "6 passed; 0 failed; 0 ignored;",
+            "5 passed; 0 failed; 1 ignored;",
         ),
         passed.replace(&format!("test {} ... ok\n", SERVICE_TESTS[3]), ""),
         passed.clone() + summary,
@@ -139,6 +139,42 @@ fn host_service_selection_requires_its_own_exact_inventory_and_count() {
     assert!(host::verify(&passed, &host::LIFECYCLE).is_err());
     assert!(host::verify(&accepted(), services).is_err());
 }
+#[test]
+fn host_backend_selection_requires_exact_inventory_and_terminal_results() {
+    assert_eq!(BACKEND_TESTS.len(), 5);
+    let inventory = BACKEND_TESTS
+        .iter()
+        .map(|name| format!("{name}: test\n"))
+        .collect::<String>();
+    host::inventory(&inventory, &host::BACKEND).unwrap();
+    let passed = BACKEND_TESTS
+        .iter()
+        .map(|name| format!("test {name} ... ok\n"))
+        .collect::<String>()
+        + "test result: ok. 5 passed; 0 failed; 0 ignored;\n";
+    host::verify(&passed, &host::BACKEND).unwrap();
+    for bad in [
+        inventory.replace(&format!("{}: test\n", BACKEND_TESTS[0]), ""),
+        inventory.clone() + &format!("{}: test\n", BACKEND_TESTS[0]),
+        inventory.replace(BACKEND_TESTS[0], "unknown"),
+    ] {
+        assert!(host::inventory(&bad, &host::BACKEND).is_err());
+    }
+    for bad in [
+        passed.replacen("... ok\n", "... FAILED\n", 1),
+        passed.replace(
+            "5 passed; 0 failed; 0 ignored;",
+            "4 passed; 0 failed; 1 ignored;",
+        ),
+        passed.replace(&format!("test {} ... ok\n", BACKEND_TESTS[0]), ""),
+        "test result: ok. 0 passed; 0 failed; 0 ignored;\n".into(),
+    ] {
+        assert!(host::verify(&bad, &host::BACKEND).is_err());
+    }
+    assert!(host::verify(&passed, &host::LIFECYCLE).is_err());
+    assert!(host::verify(&accepted(), &host::BACKEND).is_err());
+}
+
 #[test]
 fn host_missing_worker_requires_selected_test_and_decisive_failure() {
     let name = HOST_TESTS[1];

@@ -38,7 +38,7 @@ pub(crate) struct PreparedBody {
 }
 
 pub(crate) struct PreparedGeometry {
-    pub(crate) source: Arc<[u8]>,
+    pub(crate) source: onecad_scene::SceneGeometry,
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
@@ -51,7 +51,7 @@ pub(crate) struct PreparedGeometry {
 
 #[derive(Clone)]
 pub(crate) struct GpuBody {
-    pub(crate) source: Arc<[u8]>,
+    pub(crate) source: onecad_scene::SceneGeometry,
     pub id: BodyId,
     pub mesh_revision: u64,
     pub style: BodyStyle,
@@ -267,6 +267,13 @@ impl PreparedBody {
         body: &SceneBody,
         retention: crate::PreparationRetention,
     ) -> Result<Self, RenderError> {
+        Self::new_allocated(body, retention, None)
+    }
+    pub(crate) fn new_allocated(
+        body: &SceneBody,
+        retention: crate::PreparationRetention,
+        allocator: Option<&mut crate::prepared::GeometryAdmission<'_>>,
+    ) -> Result<Self, RenderError> {
         let mesh = body.mesh()?;
         let h = mesh.header();
         let mut positions = reserve(h.vertex_count as usize)?;
@@ -322,20 +329,21 @@ impl PreparedBody {
             }
         }
         let silhouettes = crate::silhouette::candidates(&mesh)?;
-        Self::from_geometry(
-            body,
-            Arc::new(PreparedGeometry {
-                source: Arc::clone(body.bytes()),
-                source_retention: retention.source,
-                _preparation_retention: retention.preparation,
-                positions,
-                normals,
-                indices,
-                segments,
-                feature_segments,
-                silhouettes,
-            }),
-        )
+        let mut geometry = PreparedGeometry {
+            source: body.retained_geometry(),
+            source_retention: body.geometry_retention().or(retention.source),
+            _preparation_retention: retention.preparation,
+            positions,
+            normals,
+            indices,
+            segments,
+            feature_segments,
+            silhouettes,
+        };
+        if let Some(allocate) = allocator {
+            geometry._preparation_retention = Some(allocate(geometry.cpu_bytes())?);
+        }
+        Self::from_geometry(body, Arc::new(geometry))
     }
     pub(crate) fn upload(
         self,
@@ -461,7 +469,7 @@ pub(crate) fn unique_gpu_bytes(bodies: &[GpuBody]) -> u64 {
         .filter(|(index, body)| {
             !bodies[..*index]
                 .iter()
-                .any(|other| Arc::ptr_eq(&other.source, &body.source))
+                .any(|other| other.source.shares_source(&body.source))
         })
         .map(|(_, body)| gpu_bytes(body))
         .sum::<u64>()

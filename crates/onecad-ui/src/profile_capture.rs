@@ -33,6 +33,7 @@ pub struct Captured {
     pub profiles: Vec<Profile>,
     pub anchors: Vec<Anchor>,
     pub failures: Vec<Failure>,
+    pub charged_bytes: usize,
 }
 fn referenced(records: &[OperationRecord]) -> Vec<&SketchRegionRef> {
     records
@@ -100,6 +101,7 @@ pub async fn load(
             }
         }
     }
+    captured.charged_bytes = profile_budget.bytes().saturating_add(evidence_budget.bytes);
     Ok(captured)
 }
 

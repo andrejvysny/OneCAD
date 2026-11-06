@@ -25,23 +25,49 @@ pub async fn apply(
     hide_sketch: Option<String>,
     sender: &mpsc::Sender<Message>,
 ) -> Result<CommandOutcome, String> {
-    services::check_tag(&backend.state, &tag).await?;
-    stage_component_blob(backend, &command).await?;
+    let context = services::check_tag(&backend.state, &tag).await?;
+    check_component_draft(backend, &command, &tag)?;
+    // Fresh component payloads move under the same lock as their authored record.
+    if !matches!(command, EditCommand::AddOperation { .. }) {
+        stage_component_blob(backend, &command).await?;
+    }
     let fresh = match &command {
         EditCommand::AddOperation { record, .. } => Some(record.record_id),
         _ => None,
     };
-    let result = api::apply_operation(
+    let result = api::apply_operation_in_context(
         &backend.state,
         backend.host.clone(),
         vec![command],
         Some(OperationEffects {
             hide_sketch_ids: hide_sketch.into_iter().collect(),
         }),
+        &context,
     )
     .await
     .map_err(|e| e.to_string())?;
+    backend.shared.reconcile_library_capture();
     finish_apply(backend, tag, result, fresh, sender).await
+}
+
+fn check_component_draft(
+    backend: &Backend,
+    command: &EditCommand,
+    tag: &RequestTag,
+) -> Result<(), String> {
+    let EditCommand::AddOperation { record, .. } = command else {
+        return Ok(());
+    };
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &record.op else {
+        return Ok(());
+    };
+    let session = onecad_app::library::captured_component_draft_session(&backend.state, params);
+    if session.as_deref() != Some(tag.context.runtime_session.as_str()) {
+        return Err(
+            "Component placement belongs to an expired document session; place it again".into(),
+        );
+    }
+    Ok(())
 }
 
 /// A placement commits only with its geometry in the document: a Linked record is

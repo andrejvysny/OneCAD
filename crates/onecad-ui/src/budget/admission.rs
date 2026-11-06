@@ -114,7 +114,6 @@ impl HostBudget {
         Ok(Some(Lease {
             budget: self.clone(),
             id,
-            bytes,
         }))
     }
 }

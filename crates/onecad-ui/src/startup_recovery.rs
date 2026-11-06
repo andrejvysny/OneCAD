@@ -111,7 +111,7 @@ async fn apply_choice(
     let destination = recovery_destination(&backend.paths, offer)?;
     match choice {
         Choice::Restore => {
-            api::recover_document_at_path(
+            api::recover_assembly_document_at_path(
                 &backend.state,
                 backend.host.clone(),
                 id.clone(),
@@ -154,7 +154,7 @@ async fn open_saved(
     if saved != destination {
         return Err("Saved version is not an admitted recovery destination".into());
     }
-    api::open_document(
+    api::open_assembly_document(
         &backend.state,
         backend.host.clone(),
         destination.to_string_lossy().into_owned(),

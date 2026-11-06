@@ -298,6 +298,9 @@ pub(crate) fn poll_at(app: &mut App, now: Instant) {
         crate::library_catalog::flush(app);
     } else {
         app.ui.library.catalog.drop_placement();
+        if app.doc.placement.is_none() {
+            app.doc.bridge.shared.clear_library_capture();
+        }
     }
 }
 
@@ -568,6 +571,7 @@ pub(crate) fn cancel(app: &mut App) {
         return;
     }
     app.ui.library.catalog.drop_placement();
+    app.doc.bridge.shared.clear_library_capture();
     if placement_tool(app).is_some_and(|t| t.phase == SessionPhase::Editing) {
         crate::pill::cancel_tool(app);
     }

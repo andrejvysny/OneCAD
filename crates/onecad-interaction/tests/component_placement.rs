@@ -39,6 +39,7 @@ fn mate() -> ComponentMate {
     ComponentMate {
         self_attachment: "shankAxis".into(),
         target: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: BodyId::new(),
                 element: ElementId::new("el_top"),

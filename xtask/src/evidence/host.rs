@@ -1,6 +1,6 @@
 use super::{
     captures::hash,
-    host_names::{HOST_TESTS, SERVICE_TESTS},
+    host_names::{BACKEND_TESTS, HOST_TESTS, SERVICE_TESTS},
     process, Result,
 };
 use regex::Regex;
@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 /// One explicitly filtered `--ignored` cargo invocation with its own exact inventory.
 pub(super) struct Selection {
+    package: &'static str,
     inventory_log: &'static str,
     run_log: &'static str,
     filters: &'static [&'static str],
@@ -16,6 +17,7 @@ pub(super) struct Selection {
     metal_evidence: bool,
 }
 pub(super) const LIFECYCLE: Selection = Selection {
+    package: "onecad-ui",
     inventory_log: "inventory",
     run_log: "lifecycle",
     filters: &["app_logic_tests::"],
@@ -23,13 +25,24 @@ pub(super) const LIFECYCLE: Selection = Selection {
     metal_evidence: true,
 };
 pub(super) const SERVICES: Selection = Selection {
+    package: "onecad-ui",
     inventory_log: "service-inventory",
     run_log: "service-lifecycle",
     filters: &[
         "document_services::tests::home_lifecycle_tests::",
         "bridge::tests::",
+        "document_services::tests::document_io_tests::native_assembly_controls_author_solve_undo_save_reopen",
+        "document_services::tests::document_io_tests::native_assembly_capture_save_close_reopen_keeps_occurrences",
     ],
     tests: SERVICE_TESTS,
+    metal_evidence: false,
+};
+pub(super) const BACKEND: Selection = Selection {
+    package: "onecad-app",
+    inventory_log: "backend-inventory",
+    run_log: "backend-lifecycle",
+    filters: &[],
+    tests: BACKEND_TESTS,
     metal_evidence: false,
 };
 
@@ -161,7 +174,8 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             "classification":"automated native-host lifecycle with production OCCT worker and Metal; no physical input or AppKit teardown qualification",
             "source":source,"workerSha256":digest,"tests":HOST_TESTS,"testCount":HOST_TESTS.len(),
             "serviceTests":SERVICE_TESTS,"serviceTestCount":SERVICE_TESTS.len(),
-            "serviceAdapterEvidence":"service tests emit no adapter record; Metal provenance comes from the lifecycle selection",
+            "backendTests":BACKEND_TESTS,"backendTestCount":BACKEND_TESTS.len(),
+            "serviceAdapterEvidence":"service tests require no adapter record; required Metal provenance comes from the lifecycle selection",
             "inventoryVerified":true,"executedExactlyOnce":true,"missingWorkerRejected":true
         }))?,
     )?;
@@ -221,7 +235,7 @@ fn selection_args<'a>(selection: &Selection, extra: &[&'a str]) -> Vec<&'a str> 
         "test",
         "--locked",
         "-p",
-        "onecad-ui",
+        selection.package,
         "--lib",
         "--",
         "--ignored",
@@ -231,7 +245,7 @@ fn selection_args<'a>(selection: &Selection, extra: &[&'a str]) -> Vec<&'a str> 
     args
 }
 fn run_tests(directory: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    for selection in [&LIFECYCLE, &SERVICES] {
+    for selection in [&LIFECYCLE, &SERVICES, &BACKEND] {
         let args = selection_args(selection, &["--list"]);
         let output = process::run(
             directory,
@@ -243,7 +257,7 @@ fn run_tests(directory: &Path, environment: &BTreeMap<String, String>) -> Result
         )?;
         inventory(&output.text, selection)?;
     }
-    for selection in [&LIFECYCLE, &SERVICES] {
+    for selection in [&LIFECYCLE, &SERVICES, &BACKEND] {
         let args = selection_args(selection, &["--nocapture", "--test-threads=1"]);
         let output = process::run(
             directory,

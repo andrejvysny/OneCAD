@@ -177,21 +177,25 @@ pub async fn candidate(context: CandidateBackend, generation: u64, candidate: Ca
             let result = match preview(backend, &tag, *operation, sketch_id, snapshot).await {
                 Ok(mut result) => {
                     let meshes = std::mem::take(&mut result.bodies);
-                    let retention = onecad_render::PreparationRetention {
-                        source: lease.clone().map(|lease| lease as Arc<dyn Send + Sync>),
-                        preparation: preparation
-                            .clone()
-                            .map(|lease| lease as Arc<dyn Send + Sync>),
-                    };
-                    match prepare_meshes(backend, generation, tag.clone(), meshes, retention).await
-                    {
-                        Ok((meshes, packed, scene)) => {
-                            result.bodies = meshes;
-                            prepared = Some(packed);
-                            retained_scene = Some(scene);
-                            Ok(result)
-                        }
-                        Err(error) => Err(error),
+                    match (lease.as_ref(), preparation.as_ref()) {
+                        (Some(source), Some(preparation)) => match prepare_meshes(
+                            backend,
+                            generation,
+                            tag.clone(),
+                            meshes,
+                            (source.clone(), preparation.clone()),
+                        )
+                        .await
+                        {
+                            Ok((meshes, packed, scene)) => {
+                                result.bodies = meshes;
+                                prepared = Some(packed);
+                                retained_scene = Some(scene);
+                                Ok(result)
+                            }
+                            Err(error) => Err(error),
+                        },
+                        _ => Err("Preview admission missing".into()),
                     }
                 }
                 Err(error) => Err(error),
@@ -221,7 +225,7 @@ async fn prepare_meshes(
     generation: u64,
     tag: onecad_interaction::RequestTag,
     meshes: Vec<onecad_app::dto::PreviewBodyDto>,
-    retention: onecad_render::PreparationRetention,
+    guards: (Arc<crate::budget::Lease>, Arc<crate::budget::Lease>),
 ) -> Result<PackedMeshes, String> {
     backend.ensure_current(generation, &tag)?;
     let budget = backend
@@ -231,11 +235,48 @@ async fn prepare_meshes(
     let backend = backend.clone();
     tokio::task::spawn_blocking(move || {
         backend.ensure_current(generation, &tag)?;
-        let scene = preview_scene(&backend, generation, &tag, &meshes)?;
+        let scene = preview_scene(&backend, generation, &tag, &meshes, &guards.0)?;
+        let mesh_bytes = meshes.iter().try_fold(0usize, |n, body| {
+            n.checked_add(body.mesh.capacity())
+                .ok_or("preview size overflow")
+        })?;
+        let geometry_bytes = scene.bodies().iter().try_fold(0usize, |sum, body| {
+            sum.checked_add(body.geometry_bytes().map_err(|e| e.to_string())?)
+                .ok_or("preview size overflow".to_string())
+        })?;
+        let source_bytes = scene
+            .resident_bytes()
+            .saturating_sub(geometry_bytes)
+            .checked_add(mesh_bytes)
+            .and_then(|n| n.checked_add(2 << 20))
+            .ok_or("preview size overflow")?;
+        guards.0.shrink_to(source_bytes)?;
         backend.ensure_current(generation, &tag)?;
         let _packing = phase(crate::performance::Stage::PreviewPacking, &tag);
-        let packed = onecad_render::PreparedScene::new_retained(&scene, budget, retention)
-            .map_err(|error| error.to_string())?;
+        let retention = onecad_render::PreparationRetention {
+            source: Some(guards.0.clone()),
+            preparation: Some(guards.1.clone()),
+        };
+        let mut allocate = |bytes: u64| {
+            let count = usize::try_from(bytes)
+                .map_err(|_| onecad_render::RenderError::Budget("preparation size"))?;
+            let guard = guards
+                .1
+                .carve_shared(count, crate::budget::Kind::PreparedGeometry)
+                .map_err(|_| onecad_render::RenderError::Budget("preparation allocation"))?;
+            Ok(guard as Arc<dyn Send + Sync>)
+        };
+        let packed = onecad_render::PreparedScene::new_cached_allocated(
+            &scene,
+            budget,
+            &mut Default::default(),
+            retention,
+            &mut allocate,
+        )
+        .map_err(|error| error.to_string())?;
+        guards.1.shrink_to(
+            usize::try_from(packed.metadata_bytes()).map_err(|_| "preparation size overflow")?,
+        )?;
         backend.ensure_current(generation, &tag)?;
         Ok((meshes, packed, Arc::new(scene)))
     })
@@ -279,12 +320,14 @@ fn preview_scene(
     generation: u64,
     tag: &onecad_interaction::RequestTag,
     meshes: &[onecad_app::dto::PreviewBodyDto],
+    source: &Arc<crate::budget::Lease>,
 ) -> Result<SceneSnapshot, String> {
     let _span = phase(crate::performance::Stage::PreviewScene, tag);
     if meshes.len() > crate::budget::MAX_BODIES {
         return Err("Native preview body count budget exceeded".into());
     }
     let mut bytes = 0;
+    let mut geometry_bytes = 0;
     for body in meshes {
         backend.ensure_current(generation, tag)?;
         crate::budget::charge(
@@ -292,6 +335,14 @@ fn preview_scene(
             body.mesh.len(),
             crate::budget::MAX_SOURCE_BYTES,
             "preview mesh",
+        )?;
+        let estimate = SceneBody::preflight_geometry_bytes(&body.mesh, MeshLimits::default())
+            .map_err(|error| error.to_string())?;
+        crate::budget::charge(
+            &mut geometry_bytes,
+            estimate,
+            crate::budget::MAX_PREVIEW_SCENE_BYTES,
+            "preview checked geometry",
         )?;
     }
     let bodies = meshes
@@ -302,13 +353,21 @@ fn preview_scene(
                 .body_id
                 .parse()
                 .map_err(|error| format!("preview body id: {error}"))?;
-            SceneBody::new(
+            let mut geometry = SceneBody::new(
                 id,
                 tag.sequence,
-                Arc::from(body.mesh.clone()),
+                Arc::from(body.mesh.as_slice()),
                 MeshLimits::default(),
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            let bytes = geometry
+                .geometry_bytes()
+                .map_err(|error| error.to_string())?;
+            let guard = source.carve_shared(bytes, crate::budget::Kind::PreviewGeometry)?;
+            geometry
+                .retain_geometry(guard)
+                .map_err(|error| error.to_string())?;
+            Ok(geometry)
         })
         .collect::<Result<Vec<_>, String>>()?;
     backend.ensure_current(generation, tag)?;

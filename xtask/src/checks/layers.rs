@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 pub(super) const LAYERS: &[(&str, &[&str])] = &[
-    ("onecad-core", &[]),
+    ("onecad-core", &["onecad-assembly"]),
     ("onecad-extension-api", &[]),
     ("onecad-extension-sdk", &["onecad-extension-api"]),
     ("onecad-addon-bambu-studio", &["onecad-extension-sdk"]),
@@ -23,6 +23,7 @@ pub(super) const LAYERS: &[(&str, &[&str])] = &[
         "onecad-app",
         &[
             "onecad-core",
+            "onecad-assembly",
             "onecad-protocol",
             "onecad-library",
             "onecad-embedded-worker",
@@ -40,6 +41,7 @@ pub(super) const LAYERS: &[(&str, &[&str])] = &[
     (
         "onecad-ui",
         &[
+            "onecad-assembly",
             "onecad-app",
             "onecad-scene",
             "onecad-interaction",

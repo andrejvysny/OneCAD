@@ -22,6 +22,7 @@ required-features = ["desktop"]
 
 [dependencies]
 onecad-app = { workspace = true }
+onecad-assembly = { path = "../onecad-assembly" }
 onecad-interaction = { workspace = true }
 onecad-core = { workspace = true }
 # Parameter roles and the ISO 4762 table are library types the catalog DTOs expose;

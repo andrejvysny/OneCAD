@@ -331,3 +331,6 @@ mod sketch_finish_delivery_tests;
 
 #[path = "model_handle/delivery_tests.rs"]
 mod model_handle_delivery_tests;
+
+#[path = "assembly_delivery_tests.rs"]
+mod assembly_delivery_tests;

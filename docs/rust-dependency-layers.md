@@ -13,14 +13,17 @@ member. There are no exceptions for external local comparison renderers; the
 SolidCraft comparison vendor is retired.
 Dependency aliases are checked by actual package name.
 
-Core, protocol and library remain independent foundations. Application
+Assembly math/model types are a pure foundation with no local dependencies.
+Core consumes those checked types for authoritative component/occurrence
+serialization; it must not depend on application services or platform code.
+Protocol and library remain independent foundations. Application
 orchestration consumes those foundations. Scene consumes core and protocol;
 interaction consumes public app contracts, scene and core; render consumes
 scene, protocol and core. Render may use the wgpu family but cannot import a UI
 toolkit. Its development dependencies may also use the exact `naga` package to
 validate WGSL without creating a GPU device; normal and build dependencies may
 not use this exception. Scene, interaction and app cannot import GPU or UI toolkit families.
-The native UI composes these layers. The iPadOS bridge `onecad-ios` is the
+The native UI composes these layers and uses the pure assembly types for joint controls. The iPadOS bridge `onecad-ios` is the
 second host: it drives the native UI's egui editor without eframe, owns the
 UIKit/Metal surface boundary and may use toolkit and GPU families. Nothing
 depends on it. `onecad-embedded-worker` only declares and links the in-process

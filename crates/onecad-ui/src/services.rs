@@ -69,6 +69,10 @@ pub async fn execute(
             crate::component_wizard::execute(backend, request, permit, sender).await;
             return;
         }
+        Command::Assembly(request) => {
+            crate::assembly_controls::execute(backend, request, permit, sender).await;
+            return;
+        }
         Command::Instance(request) => {
             crate::component_instances::execute(backend, request, permit, sender).await;
             return;
@@ -194,7 +198,7 @@ async fn prepare(
     );
     let retention = onecad_render::PreparationRetention {
         source: Some(source.lease),
-        preparation: Some(preparation),
+        preparation: Some(preparation.clone()),
     };
     let scene = source.scene;
     let budget = backend
@@ -202,9 +206,22 @@ async fn prepare(
         .preparation_budget()?
         .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
     let mut cache = backend.shared.take_preparation_cache();
+    let pool = preparation.clone();
     let (prepared, cache) = tokio::task::spawn_blocking(move || {
-        let prepared = onecad_render::PreparedScene::new_cached_retained(
-            &scene, budget, &mut cache, retention,
+        let mut allocate = |bytes: u64| {
+            let count = usize::try_from(bytes)
+                .map_err(|_| onecad_render::RenderError::Budget("preparation size"))?;
+            let guard = pool
+                .carve_shared(count, crate::budget::Kind::PreparedGeometry)
+                .map_err(|_| onecad_render::RenderError::Budget("preparation allocation"))?;
+            Ok(guard as Arc<dyn Send + Sync>)
+        };
+        let prepared = onecad_render::PreparedScene::new_cached_allocated(
+            &scene,
+            budget,
+            &mut cache,
+            retention,
+            &mut allocate,
         )
         .map_err(|e| e.to_string());
         (prepared, cache)
@@ -212,6 +229,7 @@ async fn prepare(
     .await
     .map_err(|error| format!("scene preparation stopped: {error}"))?;
     let cache_bytes = (cache.source_bytes(), cache.cpu_bytes());
+    let cache_metadata = cache.metadata_bytes();
     backend.shared.restore_preparation_cache(cache);
     let prepared = prepared?;
     if prepared.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES
@@ -220,6 +238,10 @@ async fn prepare(
     {
         return Err("Native CPU preparation budget exceeded".into());
     }
+    preparation.shrink_to(
+        usize::try_from(prepared.metadata_bytes().saturating_add(cache_metadata))
+            .map_err(|_| "preparation size overflow")?,
+    )?;
     Ok(prepared)
 }
 
@@ -258,6 +280,7 @@ async fn execute_command(
         Command::Items(_) => return Err("item command reached model dispatcher".into()),
         Command::Library(_) => return Err("library command reached model dispatcher".into()),
         Command::Instance(_) => return Err("instance command reached model dispatcher".into()),
+        Command::Assembly(_) => return Err("assembly command reached model dispatcher".into()),
         Command::Author(_) => return Err("author command reached model dispatcher".into()),
         Command::Sketch(_) => return Err("sketch command reached model dispatcher".into()),
         Command::Operands(_) => return Err("operand command reached model dispatcher".into()),
@@ -347,7 +370,7 @@ pub(crate) async fn open_requested_startup(
     if !paths.open_on_start {
         return Ok(false);
     }
-    api::open_document(
+    api::open_assembly_document(
         state,
         host,
         paths.document.to_string_lossy().into_owned(),

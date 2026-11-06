@@ -117,7 +117,7 @@ fn seeded_host(data: &std::path::Path) -> Option<HostContext> {
         eprintln!("ONECAD_LIBRARY_ROOT is set; skipping the seeded service test");
         return None;
     }
-    onecad_app::library::seed_and_reindex_at(&root);
+    onecad_app::library::seed_and_reindex_at(&root).unwrap();
     Some(host)
 }
 

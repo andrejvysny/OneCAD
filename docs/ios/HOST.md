@@ -163,11 +163,12 @@ tickets without releasing memory still owned by an executing job. A refusal does
 not retry an accepted CAD operation. A degraded ledger refuses new admission
 while known allocations can still retire.
 
-Display/preview admission remains atomic at 160/192 MiB, then splits into source
-portions of 96/128 MiB and preparation portions of 64 MiB. Source geometry,
-preparation/cache metadata and uploaded CPU highlight metadata retain the portions
-that cover their allocations; shared geometry keeps its original guards. Uploaded
-mesh bodies retain source guards without retaining the CPU preparation arrays.
+Display/preview admission starts with an atomic 160/192 MiB work bound, split into
+source and preparation pools. Each new checked geometry and prepared geometry
+receives its own allocation-sized portion; frame and cache metadata retain only
+their measured remainder. Unused work admission is released after preparation.
+Shared geometry keeps its original portion through scene, cache and GPU ownership.
+Uploaded mesh bodies retain source geometry without retaining CPU preparation arrays.
 The reservation snapshot counts unique portions once, including retired work
 that still owns them; it does not equate reserved bytes with RSS. These CPU
 reservations are separate from the table's renderer/parked-cache allowance. The

@@ -239,6 +239,22 @@ pub(crate) fn pick_with_tolerance(
                 capture: view.identity(),
             }))
         });
+    if profile.is_none() {
+        if let Some(hit) = body.as_ref().filter(|hit| hit.occurrence_path.is_some()) {
+            if staging(app) || crate::loft_ui::picking(app) {
+                app.doc.status =
+                    "Component topology cannot be used as a root modeling operand".into();
+            } else if mode != SelectionMode::Replace {
+                app.doc.status = "Occurrence multi-selection is not available".into();
+            } else {
+                crate::viewport_selection::select_occurrence(app, hit);
+            }
+            return;
+        }
+        crate::viewport_selection::clear_occurrence(app);
+    } else {
+        crate::viewport_selection::clear_occurrence(app);
+    }
     let is_profile = profile.is_some();
     let item = profile.or_else(|| {
         body.as_ref().map(|hit| {

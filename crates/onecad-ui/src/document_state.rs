@@ -94,6 +94,15 @@ impl crate::app::App {
         if let Some((serial, state)) = latest
             && serial != self.doc.document_state_serial
         {
+            if self
+                .doc
+                .document_state
+                .as_ref()
+                .map(|old| old.runtime_session.as_str())
+                != (!state.runtime_session.is_empty()).then_some(state.runtime_session.as_str())
+            {
+                crate::assembly_controls::reset_session(self);
+            }
             self.doc.document_state_serial = serial;
             self.doc
                 .diagnostics

@@ -517,6 +517,9 @@ pub(crate) fn history_available(app: &App, redo: bool) -> bool {
                     })
             });
     }
+    if !redo && crate::assembly_controls::recovery_undo_available(app) {
+        return true;
+    }
     app.viewport_ready()
         && app.doc.bridge.valid()
         && !crate::viewport_selection::sectioned(app)

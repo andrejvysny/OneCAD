@@ -23,6 +23,7 @@ use onecad_interaction::{operand_binding::*, *};
 
 fn reference(body: BodyId, kind: ElementKind, id: &str) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             kind,

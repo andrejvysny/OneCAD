@@ -138,10 +138,10 @@ fn blank_document(root: &Path) -> PathBuf {
     path
 }
 
-async fn opened(root: &Path, path: &Path) -> Host {
+async fn opened(root: &Path, path: &Path) -> Box<Host> {
     // Nested builders retain large native host states; heap ownership keeps
     // debug-mode context construction within the normal test-thread stack.
-    let mut host = Box::pin(Host::new(root)).await;
+    let mut host = Box::new(Box::pin(Host::new(root)).await);
     host.app.sketch_dispatch(SketchAction::Discard);
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
         !app.sketch_active()
@@ -170,7 +170,7 @@ async fn opened(root: &Path, path: &Path) -> Host {
     host
 }
 
-async fn solid(root: &Path, path: &Path, cylinder: bool) -> Host {
+async fn solid(root: &Path, path: &Path, cylinder: bool) -> Box<Host> {
     let mut host = Box::pin(opened(root, path)).await;
     host.app.new_sketch();
     pump_until(&mut host.app, &host.context, &mut host.frame, active).await;

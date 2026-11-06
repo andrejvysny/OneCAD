@@ -304,6 +304,7 @@ impl Catalog {
         let sequence = self.issue(Lane::Prepare);
         self.outbox.push(Request::Prepare {
             sequence,
+            generation: None,
             request: Box::new(request),
         });
         sequence

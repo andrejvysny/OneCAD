@@ -395,7 +395,11 @@ impl App {
                 "Finish sketch before using model history; sketch undo is not implemented".into();
             return;
         }
-        if matches!(command, Command::Undo | Command::Redo) && !self.doc.bridge.valid() {
+        if matches!(command, Command::Undo | Command::Redo)
+            && !self.doc.bridge.valid()
+            && !(matches!(command, Command::Undo)
+                && crate::assembly_controls::recovery_undo_available(self))
+        {
             self.doc.status = "Geometry unavailable; history controls are disabled".into();
             return;
         }
@@ -509,6 +513,7 @@ impl App {
     }
 
     pub fn adopt_display(&mut self, display: Arc<Display>) {
+        self.doc.assembly_controls.recovery_session = None;
         self.doc
             .bridge
             .shared
@@ -539,6 +544,7 @@ impl App {
         ));
         self.sync_sketch_gesture();
         if changed {
+            crate::assembly_controls::reset_session(self);
             crate::document_items::reset(self);
             self.doc.selection.clear();
             self.doc.topology.invalidate_pending();
@@ -594,6 +600,12 @@ impl App {
             Message::Author {
                 sequence, result, ..
             } => crate::component_wizard::receive(self, sequence, result),
+            Message::Assembly {
+                sequence,
+                session,
+                result,
+                ..
+            } => crate::assembly_controls::receive(self, sequence, &session, result),
             Message::Instance {
                 sequence, result, ..
             } => crate::component_instances::receive(self, sequence, result),
@@ -827,11 +839,17 @@ impl App {
                 }
                 self.draw_dirty = true;
             }
+            Err(error) if self.renderer.scene_identity() == Some(identity) => {
+                self.doc.status = format!("Document display: {error}");
+                self.doc.awaiting_scene = false;
+                self.draw_dirty = true;
+            }
             Err(error) => self.display_unavailable(error),
         }
     }
     pub fn busy(&self) -> bool {
-        self.doc.items.blocks()
+        self.doc.assembly_controls.pending
+            || self.doc.items.blocks()
             || self.doc.instances.blocks()
             || crate::component_wizard::blocks(self)
             || crate::placement_gesture::arming(self)

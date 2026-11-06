@@ -450,7 +450,38 @@ and solver DTO has a 1 MiB streamed serialized-size cap. There are at most 256 b
 sketches and 512 feature rows. These limits do not establish a total process RAM
 bound: application state, incoming DTO/record and protocol reply allocation before host validation,
 GPU-driver storage and toolkit resources have separate lifetimes and limits.
+The host admits a conservative work peak before capture, then retains individual
+size-derived source and prepared-geometry portions plus frame metadata. Shared
+geometry holds its own portion until its final scene, cache or GPU owner releases it.
+Before an embedded definition is cloned for replay, its borrowed authored fields
+are streamed through a 1 MiB serialized-size and 32-level nesting limit. The host
+admits four times the resulting conservative clone estimate, accounting for
+overlapping replay and verification copies. Oversized definitions remain in the
+document but their replay is refused; this is not a total model-memory limit.
 Oversized or malformed payloads fail closed and disable stale picking/commit.
+
+Production `PreviewOp` and `PreviewPlan` requests admit at most 256 KiB of
+response JSON and 32 MiB of inline MESH1 data. The transport reads the header
+and JSON routing envelope before reserving the binary tail. A local admission
+failure closes the connection and fences pending requests; it does not alter
+OCW1's global 16 MiB JSON / 1 GiB binary limits. Preview arrays admit at most
+256 body/mesh entries and 512 plan steps. Repeated binary-section references
+fail before payload copying. Owned terminal JSON trees have a conservative
+512 KiB pre-clone estimate with depth capped at 32; compact nested diagnostics
+cannot bypass it. Streamed steps must be a unique ordered prefix of the requested
+steps. Each bounded request admits at most 512 KiB of progress/event metadata.
+A separate process-wide 4 MiB bounded-preview event pool retains size-derived charges
+through the broadcast ring and every receiver; immutable shared handles avoid
+per-receiver JSON clones. Completed requests do not release retained event
+storage early. Exhaustion closes the transport rather than growing the backlog.
+The raw routing-envelope stage retains OCW1's 16 MiB bound; the local 256 KiB
+check applies before parsing the owned response DTO, not before reading raw JSON.
+The host checks the aggregate checked-geometry/BVH estimate before copying
+preview meshes into scene storage. The response DTO, transient transport storage,
+and checked scene share the existing 128 MiB preview-source work reservation;
+prepared CPU storage retains its separate 64 MiB reservation. The bounded-preview event
+pool has its own fixed cap and is not claimed as part of that per-preview lease.
+These are bounded admission policies, not a claim about total process or driver memory.
 
 ## Editor chrome
 

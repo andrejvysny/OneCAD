@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn retained_draft_shrinks_without_releasing_other_owners() {
+    let budget = Arc::new(HostBudget::default());
+    let other = budget.reserve_kind(100, Kind::LibraryDraft).unwrap();
+    let draft = budget.reserve_kind(200, Kind::LibraryDraft).unwrap();
+    draft.shrink_to(40).unwrap();
+    assert_eq!(budget.snapshot().used, 140);
+    assert!(draft.shrink_to(41).is_err());
+    assert_eq!(budget.snapshot().used, 140);
+    drop(draft);
+    assert_eq!(budget.snapshot().used, 100);
+    drop(other);
+    assert_eq!(budget.snapshot().used, 0);
+}
+
+#[test]
+fn shared_pool_carves_independent_geometry_and_metadata_lifetimes() {
+    let budget = Arc::new(HostBudget::default());
+    let pool = Arc::new(budget.reserve_kind(1000, Kind::Preparation).unwrap());
+    let first = pool.carve_shared(200, Kind::PreparedGeometry).unwrap();
+    let second = pool.carve_shared(300, Kind::PreparedGeometry).unwrap();
+    let cache_metadata = pool.clone();
+    pool.shrink_to(50).unwrap();
+    assert_eq!(budget.snapshot().used, 550);
+    drop(first);
+    assert_eq!(budget.snapshot().used, 350);
+    drop(pool);
+    assert_eq!(budget.snapshot().used, 350);
+    drop(second);
+    assert_eq!(budget.snapshot().used, 50);
+    drop(cache_metadata);
+    assert_eq!(budget.snapshot().used, 0);
+}
+
+#[test]
 fn capacity_advice_respects_mobile_headroom_without_allocating_or_retiring_live_work() {
     let authority = BudgetAuthority::new(onecad_render::RenderProfile::Mobile);
     let parked = authority.owner().unwrap();
@@ -121,4 +155,34 @@ fn nema_checked_scene_fits_display_reservation_with_bvh_storage() {
         scene.resident_bytes() + MAX_PREPARED_BYTES as usize + MAX_PROFILE_BYTES + DISPLAY_METADATA
             <= DISPLAY_RESERVATION
     );
+}
+
+#[test]
+fn archive_admission_tracks_each_owner_until_last_guard_and_survives_close() {
+    use onecad_app::resource_admission::{ArchiveAdmission, ArchiveUse};
+    let authority = BudgetAuthority::new(onecad_render::RenderProfile::Desktop);
+    let first = authority.owner().unwrap();
+    let second = authority.owner().unwrap();
+    let a = ArchiveBudgetAdapter(first.clone());
+    let b = ArchiveBudgetAdapter(second.clone());
+    let draft = a.reserve(100, ArchiveUse::Retained).unwrap();
+    let payload = draft.clone();
+    let other = b.reserve(200, ArchiveUse::Retained).unwrap();
+    let scratch = b.reserve(50, ArchiveUse::Scratch).unwrap();
+    first.close();
+    drop(draft);
+    let snapshot = authority.snapshot();
+    assert_eq!(snapshot.used, 350);
+    assert_eq!(
+        snapshot.owners[&first.owner_id()].kinds[&Kind::LibraryArchive],
+        100
+    );
+    assert_eq!(
+        snapshot.owners[&second.owner_id()].kinds[&Kind::LibraryArchiveScratch],
+        50
+    );
+    drop(payload);
+    assert_eq!(authority.snapshot().used, 250);
+    drop((scratch, other));
+    assert_eq!(authority.snapshot().used, 0);
 }

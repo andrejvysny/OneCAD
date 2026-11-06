@@ -22,7 +22,7 @@ const AUTHORED: &str = "6 * 2";
 /// A published Extrude body under a fresh Move/Rotate session; returns the
 /// screen position of the gizmo ball.
 async fn moving(root: &std::path::Path) -> (Host, egui::Pos2) {
-    let (mut host, _) = extruding(root, AUTHORED, 12.0).await;
+    let (mut host, _) = Box::pin(extruding(root, AUTHORED, 12.0)).await;
     confirm(&mut host).await;
     host.redraw();
     let body: BodyId = host

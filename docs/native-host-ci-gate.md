@@ -14,12 +14,12 @@ ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
   cargo xtask native-host-gate /private/tmp/onecad-native-host-gate
 ```
 
-The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It runs two
+The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It runs three
 explicitly filtered selections, each with its own exact inventory declared in
 `xtask/src/evidence/host_names.rs`, which is the authoritative list.
 
-The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has fifty-five cases
-covering occluded delivery (one),
+The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has 141 cases,
+including occluded delivery (one),
 document lifecycle (three), overlays (one), diagnostics (three), existing
 dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
 routing (one), invalid-profile Finish closing the sketch and reporting the
@@ -34,6 +34,9 @@ Slot full-width creation and construction/history (one), clockwise/counterclockw
 tangent Arc H/V snapping with endpoint roles (one), and tangent chain keyboard,
 drag, existing-endpoint seeding, cancellation and numeric Radius (one), and
 exactly-once drag release with accepted chain closure/profile publication (one).
+Three separate tangent-chain cases retain batched release, single-frame release,
+and canceled-drag ownership coverage. Their fixtures run independently so the
+previous Host does not remain in a larger test future during Metal setup.
 Nine batched-input regression cases cover ordered modifier delivery,
 pointer/camera cancellation and ordinary split-frame clicks.
 Further cases cover initially unselected sketch/history row selection,
@@ -46,16 +49,25 @@ Ctrl+Tab cycling, unpreparable-switch fallback, and the new-tab Home and close
 prompt.
 
 The service selection (`document_services::tests::home_lifecycle_tests::` and
-`bridge::tests::`, `SERVICE_TESTS`) has four cases: three no-document Home
+`bridge::tests::` and the two explicit native assembly document tests,
+`SERVICE_TESTS`) has six cases: three no-document Home
 lifecycle cases and the production bridge actor no-document start and explicit
-New capture. These cases emit no adapter record, so Metal provenance for the run
+New capture, plus assembly capture/save/reopen and native assembly controls.
+These cases emit no required adapter record, so Metal provenance for the run
 comes from the lifecycle selection.
 
-The gate first verifies both Cargo test inventories, then executes each
+The backend selection (`onecad-app --lib --ignored`, `BACKEND_TESTS`) has five
+production-worker cases: shared-definition replay and origin revalidation,
+10-definition/20-occurrence replay, replacement ownership during close, fenced
+STEP export cancellation, and canceled joint publication. All ignored app-library
+tests belong to this exact inventory; adding one requires an explicit update.
+These service tests establish no renderer or physical-input qualification.
+
+The gate first verifies all three Cargo test inventories, then executes each
 selection serially with `--ignored --nocapture --test-threads=1`. Every expected
 test must execute exactly once and pass. Missing, duplicate, unexpected, skipped,
 and zero-test executions fail the gate. New ignored host tests require an
-explicit inventory update. Other ignored `onecad-ui` tests outside both filters
+explicit inventory update. Other ignored `onecad-ui` tests outside its filters
 are not gate members. The required lifecycle Metal evidence count follows the
 lifecycle inventory size; repeated application setup within one test may emit
 additional adapter records.
@@ -68,6 +80,8 @@ Evidence contains source revision and dirty status, Rust and Cargo versions,
 macOS version, worker SHA-256 and compatibility manifest, pinned OCCT metadata,
 worker build/selftest logs, adapter identity, exact commands, test inventory,
 positive results, and negative prerequisite results. `acceptance.json` is written
+with separate lifecycle, service and backend test counts. The backend inventory
+and execution logs are required CI artifacts. Acceptance is written
 only after all checks pass. CI checks required files are nonempty and uploads the
 directory with `if-no-files-found: error`, retaining evidence for 14 days. A local
 run does not establish that GitHub accepted an artifact upload.

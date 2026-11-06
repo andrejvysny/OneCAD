@@ -201,6 +201,7 @@ pub fn anchor(world: Vec3) -> AnchorIntent {
 
 pub fn fillet_record(edge: &ElementId, world: Vec3) -> OperationRecord {
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body(),
             element: edge.clone(),

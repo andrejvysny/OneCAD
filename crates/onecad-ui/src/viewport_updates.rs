@@ -152,6 +152,21 @@ fn sectioned(section: [f32; 4]) -> bool {
 
 /// Called only after CAD completion and the host sampling fence have drained.
 pub(crate) fn apply(app: &mut App, display: &Display) -> Result<bool, String> {
+    if display
+        .scene
+        .bodies()
+        .iter()
+        .any(|body| body.occurrence_path().is_some())
+    {
+        let mut options = app
+            .pending_display_options
+            .unwrap_or(*app.renderer.options());
+        if sectioned(options.section) || sectioned(app.renderer.options().section) {
+            options.section = [0.0; 4];
+            app.pending_display_options = Some(options);
+            app.doc.status = "Section views are unavailable for occurrences".into();
+        }
+    }
     if app.renderer.scene_identity() != Some(display.scene.identity())
         && app
             .pending_display_options

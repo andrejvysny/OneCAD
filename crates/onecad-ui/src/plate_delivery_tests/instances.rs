@@ -297,11 +297,9 @@ async fn instances_list_edit_reset_detach_and_upgrade_each_in_one_undo_step() {
         std::fs::read_to_string(library.join("onecad.std.iso4762").join("component.toml")).unwrap();
     let next = library.join("onecad.std.iso4762-1.1.0");
     std::fs::create_dir_all(&next).unwrap();
-    std::fs::write(
-        next.join("component.toml"),
-        manifest.replace("version = \"1.0.0\"", "version = \"1.1.0\""),
-    )
-    .unwrap();
+    let mut package = onecad_library::package::parse(&manifest, &next).unwrap();
+    package.identity.version = "1.1.0".into();
+    onecad_library::package::write_package(&next, &package).unwrap();
     host.app.ui.library.catalog.reindex();
     crate::library_catalog::flush(&mut host.app);
     listed(&mut host, "the upgrade badges", |v| {
@@ -329,12 +327,12 @@ async fn instances_list_edit_reset_detach_and_upgrade_each_in_one_undo_step() {
         review
             .items
             .iter()
-            .all(|i| i.from_version == "1.0.0" && i.to_version == "1.1.0")
+            .all(|i| i.from_version == "1.0.1" && i.to_version == "1.1.0")
     );
     let approved = review.approved_all();
     let page = painted_with(&mut host, "Review component updates").await;
     assert!(
-        page.contains("Review component updates") && page.contains("1.0.0 → 1.1.0"),
+        page.contains("Review component updates") && page.contains("1.0.1 → 1.1.0"),
         "{page}"
     );
     let before = revision(&host.app);
@@ -356,7 +354,7 @@ async fn instances_list_edit_reset_detach_and_upgrade_each_in_one_undo_step() {
     listed(&mut host, "the upgrade undone", |v| {
         v.iter()
             .filter(|i| i.dto.linked)
-            .all(|i| i.dto.component_version == "1.0.0")
+            .all(|i| i.dto.component_version == "1.0.1")
     })
     .await;
     frame(&mut host, vec![], egui::Modifiers::NONE);

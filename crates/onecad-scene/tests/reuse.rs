@@ -12,11 +12,42 @@ fn fixture_body() -> SceneBody {
 }
 
 #[test]
+fn retained_geometry_keeps_admission_with_shared_bytes() {
+    let mut body = fixture_body();
+    let guard = Arc::new(());
+    let weak = Arc::downgrade(&guard);
+    body.retain_geometry(guard.clone()).unwrap();
+    let geometry = body.retained_geometry();
+    drop(guard);
+    drop(body);
+    assert!(weak.upgrade().is_some());
+    assert!(!geometry.is_empty());
+    drop(geometry);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn handoff_preflight_counts_geometry_and_rejects_mesh_limit_before_copy() {
+    let body = fixture_body();
+    let bytes = body.bytes();
+    let estimate = SceneBody::preflight_geometry_bytes(bytes, MeshLimits::default()).unwrap();
+    assert!(estimate >= body.geometry_bytes().unwrap());
+    assert!(SceneBody::preflight_geometry_bytes(
+        bytes,
+        MeshLimits {
+            max_triangles: 0,
+            ..Default::default()
+        }
+    )
+    .is_err());
+}
+
+#[test]
 fn fresh_publication_reuses_checked_content_and_indices_with_new_revision() {
     let old = SceneSnapshot::new(identity(), vec![fixture_body()], SceneLimits::default()).unwrap();
     let previous = &old.bodies()[0];
     let incoming: Arc<[u8]> = Arc::from(previous.bytes().to_vec());
-    assert!(!Arc::ptr_eq(&incoming, previous.bytes()));
+    assert!(!std::ptr::eq(incoming.as_ref(), previous.bytes()));
     assert!(previous.same_content(&incoming));
     let reused = SceneBody::new_reusing(
         previous.body_id(),
@@ -27,7 +58,9 @@ fn fresh_publication_reuses_checked_content_and_indices_with_new_revision() {
     )
     .unwrap();
     assert!(previous.shares_geometry(&reused));
-    assert!(Arc::ptr_eq(previous.bytes(), reused.bytes()));
+    assert!(previous
+        .retained_geometry()
+        .shares_source(&reused.retained_geometry()));
     assert!(std::ptr::eq(
         previous.mesh().unwrap().header(),
         reused.mesh().unwrap().header()
@@ -59,7 +92,7 @@ fn reuse_obeys_current_mesh_and_scene_limits() {
     let result = SceneBody::new_reusing(
         previous.body_id(),
         4,
-        previous.bytes().clone(),
+        Arc::from(previous.bytes()),
         MeshLimits {
             max_triangles: 0,
             ..MeshLimits::default()

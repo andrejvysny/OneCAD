@@ -1,3 +1,11 @@
+pub(super) const BACKEND_TESTS: &[&str] = &[
+    "api::component_execution::tests::real_worker_replays_shared_definition_and_fresh_reopen",
+    "api::component_execution::tests::real_worker_ten_definitions_twenty_occurrences_reopen_and_replay",
+    "api::replacement::tests::real_worker_blocked_close_preserves_replacement_owner",
+    "assembly_export::barrier_tests::stale_and_canceled_exports_preserve_target_and_drain_worker",
+    "joint_execution::tests::cancelled_before_publication_cannot_commit",
+];
+
 pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::extension_refresh_delivery_tests::catalog_refresh_keeps_immediate_modeling_input_available",
     "app_logic_tests::extension_refresh_delivery_tests::management_waits_for_refresh_then_keeps_document_serialization",
@@ -19,6 +27,9 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::arc_slot_delivery_tests::tangent_arc_clockwise_counterclockwise_native_hv_snap_roles",
     "app_logic_tests::arc_slot_delivery_tests::tangent_chain_keyboard_drag_seed_cancel_and_numeric_radius",
     "app_logic_tests::arc_slot_delivery_tests::tangent_chain_drag_release_once_and_accepted_closure_profile",
+    "app_logic_tests::arc_slot_delivery_tests::tangent_chain_batched_drag_release",
+    "app_logic_tests::arc_slot_delivery_tests::tangent_chain_single_frame_drag_release",
+    "app_logic_tests::arc_slot_delivery_tests::tangent_chain_cancelled_drag_ownership",
     "app_logic_tests::profile_delivery_tests::finish_with_invalid_profile_closes_sketch_and_reports_overlap",
     "app_logic_tests::selection_delivery_tests::marquee_survives_redraw_and_cancels_when_camera_changes",
     "app_logic_tests::point_center_delivery_tests::point_tab_before_pointer_signed_zero_and_repeated_construction_clicks",
@@ -134,10 +145,15 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::plate_delivery_tests::placement::control_second_feature_commit_budget",
     "app_logic_tests::plate_delivery_tests::wizard::create_component_saves_a_parametric_package_refuses_a_duplicate_and_saves_static",
     "app_logic_tests::viewport_navigation_tests::orbit_skips_hover_picks_retains_selected_targets_and_refreshes_after_release",
+    "app_logic_tests::assembly_delivery_tests::replacement_fences_queued_assembly_success_failure_and_prior_report",
+    "app_logic_tests::display_budget_delivery_tests::capture_pressure_tests::denied_prepare_preserves_viewport_and_retries_after_release",
+    "app_logic_tests::display_budget_delivery_tests::capture_pressure_tests::ten_definitions_twenty_occurrences_reach_metal_and_release",
 ];
-/// Ignored service and bridge cases outside `app_logic_tests`; they do not
-/// emit adapter evidence, so the gate runs them as a separate exact selection.
+/// Ignored service and bridge cases outside `app_logic_tests` run as a separate
+/// exact selection. GPU-dependent cases enforce their adapter prerequisite internally.
 pub(super) const SERVICE_TESTS: &[&str] = &[
+    "document_services::tests::document_io_tests::native_assembly_controls_author_solve_undo_save_reopen",
+    "document_services::tests::document_io_tests::native_assembly_capture_save_close_reopen_keeps_occurrences",
     "document_services::tests::home_lifecycle_tests::startup_and_cancelled_failed_file_actions_leave_no_document",
     "document_services::tests::home_lifecycle_tests::explicit_new_establishes_one_empty_unsaved_session_and_failure_preserves_it",
     "document_services::tests::home_lifecycle_tests::discarding_last_recovery_offer_without_startup_path_leaves_home_empty",

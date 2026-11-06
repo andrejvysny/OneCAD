@@ -51,6 +51,7 @@ fn view(id: &str, status: ComponentStatusDto) -> InstanceView {
 
 fn item(id: &str, applicable: bool) -> UpgradeItemDto {
     UpgradeItemDto {
+        runtime_session: String::new(),
         record_id: id.into(),
         from_version: "1.0.0".into(),
         to_version: "1.1.0".into(),
@@ -457,4 +458,16 @@ fn edits_wait_for_the_listing_of_the_current_revision() {
         !state.settled(2),
         "a newer revision has not been listed yet"
     );
+}
+
+#[test]
+fn saved_offline_definition_enables_the_native_parameter_editor() {
+    let status = ComponentStatusDto::ArchivedSnapshot {
+        catalog: Box::new(ComponentStatusDto::DefinitionMissing),
+    };
+    let instance = view("offline", status);
+    assert!(model::editable(&instance.dto));
+    let draft = model::draft_for(&instance).expect("parameter editor enabled");
+    assert_eq!(draft.text("length"), "30");
+    assert!(model::status_text(&instance.dto).contains("external library is unavailable"));
 }

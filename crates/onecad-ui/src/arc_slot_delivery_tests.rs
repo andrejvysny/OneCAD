@@ -294,17 +294,34 @@ async fn tangent_chain_drag_release_once_and_accepted_closure_profile() {
         if *point1 == arc && *point2 == first_id)).count(), 1);
     assert_eq!(host.app.doc.display.as_ref().unwrap().profiles.len(), 1);
     host.stop().await;
-    // Nested fixture futures otherwise exhaust the debug test stack during shader validation.
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn tangent_chain_batched_drag_release() {
+    let area = tempfile::tempdir().unwrap();
     Box::pin(batched_drag_release(
         &area.path().join("batched-release"),
         false,
     ))
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn tangent_chain_single_frame_drag_release() {
+    let area = tempfile::tempdir().unwrap();
     Box::pin(batched_drag_release(
         &area.path().join("single-frame"),
         true,
     ))
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn tangent_chain_cancelled_drag_ownership() {
+    let area = tempfile::tempdir().unwrap();
     Box::pin(cancelled_drag_ownership(
         &area.path().join("cancel-ownership"),
     ))

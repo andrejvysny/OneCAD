@@ -45,6 +45,49 @@ fn retention() -> (PreparationRetention, Weak<()>, Weak<()>) {
 }
 
 #[test]
+fn allocated_geometry_guards_follow_only_their_own_cache_entries() {
+    let first = scene();
+    let second = scene();
+    let combined = SceneSnapshot::new(
+        first.identity(),
+        vec![first.bodies()[0].clone(), second.bodies()[0].clone()],
+        Default::default(),
+    )
+    .unwrap();
+    let mut cache = PreparationCache::default();
+    let mut guards = Vec::new();
+    let mut allocate = |_: u64| {
+        let guard = Arc::new(());
+        guards.push(Arc::downgrade(&guard));
+        Ok(guard as Arc<dyn Send + Sync>)
+    };
+    let prepared = PreparedScene::new_cached_allocated(
+        &combined,
+        budget(),
+        &mut cache,
+        PreparationRetention::default(),
+        &mut allocate,
+    )
+    .unwrap();
+    let replacement = PreparedScene::new_cached_allocated(
+        &first,
+        budget(),
+        &mut cache,
+        PreparationRetention::default(),
+        &mut allocate,
+    )
+    .unwrap();
+    drop(allocate);
+    assert_eq!(guards.len(), 2);
+    drop(prepared);
+    assert!(guards[0].upgrade().is_some());
+    assert!(guards[1].upgrade().is_none());
+    drop(replacement);
+    drop(cache);
+    assert!(guards[0].upgrade().is_none());
+}
+
+#[test]
 fn reused_geometry_keeps_original_guards_after_cache_replacement() {
     let scene = scene();
     let mut cache = PreparationCache::default();

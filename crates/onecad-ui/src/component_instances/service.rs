@@ -41,6 +41,7 @@ async fn run(backend: &mut Backend, request: Request) -> Result<Reply, String> {
     match request.op {
         Op::List => list(&host, &backend.state).await,
         Op::Plan { record_ids } => {
+            backend.state.await_library_initialization().await?;
             library_instances::plan_component_upgrades(host, &backend.state, record_ids, None)
                 .await
                 .map(Reply::Planned)
@@ -132,6 +133,7 @@ async fn apply(
         }
         Op::Detach { record_id } => library::detach_component(host.clone(), state, record_id).await,
         Op::Upgrade { approved } => {
+            state.await_library_initialization().await?;
             library_instances::apply_component_upgrades(host.clone(), state, approved).await
         }
         Op::List | Op::Plan { .. } => return Err("not a mutation".into()),

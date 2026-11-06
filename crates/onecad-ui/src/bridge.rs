@@ -18,6 +18,7 @@ const ADMISSION: usize = 8;
 pub struct Display {
     pub epoch: u64,
     pub projection: DocumentProjection,
+    pub assembly: onecad_app::dto::AssemblyProjectionDto,
     pub context: onecad_app::api::PreviewContext,
     pub scene: Arc<SceneSnapshot>,
     pub profiles: Vec<Profile>,
@@ -40,6 +41,7 @@ pub enum Command {
     Items(crate::document_items::Request),
     Library(crate::library_catalog::Request),
     Instance(crate::component_instances::Request),
+    Assembly(crate::assembly_controls::Request),
     Author(crate::component_wizard::Request),
     Recovery {
         document_id: String,
@@ -115,6 +117,12 @@ pub enum Message {
         result: Result<crate::library_catalog::Reply, String>,
         _permit: OwnedSemaphorePermit,
     },
+    Assembly {
+        sequence: u64,
+        session: String,
+        result: Result<crate::assembly_controls::Reply, String>,
+        _permit: OwnedSemaphorePermit,
+    },
     Instance {
         sequence: u64,
         result: Result<crate::component_instances::Reply, String>,
@@ -163,6 +171,8 @@ pub enum Message {
 }
 
 pub struct Shared {
+    library_state: std::sync::OnceLock<std::sync::Weak<AppState>>,
+    pub(crate) library_capture_lease: Mutex<Option<crate::budget::Lease>>,
     pub(crate) input_trace: Arc<crate::input_trace::Trace>,
     /// The started document host, for acceptance probes; cleared when the actor
     /// ends so the host context's sink (which holds this `Shared`) is released.
@@ -171,6 +181,8 @@ pub struct Shared {
     #[cfg(test)]
     pub fail_next_gesture_capture: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    pub(crate) fail_next_assembly_capture: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
     pub gesture_end_arrived: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub gesture_cancel_observed: std::sync::atomic::AtomicBool,
@@ -178,6 +190,7 @@ pub struct Shared {
     pub gesture_end_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub gesture_events: Arc<Mutex<Option<Arc<EventMailbox>>>>,
     pub display: Mutex<Option<Arc<Display>>>,
+    pub(crate) displayed_scene: Mutex<Option<(onecad_scene::SceneIdentity, String, u64)>>,
     pub document_state: Mutex<crate::document_state::Slot>,
     pub discard_on_shutdown: Mutex<Option<String>>,
     pub recents: Mutex<Vec<onecad_app::dto::RecentProjectDto>>,
@@ -222,11 +235,15 @@ impl Shared {
         host_budget: Arc<crate::budget::HostBudget>,
     ) -> Self {
         Self {
+            library_state: std::sync::OnceLock::new(),
+            library_capture_lease: Mutex::new(None),
             input_trace: crate::input_trace::Trace::from_environment(&context),
             #[cfg(feature = "semantic-probe")]
             probe: Mutex::new(None),
             #[cfg(test)]
             fail_next_gesture_capture: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_assembly_capture: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             gesture_end_arrived: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -235,6 +252,7 @@ impl Shared {
             gesture_end_gate: Mutex::new(None),
             gesture_events: Arc::new(Mutex::new(None)),
             display: Mutex::new(None),
+            displayed_scene: Mutex::new(None),
             document_state: Mutex::new(Default::default()),
             discard_on_shutdown: Mutex::new(None),
             recents: Mutex::new(Vec::new()),
@@ -276,6 +294,7 @@ impl Shared {
     /// features pile up reservations nothing is using. When `bytes` cannot be admitted the
     /// cache goes; live prepared scenes and GPU sources retain their own guards.
     pub(crate) fn relieve_cpu_pressure(&self, bytes: usize) -> bool {
+        self.reconcile_library_capture();
         if !self.host_budget.has_capacity(bytes) {
             drop(self.take_preparation_cache());
         }
@@ -291,6 +310,42 @@ impl Shared {
             .record("service.wake", serde_json::Value::Null);
         self.context.request_repaint();
     }
+    #[cfg(test)]
+    pub(crate) fn attach_test_state(&self, state: &Arc<AppState>) {
+        let _ = self.library_state.set(Arc::downgrade(state));
+    }
+
+    pub(crate) fn cancel_joint_solve(&self) -> Result<(), String> {
+        let state = self
+            .library_state
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or("Document host is unavailable")?;
+        onecad_app::joint_execution::cancel_joint_solves(&state).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn clear_library_capture(&self) {
+        let mut lease = self
+            .library_capture_lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = self.library_state.get().and_then(std::sync::Weak::upgrade) {
+            onecad_app::library::clear_component_draft_capture(&state);
+        }
+        *lease = None;
+        self.host_budget.wake();
+    }
+    pub(crate) fn reconcile_library_capture(&self) {
+        let mut lease = self
+            .library_capture_lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = self.library_state.get().and_then(std::sync::Weak::upgrade)
+            && onecad_app::library::captured_component_draft_bytes(&state) == 0
+        {
+            *lease = None;
+        }
+    }
     pub fn release_text_focus(&self, id: egui::Id) {
         self.context.memory_mut(|memory| memory.surrender_focus(id));
     }
@@ -300,6 +355,11 @@ impl Shared {
     pub fn publish_display(&self, display: Display) {
         self.input_trace.capture("service.capture", &display);
         let epoch = display.epoch;
+        let scene = (
+            display.scene.identity(),
+            display.context.runtime_session.clone(),
+            display.assembly.persisted_generation,
+        );
         crate::handoff::with_current(
             &self.display,
             &self.display_epoch,
@@ -307,6 +367,9 @@ impl Shared {
             epoch,
             |slot| {
                 *slot = Some(Arc::new(display));
+                if let Ok(mut current) = self.displayed_scene.lock() {
+                    *current = Some(scene);
+                }
                 self.valid.store(true, std::sync::atomic::Ordering::Release);
                 if let Ok(mut failure) = self.failure.lock() {
                     *failure = None;
@@ -317,6 +380,9 @@ impl Shared {
     }
     pub fn invalidate(&self, message: Option<String>) {
         crate::handoff::invalidate(&self.display, &self.display_epoch, &self.valid, || {
+            if let Ok(mut current) = self.displayed_scene.lock() {
+                *current = None;
+            }
             if let Some(message) = message
                 && let Ok(mut failure) = self.failure.lock()
             {
@@ -334,6 +400,13 @@ impl Shared {
             display.epoch,
             |_| {
                 self.valid.store(true, std::sync::atomic::Ordering::Release);
+                if let Ok(mut current) = self.displayed_scene.lock() {
+                    *current = Some((
+                        display.scene.identity(),
+                        display.context.runtime_session.clone(),
+                        display.assembly.persisted_generation,
+                    ));
+                }
             },
         )
     }
@@ -424,13 +497,33 @@ impl Bridge {
         })
     }
 
-    pub fn submit(&self, command: Command) -> Result<(), String> {
+    pub fn submit(&self, mut command: Command) -> Result<(), String> {
         if self
             .shared
             .stopping
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return Err("Native host is shutting down".into());
+        }
+        if let Command::Library(crate::library_catalog::Request::Prepare { generation, .. }) =
+            &mut command
+        {
+            let mut lease = self
+                .shared
+                .library_capture_lease
+                .lock()
+                .map_err(|_| "Component capture lease lock poisoned")?;
+            let state = self
+                .shared
+                .library_state
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or("Document host is not ready for component preparation")?;
+            *generation = Some(
+                onecad_app::library::begin_component_draft_capture(&state)
+                    .map_err(|error| error.to_string())?,
+            );
+            *lease = None;
         }
         admit(&self.commands, &self.permits, command)
     }
@@ -495,6 +588,7 @@ impl Bridge {
     }
 
     pub fn request_shutdown(&self) {
+        self.shared.clear_library_capture();
         self.shared
             .stopping
             .store(true, std::sync::atomic::Ordering::Release);
@@ -643,6 +737,16 @@ async fn actor(
         dialogs,
     };
     let state = Arc::new(AppState::with_services(services));
+    let archive_budget = onecad_app::resource_admission::ArchiveBudget::new(Arc::new(
+        crate::budget::ArchiveBudgetAdapter(shared.host_budget.clone()),
+    ));
+    if let Err(error) = state.install_archive_budget(archive_budget) {
+        shared.invalidate(Some(error.into()));
+        let _ = sender.send(Message::StartupFailed(error.into()));
+        shared.wake();
+        return;
+    }
+    let _ = shared.library_state.set(Arc::downgrade(&state));
     shared
         .host
         .store(state.host_id(), std::sync::atomic::Ordering::Release);
@@ -858,6 +962,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Items(_) => "Delete",
         Command::Library(_) => "Library",
         Command::Instance(_) => "Instance",
+        Command::Assembly(_) => "Assembly",
         Command::Author(_) => "Author",
         Command::Recovery { .. } => "Recovery",
         Command::Sketch(_) => "Sketch",

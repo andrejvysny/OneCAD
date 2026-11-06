@@ -303,7 +303,7 @@ async fn replace_from_path(
         )
         .await
     } else {
-        api::open_document(
+        api::open_assembly_document(
             &backend.state,
             backend.host.clone(),
             path.to_string_lossy().into_owned(),
@@ -468,6 +468,15 @@ async fn export_dialog(
 ) -> FileDialog {
     let runtime = state.runtime.lock().await;
     let title = runtime.as_ref().map_or("", |runtime| runtime.title());
+    let label = if extension == "step"
+        && runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.has_assembly_occurrences())
+    {
+        "STEP posed solids (mm; no hierarchy, joints or appearance)"
+    } else {
+        label
+    };
     let mut request = FileDialog::new(label, &[extension], true);
     request.suggested_filename = Some(export_filename(title, extension));
     request

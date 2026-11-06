@@ -153,6 +153,16 @@ fn supersampling(ui: &mut egui::Ui, options: &mut RenderOptions) -> bool {
 }
 
 fn section(ui: &mut egui::Ui, app: &App, options: &mut RenderOptions) -> bool {
+    if app.doc.display.as_ref().is_some_and(|display| {
+        display
+            .scene
+            .bodies()
+            .iter()
+            .any(|body| body.occurrence_path().is_some())
+    }) {
+        ui.label("Section views are unavailable for occurrences.");
+        return false;
+    }
     let original = section_axis(options.section);
     let mut axis = original;
     section_axis_ui(ui, &mut axis);

@@ -32,6 +32,7 @@ pub(crate) fn link_badge(instance: &ComponentInstanceDto) -> (&'static str, Tone
 pub(crate) fn status_badge(status: &ComponentStatusDto) -> Option<&'static str> {
     match status {
         ComponentStatusDto::UpgradeAvailable { .. } => Some("Upgrade available"),
+        ComponentStatusDto::ArchivedSnapshot { .. } => Some("Saved definition"),
         ComponentStatusDto::DefinitionMissing => Some("Missing definition"),
         ComponentStatusDto::DefinitionUnreadable { .. } => Some("Unreadable"),
         ComponentStatusDto::RevisionMismatch { .. } => Some("Revision changed"),
@@ -45,6 +46,19 @@ pub(crate) fn status_text(instance: &ComponentInstanceDto) -> String {
     match &instance.status {
         ComponentStatusDto::Linked => {
             "Linked to the library. Parameters can be edited here.".to_owned()
+        }
+        ComponentStatusDto::ArchivedSnapshot { catalog } => {
+            let detail = match catalog.as_ref() {
+                ComponentStatusDto::DefinitionMissing => "The external library is unavailable.",
+                ComponentStatusDto::DefinitionUnreadable { .. } => {
+                    "The external definition is unreadable."
+                }
+                ComponentStatusDto::RevisionMismatch { .. } => {
+                    "The external package revision changed."
+                }
+                _ => "The external catalog is unavailable.",
+            };
+            format!("{detail} The document's saved definition supports parameter edits.")
         }
         ComponentStatusDto::UpgradeAvailable { version } => format!(
             "Version {version} is available. This instance stays on {} until you update it.",
@@ -78,6 +92,7 @@ pub(crate) fn editable(instance: &ComponentInstanceDto) -> bool {
         && matches!(
             instance.status,
             ComponentStatusDto::Linked
+                | ComponentStatusDto::ArchivedSnapshot { .. }
                 | ComponentStatusDto::UpgradeAvailable { .. }
                 | ComponentStatusDto::RevisionMismatch { .. }
         )

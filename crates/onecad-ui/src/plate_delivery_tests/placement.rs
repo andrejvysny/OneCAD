@@ -45,7 +45,7 @@ pub(super) async fn until(host: &mut Harness, what: &str, done: impl Fn(&App) ->
     });
     assert!(
         waited.is_ok(),
-        "timed out waiting for {what}: {} / status={:?} tool={:?} / {state:?}",
+        "timed out waiting for {what}: {} / status={:?} tool={:?} / {state:?} / catalog={:?}",
         host.app.doc.status,
         host.app.doc.interaction.status,
         host.app
@@ -53,7 +53,13 @@ pub(super) async fn until(host: &mut Harness, what: &str, done: impl Fn(&App) ->
             .interaction
             .tool
             .as_ref()
-            .map(|t| (t.phase, t.preview.clone()))
+            .map(|t| (t.phase, t.preview.clone())),
+        host.app
+            .ui
+            .library
+            .catalog
+            .detail()
+            .map(|view| &view.status)
     );
 }
 
@@ -211,11 +217,13 @@ async fn extrude_holes(host: &mut Harness, holes: usize) {
 /// Opens the seeded screw on its detail page with thread `M10`, so a hole-driven size
 /// is visibly an automatic change from the draft.
 pub(super) async fn open_detail(host: &mut Harness, root: &std::path::Path) {
-    onecad_app::library::seed_and_reindex_at(&root.join("qa").join("data").join("library"));
+    let library = root.join("qa").join("data").join("library");
+    onecad_app::library::seed_and_reindex_at(&library).unwrap();
+    onecad_app::library::component_detail_at(&library, "onecad.std.iso4762", "1.0.1").unwrap();
     host.app.ui.start_open = true;
     host.app.ui.start_page = StartPage::Library;
     until(host, "the catalog", |app| app.ui.library.catalog.loaded()).await;
-    crate::library_pages::open_component(&mut host.app.ui, "onecad.std.iso4762", "1.0.0");
+    crate::library_pages::open_component(&mut host.app.ui, "onecad.std.iso4762", "1.0.1");
     until(host, "the detail", |app| {
         app.ui
             .library
@@ -714,6 +722,21 @@ async fn control_second_feature_commit_budget() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         eprintln!("BUDGET control round {round}: {:?}", held(&host.app));
+    }
+    let before = history(&host.app);
+    let mut initial = None;
+    for cycle in 0..20 {
+        crate::input::submit_history(&mut host.app, Command::Undo);
+        host.wait(|app| history(app).1 < before.1).await;
+        crate::input::submit_history(&mut host.app, Command::Redo);
+        host.wait(|app| history(app).1 == before.1).await;
+        let snapshot = host.app.doc.bridge.shared.host_budget.snapshot();
+        let start = *initial.get_or_insert(snapshot.used);
+        eprintln!("BUDGET mixed undo/redo {cycle}: {snapshot:?}");
+        assert!(
+            snapshot.used <= start + (16 << 20),
+            "mixed history retention grew: {snapshot:?}"
+        );
     }
 }
 

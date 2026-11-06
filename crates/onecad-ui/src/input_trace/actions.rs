@@ -157,6 +157,9 @@ pub(crate) fn message(message: &crate::bridge::Message) -> Value {
         Message::Author {
             sequence, result, ..
         } => json!({"type": "Author", "sequence": sequence, "ok": result.is_ok()}),
+        Message::Assembly {
+            sequence, result, ..
+        } => json!({"type": "Assembly", "sequence": sequence, "ok": result.is_ok()}),
         Message::Instance {
             sequence, result, ..
         } => json!({"type": "Instance", "sequence": sequence, "ok": result.is_ok()}),

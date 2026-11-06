@@ -28,6 +28,7 @@ impl Preview {
 /// Applies one gesture to the shared selection and mirrors a lone profile into
 /// the interaction state Extrude starts from.
 pub(crate) fn apply(app: &mut App, mode: SelectionMode, items: Vec<SelectionItem>) {
+    crate::viewport_selection::clear_occurrence(app);
     match app.doc.selection.apply(mode, items) {
         Ok(true) => changed(app),
         Ok(false) => {}
@@ -64,6 +65,7 @@ pub(crate) fn profile_count(app: &App) -> usize {
 }
 
 pub(crate) fn clear(app: &mut App) {
+    crate::viewport_selection::clear_occurrence(app);
     if app.doc.selection.clear() || app.doc.interaction.selection.is_some() {
         changed(app);
     }

@@ -247,7 +247,7 @@ fn high_overdraw(
             SceneBody::new(
                 BodyId::new(),
                 1,
-                source.bytes().clone(),
+                Arc::from(source.bytes()),
                 onecad_scene::MeshLimits::default(),
             )
             .unwrap()

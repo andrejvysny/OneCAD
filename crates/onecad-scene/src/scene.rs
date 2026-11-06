@@ -55,6 +55,30 @@ struct BodyGeometry {
     decode_scratch_bytes: usize,
     segments: usize,
     bounds: Bounds,
+    retention: Option<RetainedAllocation>,
+}
+
+/// Shared checked geometry and its host admission, retained as one unit.
+#[derive(Debug, Clone)]
+pub struct SceneGeometry(Arc<BodyGeometry>);
+impl SceneGeometry {
+    pub fn len(&self) -> usize {
+        self.0.checked.bytes().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn shares_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(self.0.checked.bytes(), other.0.checked.bytes())
+    }
+}
+
+#[derive(Clone)]
+struct RetainedAllocation(Arc<dyn Send + Sync>);
+impl std::fmt::Debug for RetainedAllocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetainedAllocation")
+    }
 }
 
 #[derive(Debug)]
@@ -64,6 +88,37 @@ struct BodyIndices {
 }
 
 impl SceneBody {
+    /// Bounds checked geometry and pick indices before copying a mesh for handoff.
+    pub fn preflight_geometry_bytes(bytes: &[u8], limits: MeshLimits) -> Result<usize, SceneError> {
+        let mesh = MeshView::decode(bytes, limits)?;
+        let header = mesh.header();
+        let mut segments = 0usize;
+        for edge in 0..header.edge_count as usize {
+            let range = mesh
+                .edge_range(edge)
+                .ok_or(SceneError::BudgetExceeded("invalid edge range"))?;
+            segments = segments
+                .checked_add(range.count.saturating_sub(1) as usize)
+                .ok_or(SceneError::BudgetExceeded("segment count overflow"))?;
+        }
+        let metadata = size_of::<BodyGeometry>()
+            + 6 * size_of::<usize>()
+            + size_of::<onecad_protocol::mesh::MeshHeaderView>()
+            + header.sections.capacity() * size_of::<onecad_protocol::mesh::MeshSectionEntry>();
+        [
+            bytes.len(),
+            metadata,
+            PickIndex::allocation_bytes(header.triangle_count as usize)
+                .ok_or(SceneError::BudgetExceeded("index overflow"))?,
+            PickIndex::allocation_bytes(segments)
+                .ok_or(SceneError::BudgetExceeded("index overflow"))?,
+        ]
+        .into_iter()
+        .try_fold(0usize, |sum, n| {
+            sum.checked_add(n)
+                .ok_or(SceneError::BudgetExceeded("body geometry overflow"))
+        })
+    }
     pub fn new(
         body_id: BodyId,
         mesh_revision: u64,
@@ -104,6 +159,7 @@ impl SceneBody {
                 decode_scratch_bytes,
                 segments,
                 bounds,
+                retention: None,
             }),
         })
     }
@@ -163,11 +219,49 @@ impl SceneBody {
 
     /// Compare immutable content on the preparation thread, never during picks.
     pub fn same_content(&self, bytes: &Arc<[u8]>) -> bool {
-        Arc::ptr_eq(self.bytes(), bytes) || self.bytes().as_ref() == bytes.as_ref()
+        Arc::ptr_eq(self.geometry.checked.bytes(), bytes) || self.bytes() == bytes.as_ref()
     }
 
     pub fn shares_geometry(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.geometry, &other.geometry)
+    }
+
+    /// Conservative allocation retained by this unique checked geometry.
+    pub fn geometry_bytes(&self) -> Result<usize, SceneError> {
+        let geometry = &self.geometry;
+        let mut bytes = self
+            .bytes()
+            .len()
+            .checked_add(size_of::<BodyGeometry>() + 4 * size_of::<usize>())
+            .and_then(|n| n.checked_add(geometry.checked.metadata_bytes()))
+            .ok_or(SceneError::BudgetExceeded("body geometry overflow"))?;
+        for count in [geometry.triangles, geometry.segments] {
+            bytes = bytes
+                .checked_add(
+                    PickIndex::allocation_bytes(count)
+                        .ok_or(SceneError::BudgetExceeded("index overflow"))?,
+                )
+                .ok_or(SceneError::BudgetExceeded("body geometry overflow"))?;
+        }
+        Ok(bytes)
+    }
+
+    pub fn geometry_retention(&self) -> Option<Arc<dyn Send + Sync>> {
+        self.geometry
+            .retention
+            .as_ref()
+            .map(|guard| guard.0.clone())
+    }
+
+    /// Install an admission before sharing newly decoded geometry.
+    pub fn retain_geometry(&mut self, guard: Arc<dyn Send + Sync>) -> Result<(), SceneError> {
+        let geometry = Arc::get_mut(&mut self.geometry)
+            .ok_or(SceneError::BudgetExceeded("geometry already shared"))?;
+        if geometry.retention.is_some() {
+            return Err(SceneError::BudgetExceeded("geometry already retained"));
+        }
+        geometry.retention = Some(RetainedAllocation(guard));
+        Ok(())
     }
 
     /// Publication stamps do not change checked geometry or its spatial indices.
@@ -207,8 +301,11 @@ impl SceneBody {
     pub fn mesh_revision(&self) -> u64 {
         self.mesh_revision
     }
-    pub fn bytes(&self) -> &Arc<[u8]> {
-        self.geometry.checked.bytes()
+    pub fn bytes(&self) -> &[u8] {
+        self.geometry.checked.bytes().as_ref()
+    }
+    pub fn retained_geometry(&self) -> SceneGeometry {
+        SceneGeometry(self.geometry.clone())
     }
     pub fn mesh(&self) -> Result<MeshView<'_>, SceneError> {
         Ok(self.geometry.checked.view())

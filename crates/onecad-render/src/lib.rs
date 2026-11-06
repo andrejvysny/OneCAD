@@ -285,7 +285,7 @@ impl Renderer {
         self.contact_dirty |= self.committed.len() != bodies.len()
             || self.committed.iter().zip(&bodies).any(|(old, new)| {
                 old.id != new.id
-                    || !std::sync::Arc::ptr_eq(&old.source, &new.source)
+                    || !old.source.shares_source(&new.source)
                     || old.model != new.model
                     || old.visible != new.visible
             });

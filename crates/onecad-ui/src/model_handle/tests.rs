@@ -41,6 +41,7 @@ fn checked_topology_anchors_map_every_scalar_and_missing_ids_fail_closed() {
     }
     let body = scene.bodies()[0].body_id();
     let reference = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             kind: ElementKind::Face,

@@ -28,6 +28,9 @@ pub struct ProfileBudget {
     bytes: usize,
 }
 impl ProfileBudget {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
     pub(crate) fn retain_metadata(&mut self, bytes: usize) -> Result<(), String> {
         crate::budget::charge(
             &mut self.bytes,

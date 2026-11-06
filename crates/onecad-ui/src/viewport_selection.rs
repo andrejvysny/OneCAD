@@ -53,10 +53,22 @@ impl Target {
     }
 }
 
+/// An occurrence pick retains definition-local topology authority alongside its display target.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OccurrenceSelection {
+    pub scene: SceneIdentity,
+    pub display_body: BodyId,
+    pub source_body: BodyId,
+    pub path: onecad_scene::instances::OccurrencePath,
+    pub topology_id: String,
+    pub kind: HighlightKind,
+}
+
 /// Hover plus the highlight pipeline for the shared model selection.
 #[derive(Default)]
 pub struct Selection {
     hover: Option<Target>,
+    pub(crate) occurrence: Option<OccurrenceSelection>,
     dirty: bool,
     sequence: u64,
     pending: Option<mpsc::Receiver<Delivery>>,
@@ -74,6 +86,10 @@ struct Delivery {
 impl Selection {
     pub fn invalidate(&mut self, scene: SceneIdentity) {
         self.hover = self.hover.take().filter(|target| target.scene == scene);
+        self.occurrence = self
+            .occurrence
+            .take()
+            .filter(|selection| selection.scene == scene);
         self.changed();
     }
     pub(crate) fn changed(&mut self) {
@@ -82,6 +98,7 @@ impl Selection {
     }
     pub fn invalidate_pending(&mut self) {
         self.hover = None;
+        self.occurrence = None;
         self.changed();
         self.pending = None;
     }
@@ -99,6 +116,37 @@ impl Selection {
         }
         self.changed();
         true
+    }
+}
+
+impl OccurrenceSelection {
+    pub(crate) fn from_hit(hit: &PickHit<'_>) -> Option<Self> {
+        Some(Self {
+            scene: hit.capture.scene,
+            display_body: hit.body_id,
+            source_body: hit.source_body_id,
+            path: hit.occurrence_path?.clone(),
+            topology_id: hit.topology_id.to_owned(),
+            kind: hit.kind,
+        })
+    }
+}
+
+pub(crate) fn select_occurrence(app: &mut App, hit: &PickHit<'_>) {
+    let Some(selection) = OccurrenceSelection::from_hit(hit) else {
+        return;
+    };
+    crate::item_selection::clear(app);
+    app.doc.topology.occurrence = Some(selection);
+    app.doc.topology.changed();
+    app.doc.status = "Occurrence selected; component modeling is unavailable here".into();
+    app.draw_dirty = true;
+}
+
+pub(crate) fn clear_occurrence(app: &mut App) {
+    if app.doc.topology.occurrence.take().is_some() {
+        app.doc.topology.changed();
+        app.draw_dirty = true;
     }
 }
 
@@ -214,7 +262,23 @@ fn start_preparation(
     scene: Arc<SceneSnapshot>,
     ctx: egui::Context,
 ) -> Result<(), String> {
-    let selected = highlighted(app, &scene);
+    let mut selected = highlighted(app, &scene);
+    if let Some(occurrence) = &app.doc.topology.occurrence
+        && occurrence.scene == scene.identity()
+        && let Some(body) = scene.bodies().iter().find(|body| {
+            body.body_id() == occurrence.display_body
+                && body.source_body_id() == occurrence.source_body
+                && body.occurrence_path() == Some(&occurrence.path)
+        })
+    {
+        selected.push(Target {
+            scene: occurrence.scene,
+            body_id: occurrence.display_body,
+            mesh_revision: body.mesh_revision(),
+            kind: occurrence.kind,
+            topology_id: occurrence.topology_id.clone(),
+        });
+    }
     let hover = app.doc.topology.hover.clone();
     if selected.is_empty() && hover.is_none() {
         app.doc.topology.dirty = false;
@@ -289,6 +353,63 @@ mod tests {
     use super::*;
     use onecad_interaction::selection_set::{TopologyId, TopologyRef};
     use onecad_scene::{MeshLimits, SceneBody, SceneLimits};
+
+    #[test]
+    fn occurrence_selection_retains_source_path_and_drops_on_scene_change() {
+        use onecad_scene::{
+            Camera, CaptureIdentity, DVec3, ViewSnapshot, Viewport,
+            instances::{OccurrenceKey, OccurrencePath},
+        };
+        let scene = SceneIdentity {
+            session: 1,
+            scene: 1,
+        };
+        let capture: CaptureIdentity = ViewSnapshot::new(
+            scene,
+            1,
+            Camera::default(),
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+                scale_factor: 1.0,
+            },
+        )
+        .unwrap()
+        .identity();
+        let path = OccurrencePath(vec![OccurrenceKey(7)]);
+        let source = BodyId::new();
+        let display = BodyId::new();
+        let hit = PickHit {
+            body_id: display,
+            source_body_id: source,
+            occurrence_path: Some(&path),
+            mesh_revision: 3,
+            capture,
+            kind: HighlightKind::Face,
+            topology_id: "el_face",
+            ids_have_element_ids: true,
+            world_position: DVec3::ZERO,
+            normal: None,
+            ray_distance: 1.0,
+            depth: 1.0,
+        };
+        let picked = OccurrenceSelection::from_hit(&hit).unwrap();
+        assert_eq!(
+            (
+                picked.display_body,
+                picked.source_body,
+                &picked.path,
+                picked.topology_id.as_str()
+            ),
+            (display, source, &path, "el_face")
+        );
+        let mut selection = Selection {
+            occurrence: Some(picked),
+            ..Default::default()
+        };
+        selection.invalidate(SceneIdentity { scene: 2, ..scene });
+        assert!(selection.occurrence.is_none());
+    }
 
     #[test]
     fn replacement_scene_discards_hover_topology() {

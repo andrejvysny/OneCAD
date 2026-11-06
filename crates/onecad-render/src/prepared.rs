@@ -6,6 +6,8 @@ use crate::{
 use onecad_scene::{BodyId, Bounds, SceneBody, SceneIdentity, SceneSnapshot};
 use std::sync::Arc;
 
+pub type GeometryAdmission<'a> = dyn FnMut(u64) -> Result<Arc<dyn Send + Sync>, RenderError> + 'a;
+
 /// Copy to a worker thread before CPU scene preparation. GPU upload rechecks current budgets.
 #[derive(Clone, Copy)]
 pub struct PreparationBudget {
@@ -46,9 +48,12 @@ pub struct PreparationCache {
     _preparation_retention: Option<Arc<dyn Send + Sync>>,
 }
 impl PreparationCache {
+    pub fn metadata_bytes(&self) -> u64 {
+        self.geometries.capacity() as u64 * std::mem::size_of::<Arc<PreparedGeometry>>() as u64
+    }
     /// Retained capacities and Arc allocations, excluding separately charged source blobs.
     pub fn cpu_bytes(&self) -> u64 {
-        self.geometries.capacity() as u64 * std::mem::size_of::<Arc<PreparedGeometry>>() as u64
+        self.metadata_bytes()
             + self
                 .geometries
                 .iter()
@@ -68,7 +73,7 @@ impl PreparationCache {
         retention: &PreparationRetention,
     ) -> Option<&Arc<PreparedGeometry>> {
         self.geometries.iter().find(|geometry| {
-            Arc::ptr_eq(&geometry.source, body.bytes()) && geometry.retains(retention)
+            geometry.source.shares_source(&body.retained_geometry()) && geometry.retains(retention)
         })
     }
     fn estimates(
@@ -81,10 +86,11 @@ impl PreparationCache {
         let mut gpu = 0;
         let mut new_cpu = 0;
         for (index, body) in scene.bodies().iter().enumerate() {
-            if scene.bodies()[..index]
-                .iter()
-                .any(|other| Arc::ptr_eq(other.bytes(), body.bytes()))
-            {
+            if scene.bodies()[..index].iter().any(|other| {
+                other
+                    .retained_geometry()
+                    .shares_source(&body.retained_geometry())
+            }) {
                 continue;
             }
             let bytes = if let Some(geometry) = self.find(body, retention) {
@@ -160,6 +166,27 @@ impl PreparedScene {
         cache: &mut PreparationCache,
         retention: PreparationRetention,
     ) -> Result<Self, RenderError> {
+        Self::new_cached_inner(scene, budget, cache, retention, None)
+    }
+
+    /// Carves each newly packed geometry from the host's pre-admitted pool.
+    pub fn new_cached_allocated(
+        scene: &SceneSnapshot,
+        budget: PreparationBudget,
+        cache: &mut PreparationCache,
+        retention: PreparationRetention,
+        allocator: &mut GeometryAdmission<'_>,
+    ) -> Result<Self, RenderError> {
+        Self::new_cached_inner(scene, budget, cache, retention, Some(allocator))
+    }
+
+    fn new_cached_inner(
+        scene: &SceneSnapshot,
+        budget: PreparationBudget,
+        cache: &mut PreparationCache,
+        retention: PreparationRetention,
+        mut allocator: Option<&mut GeometryAdmission<'_>>,
+    ) -> Result<Self, RenderError> {
         for body in scene.bodies() {
             mesh::check_occurrence_precision(body)?;
         }
@@ -234,12 +261,17 @@ impl PreparedScene {
         for body in scene.bodies() {
             let geometry = geometries
                 .iter()
-                .find(|geometry| Arc::ptr_eq(&geometry.source, body.bytes()))
+                .find(|geometry| geometry.source.shares_source(&body.retained_geometry()))
                 .or_else(|| cache.find(body, &retention));
             let prepared = if let Some(geometry) = geometry {
                 PreparedBody::from_geometry(body, Arc::clone(geometry))?
             } else {
-                PreparedBody::new_retained(body, retention.clone())?
+                match allocator.as_mut() {
+                    Some(allocate) => {
+                        PreparedBody::new_allocated(body, retention.clone(), Some(&mut **allocate))?
+                    }
+                    None => PreparedBody::new_retained(body, retention.clone())?,
+                }
             };
             if !geometries
                 .iter()
@@ -285,17 +317,7 @@ impl PreparedScene {
     /// `cache` does not also hold. Unlike [`Self::cpu_bytes`] (a preparation peak), this is
     /// what dropping the scene frees while `cache` lives.
     pub fn cpu_bytes_beyond(&self, cache: &PreparationCache) -> u64 {
-        let metadata = self.bodies.capacity() as u64
-            * std::mem::size_of::<(BodyId, PreparedBody)>() as u64
-            + self
-                .bodies
-                .iter()
-                .map(|(_, body)| {
-                    body.path
-                        .as_ref()
-                        .map_or(0, |path| path.0.capacity() as u64 * 16)
-                })
-                .sum::<u64>();
+        let metadata = self.metadata_bytes();
         let unshared = self
             .bodies
             .iter()
@@ -304,6 +326,20 @@ impl PreparedScene {
             .map(|geometry| geometry.cpu_bytes())
             .sum::<u64>();
         metadata + unshared
+    }
+
+    /// Retained per-scene vectors and occurrence paths, excluding geometry.
+    pub fn metadata_bytes(&self) -> u64 {
+        self.bodies.capacity() as u64 * std::mem::size_of::<(BodyId, PreparedBody)>() as u64
+            + self
+                .bodies
+                .iter()
+                .map(|(_, body)| {
+                    body.path
+                        .as_ref()
+                        .map_or(0, |path| path.0.capacity() as u64 * 16)
+                })
+                .sum::<u64>()
     }
 }
 fn check_preparation_budget(
@@ -320,7 +356,7 @@ fn check_preparation_budget(
             !scene
                 .bodies()
                 .iter()
-                .any(|body| Arc::ptr_eq(&geometry.source, body.bytes()))
+                .any(|body| geometry.source.shares_source(&body.retained_geometry()))
         })
         .try_fold(0, |total, geometry| {
             add(total, geometry.source.len() as u64)
@@ -395,7 +431,7 @@ impl Renderer {
                             && old.model64 == new.model64
                             && old.visible == new.visible
                             && old.mesh_revision == new.mesh_revision
-                            && Arc::ptr_eq(&old.source, &new.geometry.source)
+                            && old.source.shares_source(&new.geometry.source)
                     });
             if !same {
                 return Err(RenderError::CaptureMismatch);
@@ -442,13 +478,13 @@ impl Renderer {
                 .enumerate()
                 .try_fold(0, |total, (index, (_, body))| {
                     if scene.bodies[..index].iter().any(|(_, other)| {
-                        Arc::ptr_eq(&other.geometry.source, &body.geometry.source)
+                        other.geometry.source.shares_source(&body.geometry.source)
                     }) {
                         return Ok(total);
                     }
                     let reused = previous
                         .iter()
-                        .find(|existing| Arc::ptr_eq(&existing.source, &body.geometry.source));
+                        .find(|existing| existing.source.shares_source(&body.geometry.source));
                     add(total, reused.map(mesh::gpu_bytes).unwrap_or(0))
                 })?;
         let next = MemoryEstimate {
@@ -516,7 +552,7 @@ impl Renderer {
             let reusable = previous
                 .iter()
                 .chain(bodies.iter())
-                .find(|existing| Arc::ptr_eq(&existing.source, &body.geometry.source));
+                .find(|existing| existing.source.shares_source(&body.geometry.source));
             let frame = self
                 .frame_bindings
                 .body(crate::BodyStyle::default(), preview);
