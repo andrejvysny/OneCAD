@@ -1,0 +1,126 @@
+{
+  "status": "source-input observations only; no OneCAD, physical or STEP-equivalence qualification",
+  "revision": "e7cb78a7a1cd073ea8f845486398a23549343c7b",
+  "units": "mm; source xacro scales STL by 0.001 to metres",
+  "method": "Python standard library, exact binary-f32 vertex keys, analytic source pose composition; no CAD kernel",
+  "meshes": {
+    "clamp_1": {
+      "sha256": "a9540533009f872423431d8405613ee52a609e2d296a287c17867f941aae50ca",
+      "bytes": 440484,
+      "triangles": 8808,
+      "vertices": 4400,
+      "edges": 13212,
+      "closedOrientedEdgeManifold": true,
+      "vertexLinksAreSingleCycles": true,
+      "selfIntersectionChecked": false,
+      "signedTriangleSumMm3": 19599.889440801697,
+      "boundsMm": [
+        [
+          -35.394081115722656,
+          -252.42062377929688,
+          128.897705078125
+        ],
+        [
+          27.8839111328125,
+          -172.4137725830078,
+          175.2222900390625
+        ]
+      ]
+    },
+    "clamp_2": {
+      "sha256": "0a1c2caf47b97853e4dc0974efc5ed89f9969b89cae3c0b8f8d9e8705bff3498",
+      "bytes": 440484,
+      "triangles": 8808,
+      "vertices": 4400,
+      "edges": 13212,
+      "closedOrientedEdgeManifold": true,
+      "vertexLinksAreSingleCycles": true,
+      "selfIntersectionChecked": false,
+      "signedTriangleSumMm3": 19599.89339340226,
+      "boundsMm": [
+        [
+          -12.89726448059082,
+          -252.4203643798828,
+          128.54867553710938
+        ],
+        [
+          50.38382339477539,
+          -172.4178924560547,
+          174.87327575683594
+        ]
+      ]
+    }
+  },
+  "xacroSha256": "7d54a2f5b86ecdeec340618c187d757cbe9cf5cbe5fd52c7689081fda52e062e",
+  "sourceAuthoredPoses": {
+    "clamp_1": {
+      "joint": "right_clamp",
+      "parent": "link5_1",
+      "q0MeshToParentTranslationMm": [
+        -7.0619999999999985,
+        120.62700000000001,
+        -152.066
+      ],
+      "q0RotationRadians": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axisParentRaw": [
+        0.999848,
+        -0.000154,
+        0.017451
+      ],
+      "axisParentNormalized": [
+        0.9998477079340287,
+        -0.0001539999550150027,
+        0.0174509949023819
+      ],
+      "simulationRangeMm": [
+        0.0,
+        37.0
+      ],
+      "mimic": null
+    },
+    "clamp_2": {
+      "joint": "left_clamp",
+      "parent": "link5_1",
+      "q0MeshToParentTranslationMm": [
+        -7.0619999999999985,
+        120.62700000000001,
+        -152.066
+      ],
+      "q0RotationRadians": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axisParentRaw": [
+        0.999848,
+        -0.000154,
+        0.017451
+      ],
+      "axisParentNormalized": [
+        0.9998477079340287,
+        -0.0001539999550150027,
+        0.0174509949023819
+      ],
+      "simulationRangeMm": [
+        -38.0,
+        0.0
+      ],
+      "mimic": {
+        "joint": "right_clamp",
+        "multiplier": "-1",
+        "offset": "0"
+      }
+    }
+  },
+  "poseArithmeticToleranceMm": 1e-09,
+  "limitations": [
+    "No self-intersection or physical volume certification",
+    "No native feature history or equivalence to the quarantined STEP",
+    "Mimic coupling unsupported; independent actuation is a separate authored fixture",
+    "README 84 mm versus simulation common coupled range 74 mm is unresolved for physical design"
+  ]
+}

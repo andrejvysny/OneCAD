@@ -19,10 +19,20 @@ authored occurrence/joint intent must be stored separately from imported STEP.
 - Original Prusa MINI filament sensor: Prusa Research, GPL v3 license text and
   upstream README retained. Box, cover and lever remain separate original STEP
   inputs. Their inclusion does not assert mechanical joints or native history.
+- Robonine simulation clamp meshes: © 2025 Robonine, CERN-OHL-P-2.0. Only the
+  two explicitly attributed visual clamp STLs are admitted, alongside the
+  Apache-2.0 xacro description, REUSE license map, notices and license texts.
+  The xacro's 0.001 scale supplies the STL-to-metre unit convention. Its
+  authored poses are simulation data, not physical measurements or native
+  construction history. No vendor arm, servo, camera or fastener mesh is copied.
 
 The Robonine gripper's source revision, size and digest are recorded in the
 manifest's `quarantined` section, but its bytes are not redistributed here.
-Its embedded vendor-derived content must be audited before fixture admission.
+Its embedded vendor-derived content must be audited before that STEP is admitted.
+The licensed simulation subset does not establish equivalence to it. The pinned
+guide and STEP name different clamp/rack revisions, and the README's 84 mm stroke
+differs from the xacro's 74 mm common coupled range. Neither is accepted as a
+physical travel oracle. OneCAD does not claim the xacro's mimic coupling.
 
 ## Independent drawing observations
 

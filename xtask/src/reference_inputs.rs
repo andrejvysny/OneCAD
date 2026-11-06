@@ -115,11 +115,11 @@ fn verify_provenance(input: &Input) -> crate::Result {
     }
     if matches!(
         path.extension().and_then(|extension| extension.to_str()),
-        Some("step" | "stp")
+        Some("step" | "stp" | "stl")
     ) && input.geometry_oracle_status.as_deref() != Some("pending")
     {
         return Err(
-            "pinned-only STEP input requires explicit pending geometry qualification".into(),
+            "pinned-only geometry input requires explicit pending geometry qualification".into(),
         );
     }
     Ok(())
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn admitted_reference_inventory_is_exact_and_offline() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/public-cad");
-        assert_eq!(verify(&root).unwrap(), 18);
+        assert_eq!(verify(&root).unwrap(), 27);
         let manifest: Manifest =
             serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
         let expected: BTreeSet<_> = [
@@ -264,6 +264,15 @@ mod tests {
             "prusa/MINI-fsenzor-cover.stp",
             "prusa/MINI-fsenzor-lever.stp",
             "prusa/README.md",
+            "robonine/DOCS-LICENSE.txt",
+            "robonine/LICENSES/Apache-2.0.txt",
+            "robonine/LICENSES/CERN-OHL-P-2.0.txt",
+            "robonine/LICENSING.md",
+            "robonine/NOTICE",
+            "robonine/REUSE.toml",
+            "robonine/simulation/so_arm_101_description/meshes/visual/clamp_1.stl",
+            "robonine/simulation/so_arm_101_description/meshes/visual/clamp_2.stl",
+            "robonine/simulation/so_arm_101_description/urdf/so_101.urdf.xacro",
         ]
         .into_iter()
         .collect();
@@ -282,8 +291,8 @@ mod tests {
             .count();
         assert_eq!(step_count, 8);
         assert!(
-            !root.join("robonine").exists(),
-            "quarantined vendor content is not admitted"
+            !root.join("robonine/RB9.01.062.000 Gripper.STEP").exists(),
+            "quarantined mixed-vendor STEP is not admitted"
         );
     }
 }
