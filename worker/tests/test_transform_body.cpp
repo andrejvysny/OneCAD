@@ -36,6 +36,7 @@
 #include "nlohmann/json.hpp"
 #include "ops/OpTypes.h"
 #include "ops/TransformOp.h"
+#include "ops/TransformSourceHistory.h"
 #include "session/BodyStore.h"
 #include "session/SourceHistory.h"
 #include "session/ShapeMetrics.h"
@@ -502,6 +503,30 @@ void test_source_face_history() {
     check(copy.body_events.size() == 1 && copy.body_events[0].kind == "created", "copy leaves source body untouched");
 }
 
+void test_source_survivor_orientation() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(2, 3, 4).Shape();
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(box, TopAbs_FACE, faces);
+    const TopoDS_Shape face = faces(1);
+    const TopoDS_Shape reversed = face.Reversed();
+    gp_Trsf identity;
+    BRepBuilderAPI_Transform builder(identity);
+    builder.Perform(box, false);
+    onecad::session::TopologyBodyHistory history;
+    history.coverage = onecad::session::HistoryCoverage::Proven;
+    history.survivors.push_back({face, face});
+    history.survivors.push_back({face, reversed});
+    ops::certify_oriented_face_history(history, builder);
+    check(history.survivors.size() == 1 && history.survivors[0].after.IsEqual(face),
+          "orientation guard preserves only equal survivor");
+    check(history.conflicts.size() == 1 && history.conflicts[0].before.size() == 1 &&
+              history.conflicts[0].before[0].IsEqual(face) && history.conflicts[0].after.IsEqual(reversed),
+          "orientation mismatch retains predecessor conflict");
+    std::size_t visits = 0;
+    check(!onecad::session::source_history_image(history, face, visits),
+          "conflict prevents fallback to valid survivor for same predecessor");
+}
+
 }  // namespace
 
 int main() {
@@ -513,6 +538,7 @@ int main() {
     test_identity_is_a_no_op();
     test_guards();
     test_source_face_history();
+    test_source_survivor_orientation();
     if (g_failures == 0) std::fprintf(stderr, "test_transform_body: all checks PASS\n");
     return g_failures;
 }
