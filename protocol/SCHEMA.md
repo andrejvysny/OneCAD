@@ -5758,6 +5758,11 @@ into a fixed enum, so an unrecognised value there would fail the whole frame;
 that is precisely why the fine-grained reason rides `detail.diagnostics[].reasonCode`,
 where an unknown value is ignorable.
 
+`InspectStep` refuses exact canonical solid-order ties with `OP_FAILED` and
+`detail.diagnostics[].reasonCode:"AMBIGUOUS_IMPORT_ORDER"`. The message retains
+the same reason text. Identity ambiguity never adds a top-level error code or
+requires connection teardown; changing the input is required before retrying.
+
 | Class | `code` | Session effect | Recovery |
 |-------|--------|----------------|----------|
 | Recoverable op failure | `OP_FAILED` | scratch only — **session intact** | Rust discards scratch; user edits and retries |

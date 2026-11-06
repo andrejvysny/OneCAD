@@ -45,6 +45,7 @@
 #include <Standard_Failure.hxx>
 #include <TopoDS_Shape.hxx>
 
+#include "io/InspectStep.h"
 #include "io/StepRead.h"
 #include "ops/OpCommon.h"
 #include "step_fixture_util.h"
@@ -327,6 +328,18 @@ int main() {
           "ambiguous order: exact canonical tie refuses without traversal fallback");
     check(ambiguous.error && ambiguous.error->starts_with(onecad::io::kAmbiguousImportOrder),
           "ambiguous order: stable AMBIGUOUS_IMPORT_ORDER code");
+
+    onecad::CancelToken inspect_cancel;
+    const auto ambiguity_response = onecad::io::handle_inspect_step(
+        onecad::protocol::Envelope::request(41, "InspectStep", {{"path", ambiguous_path}}),
+        inspect_cancel);
+    check(!ambiguity_response.ok.value_or(true) && ambiguity_response.error &&
+              ambiguity_response.error->code == "OP_FAILED",
+          "ambiguous InspectStep: closed wire taxonomy, no transport-breaking code");
+    check(ambiguity_response.error && ambiguity_response.error->detail &&
+              (*ambiguity_response.error->detail)["diagnostics"][0]["reasonCode"] ==
+                  onecad::io::kAmbiguousImportOrder,
+          "ambiguous InspectStep: machine-readable refusal reason preserved");
 
     // --- 3. Interface_Static leak guard -------------------------------------
     // Init first: the knobs are registered by the STEP controller, so a snapshot

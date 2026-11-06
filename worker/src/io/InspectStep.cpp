@@ -31,10 +31,14 @@ Envelope fail(std::uint64_t id, const std::string& message) {
 }
 
 Envelope fail_read(std::uint64_t id, const std::string& message) {
-    const char* code = message.find(kAmbiguousImportOrder) != std::string::npos
-                           ? kAmbiguousImportOrder
-                           : "OP_FAILED";
-    return Envelope::error_response(id, protocol::ErrorInfo{code, message, false});
+    if (message.find(kAmbiguousImportOrder) == std::string::npos) return fail(id, message);
+    // Keep the closed wire taxonomy; identity ambiguity is a refusal reason.
+    const json detail{{"diagnostics", json::array({json{{"severity", "error"},
+                                                       {"code", "OP_FAILED"},
+                                                       {"reasonCode", kAmbiguousImportOrder},
+                                                       {"stage", "import"},
+                                                       {"message", message}}})}};
+    return Envelope::error_response(id, protocol::ErrorInfo{"OP_FAILED", message, false, detail});
 }
 
 // Axis-aligned bounds over every solid. An empty read yields an all-zero box
