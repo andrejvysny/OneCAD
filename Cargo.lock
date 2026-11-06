@@ -3130,6 +3130,7 @@ dependencies = [
  "async-trait",
  "base64",
  "libc",
+ "onecad-assembly",
  "onecad-core",
  "onecad-embedded-worker",
  "onecad-library",
@@ -3165,6 +3166,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "insta",
+ "onecad-assembly",
  "proptest",
  "serde",
  "serde_json",
@@ -3280,6 +3282,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml",
+ "zip",
 ]
 
 [[package]]
@@ -3368,6 +3371,7 @@ dependencies = [
  "glam",
  "muda",
  "onecad-app",
+ "onecad-assembly",
  "onecad-core",
  "onecad-extension-api",
  "onecad-extension-host",

@@ -595,6 +595,7 @@ fn fillet_with_stamped_intent() -> OperationRecord {
         radius: Scalar::new(2.0),
         edge_ids: vec![edge.clone()],
         edges: vec![ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: BodyId(Uuid::from_u128(0xB0)),
                 element: edge,
@@ -680,6 +681,7 @@ fn base_hole_record() -> OperationRecord {
     let op = Operation::Known(KnownOperation::Hole(HoleParams {
         target_body: BodyId(Uuid::from_u128(0xB0D1)),
         face: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: BodyId(Uuid::from_u128(0xB0D1)),
                 element: ElementId::new("el_face_top"),
@@ -928,6 +930,7 @@ fn chamfer_with_reference_face(face: Option<&str>) -> OperationRecord {
     let body = BodyId(Uuid::from_u128(0xB0));
     let edge = ElementId::new("el_edge");
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge.clone(),
@@ -945,6 +948,7 @@ fn chamfer_with_reference_face(face: Option<&str>) -> OperationRecord {
         extra: Default::default(),
     };
     let face_ref = |id: &str| ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(id),

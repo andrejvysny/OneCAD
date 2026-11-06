@@ -324,6 +324,11 @@ impl ProtocolClient {
         max_json_len: u32,
         max_binary_len: u32,
     ) -> Result<InflightRequest, ProtocolError> {
+        require_import_source_identity_capability(
+            &self.hello.capabilities,
+            &self.hello.occt.fingerprint,
+            &args,
+        )?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let frame = Frame::Req(ReqFrame {
             v: PROTOCOL_VERSION,
@@ -731,6 +736,216 @@ fn fail_all(pending: &PendingMap) {
         let _ = tx.send(Err(ProtocolError::ConnectionLost(
             "worker connection closed",
         )));
+    }
+}
+
+const IMPORT_SOURCE_IDENTITY_CAPABILITY: &str = "importSourceIdentityV1";
+
+fn require_import_source_identity_capability(
+    capabilities: &[String],
+    fingerprint: &str,
+    args: &serde_json::Value,
+) -> Result<(), ProtocolError> {
+    let mut pending = vec![args];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(identity) = fields.get("importSourceIdentity") {
+                    if !capabilities
+                        .iter()
+                        .any(|cap| cap == IMPORT_SOURCE_IDENTITY_CAPABILITY)
+                    {
+                        return Err(ProtocolError::Protocol(format!(
+                            "critical import source identity requires worker capability {IMPORT_SOURCE_IDENTITY_CAPABILITY}"
+                        )));
+                    }
+                    validate_import_source_identity(identity, fields, fingerprint)?;
+                }
+                pending.extend(fields.values());
+            }
+            serde_json::Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_import_source_identity(
+    identity: &serde_json::Value,
+    owner: &serde_json::Map<String, serde_json::Value>,
+    fingerprint: &str,
+) -> Result<(), ProtocolError> {
+    let invalid = || ProtocolError::Protocol("invalid critical import source identity".into());
+    let fields = identity.as_object().ok_or_else(invalid)?;
+    let expected = [
+        "version",
+        "sourceSha256",
+        "codec",
+        "codecVersion",
+        "readerPolicy",
+        "kernelFingerprint",
+        "producerRecordId",
+        "bodyId",
+        "unitScaleBits",
+        "sourceAddress",
+    ];
+    if fields.len() != expected.len()
+        || expected.iter().any(|key| !fields.contains_key(*key))
+        || fields["version"].as_u64() != Some(1)
+        || !matches!(
+            (
+                fields["codec"].as_str(),
+                fields["codecVersion"].as_str(),
+                fields["readerPolicy"].as_str()
+            ),
+            (Some("step"), Some("occt-step-stream-v1"), Some("step-v1"))
+                | (Some("xbf"), Some("12"), Some("xbf-v12"))
+        )
+    {
+        return Err(invalid());
+    }
+    let hex = |key: &str, length: usize| {
+        fields[key].as_str().is_some_and(|s| {
+            s.len() == length
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    };
+    if !hex("sourceSha256", 64) || !hex("unitScaleBits", 16) {
+        return Err(invalid());
+    }
+    let bits = u64::from_str_radix(fields["unitScaleBits"].as_str().ok_or_else(invalid)?, 16)
+        .map_err(|_| invalid())?;
+    let scale = f64::from_bits(bits);
+    if !scale.is_finite()
+        || scale <= 0.0
+        || !hex("kernelFingerprint", 16)
+        || fields["kernelFingerprint"].as_str() != Some(fingerprint)
+        || !fields["producerRecordId"].as_str().is_some_and(valid_uuid)
+    {
+        return Err(invalid());
+    }
+    let body = fields["bodyId"].as_str().ok_or_else(invalid)?;
+    let owner = owner
+        .get("primary")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or(owner);
+    if !valid_body_wire(body)
+        || owner.get("bodyId").and_then(serde_json::Value::as_str) != Some(body)
+        || owner.get("kind").and_then(serde_json::Value::as_str) != Some("face")
+    {
+        return Err(invalid());
+    }
+    let address = fields["sourceAddress"].as_object().ok_or_else(invalid)?;
+    if address.len() != 4
+        || !address
+            .get("occurrencePath")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+    {
+        return Err(invalid());
+    }
+    let address_ok = match fields["codec"].as_str() {
+        Some("step") => {
+            address.get("kind").and_then(serde_json::Value::as_str) == Some("step")
+                && address
+                    .get("rootEntityLabel")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|v| v > 0)
+                && address
+                    .get("faceEntityLabel")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|v| v > 0)
+        }
+        Some("xbf") => match (
+            address.get("rootLabel").and_then(serde_json::Value::as_str),
+            address.get("faceLabel").and_then(serde_json::Value::as_str),
+        ) {
+            (Some(root), Some(face)) => {
+                address.get("kind").and_then(serde_json::Value::as_str) == Some("xbf")
+                    && valid_label(root)
+                    && valid_label(face)
+                    && face
+                        .strip_prefix(root)
+                        .is_some_and(|suffix| suffix.starts_with(':'))
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !address_ok {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn valid_label(value: &str) -> bool {
+    value.len() <= 256
+        && value.starts_with("0:")
+        && value
+            .split(':')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn valid_body_wire(value: &str) -> bool {
+    let Some(body) = value.strip_prefix("body_") else {
+        return false;
+    };
+    match body.split_once(':') {
+        Some((id, index)) => {
+            valid_uuid(id) && !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => valid_uuid(body),
+    }
+}
+
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+}
+
+#[cfg(test)]
+mod import_source_identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validated_certificates_require_the_current_worker_capability_and_fingerprint() {
+        let body = "body_00000000-0000-0000-0000-000000000002";
+        let cert = json!({"version":1,"sourceSha256":"a".repeat(64),"codec":"step",
+            "codecVersion":"occt-step-stream-v1","readerPolicy":"step-v1","kernelFingerprint":"0a6a1dce34181289",
+            "producerRecordId":"00000000-0000-0000-0000-000000000001", "bodyId":body,
+            "unitScaleBits":"3ff0000000000000", "sourceAddress":{"kind":"step",
+                "rootEntityLabel":5850,"occurrencePath":[],"faceEntityLabel":3042}});
+        let args =
+            json!({"ref":{"primary":{"bodyId":body,"kind":"face"},"importSourceIdentity":cert}});
+        let capable = [IMPORT_SOURCE_IDENTITY_CAPABILITY.into()];
+        assert!(
+            require_import_source_identity_capability(&capable, "0a6a1dce34181289", &args).is_ok()
+        );
+        assert!(require_import_source_identity_capability(&[], "0a6a1dce34181289", &args).is_err());
+        assert!(
+            require_import_source_identity_capability(&capable, "aaaaaaaaaaaaaaaa", &args).is_err()
+        );
+    }
+
+    #[test]
+    fn capability_is_required_for_any_nested_critical_identity() {
+        let args = json!({"ops":[{"ref":{"importSourceIdentity":null}}]});
+        assert!(require_import_source_identity_capability(&[], "test", &args).is_err());
+        assert!(require_import_source_identity_capability(
+            &[IMPORT_SOURCE_IDENTITY_CAPABILITY.into()],
+            "test",
+            &args
+        )
+        .is_err());
+        assert!(require_import_source_identity_capability(&[], "test", &json!({"ops":[]})).is_ok());
     }
 }
 

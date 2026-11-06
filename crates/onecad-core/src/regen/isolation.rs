@@ -353,6 +353,7 @@ mod tests {
             thickness: Scalar::new(2.0),
             open_faces: Vec::new(),
             faces: vec![ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body,
                     element: ElementId::new("el_face"),

@@ -159,6 +159,7 @@ fn boolean(id: RecordId, target: BodyId, tool: BodyId, out: BodyId) -> Operation
 
 fn edge_ref(body: BodyId, el: &str) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(el),
@@ -630,7 +631,7 @@ fn fillet_edit_keeps_edge_ids_and_edges_in_lockstep() {
     })
     .unwrap();
     let v = json(sess.document());
-    let params = &v["timeline"]["records"][0]["params"];
+    let params = &v["rootDefinition"]["timeline"]["records"][0]["params"];
     assert_eq!(params["edgeIds"][0], "el_fresh", "bare edge_ids updated");
     assert_eq!(
         params["edges"][0]["primary"]["elementId"], "el_fresh",
@@ -1331,6 +1332,7 @@ fn edge_closure_version_is_optional_and_only_version_one_is_writable() {
     let mut intent_only = fillet_op(
         &["e1"],
         vec![ElementRef {
+            import_source_identity: None,
             primary: None,
             intent: None,
             anchor: None,
@@ -1610,6 +1612,7 @@ fn mated_component_doc(
     params.mate = Some(ComponentMate {
         self_attachment: "shankAxis".to_string(),
         target: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: BX(),
                 element: ElementId::new("el_target"),
@@ -1784,6 +1787,7 @@ fn add_reference_face(p: &mut ChamferParams) {
         face_id: face.clone(),
     }];
     p.reference_face_refs = vec![ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: face,
@@ -2278,7 +2282,34 @@ fn session_snapshot_after_scripted_sequence() {
     })
     .unwrap();
 
-    insta::assert_json_snapshot!("session_after_sequence", sess.document());
+    insta::assert_json_snapshot!("session_after_sequence_schema4", sess.document());
+}
+
+#[test]
+fn legacy_schema_one_session_snapshot_migrates_without_changing_model_fields() {
+    let snapshot = include_str!("snapshots/edit_session__session_after_sequence.snap");
+    let json = snapshot.splitn(3, "---\n").nth(2).unwrap();
+    let original: serde_json::Value = serde_json::from_str(json).unwrap();
+    let mut migrated = original.clone();
+    onecad_core::io::migrate::MigrationRegistry::current()
+        .apply(&mut migrated, 1, 3)
+        .unwrap();
+    for key in [
+        "variables",
+        "sketches",
+        "datumPlanes",
+        "timeline",
+        "bodies",
+        "repair",
+    ] {
+        assert_eq!(
+            migrated["rootDefinition"][key], original[key],
+            "legacy field {key}"
+        );
+    }
+    let document = onecad_core::io::document_io::document_from_value(migrated).unwrap();
+    assert_eq!(document.schema_version, 3);
+    assert_eq!(document.id.to_string(), original["id"].as_str().unwrap());
 }
 
 // ── Frontend wire pin: the TS `buildAddSketch` JSON must deserialize ─────────
@@ -2809,6 +2840,7 @@ fn hole_op(hole_type: HoleType, diameter: f64, cb: Option<(f64, f64)>) -> Operat
     Operation::Known(KnownOperation::Hole(HoleParams {
         target_body: BX(),
         face: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: BX(),
                 element: ElementId::new("el_face"),
@@ -3016,6 +3048,7 @@ fn shell_op(open_faces: &[&str]) -> Operation {
 /// like. Both new arms must refuse it (see their doc comments).
 fn evidence_only_ref() -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: None,
         intent: None,
         anchor: Some(AnchorIntent {
@@ -3031,6 +3064,7 @@ fn evidence_only_ref() -> ElementRef {
 
 fn face_ref_at(body: BodyId, el: &str) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(el),
@@ -3085,11 +3119,11 @@ fn shell_open_face_rebind_preserves_typed_evidence() {
     assert_eq!(stored_shell_faces(&sess), vec!["el_a", "el_fresh"]);
     let v = json(sess.document());
     assert_eq!(
-        v["timeline"]["records"][0]["params"]["openFaces"],
+        v["rootDefinition"]["timeline"]["records"][0]["params"]["openFaces"],
         serde_json::json!(["el_a", "el_fresh"])
     );
     assert_eq!(
-        v["timeline"]["records"][0]["params"]["faces"][1]["anchor"]["worldPoint"],
+        v["rootDefinition"]["timeline"]["records"][0]["params"]["faces"][1]["anchor"]["worldPoint"],
         serde_json::json!([1.0, 2.0, 3.0]),
         "the re-picked face keeps its anchor evidence"
     );
@@ -3736,6 +3770,7 @@ fn an_empty_stack_reverts_nothing() {
 /// operated body, plus the anchor SCHEMA §7.3 makes non-optional.
 fn reference_face_ref(body: BodyId, el: &str) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(el),

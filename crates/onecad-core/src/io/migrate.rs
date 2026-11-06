@@ -13,12 +13,14 @@
 //! * **Older version** → build a [`MigrationPlan`], apply it. If the chain does not
 //!   reach the current version, or any step's confidence is below `High`, the
 //!   document opens **read-only** with a [`MigrationReport`] (guided report).
-//! * **Newer version** → best-effort **read-only**. Unknown ops ride through as
+//! * **Newer version** → the container reader refuses unsupported global schemas.
+//!   The lower-level policy helper retains best-effort **read-only** support for
+//!   callers that have independently admitted their representation. Unknown ops ride through as
 //!   [`Opaque`](crate::document::record::Operation::Opaque) frozen nodes and
 //!   unknown fields via `extra` (the record codec already does this), so the
 //!   document loads without a transform but is never written back.
 //!
-//! The version-step registry remains an **empty chain**. Same-version policy
+//! The default registry includes the explicit schema-1 to schema-2 root-definition migration. Same-version policy
 //! normalizations live outside it because they do not change
 //! `globalSchemaVersion`, but they still mark records/caches stale and emit
 //! migration diagnostics.
@@ -158,6 +160,124 @@ pub struct MigrationRegistry {
     steps: BTreeMap<u32, Box<dyn MigrationStep>>,
 }
 
+struct RootDefinitionMigration;
+
+struct JointBindingMigration;
+
+struct ImportIdentityMigration;
+
+impl MigrationStep for ImportIdentityMigration {
+    fn from_version(&self) -> u32 {
+        3
+    }
+    fn to_version(&self) -> u32 {
+        4
+    }
+    fn confidence(&self) -> MigrationConfidence {
+        MigrationConfidence::High
+    }
+
+    fn migrate_document(&self, document: &mut Value) -> Result<(), String> {
+        let mut pending = vec![&*document];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Object(fields) => {
+                    if fields.contains_key("importSourceIdentity") {
+                        return Err("schema 3 extension conflicts with importSourceIdentity".into());
+                    }
+                    pending.extend(fields.values());
+                }
+                Value::Array(items) => pending.extend(items),
+                _ => {}
+            }
+        }
+        document
+            .as_object_mut()
+            .ok_or("document must be an object")?
+            .insert("schemaVersion".into(), Value::from(4));
+        Ok(())
+    }
+}
+
+impl MigrationStep for JointBindingMigration {
+    fn from_version(&self) -> u32 {
+        2
+    }
+    fn to_version(&self) -> u32 {
+        3
+    }
+    fn confidence(&self) -> MigrationConfidence {
+        MigrationConfidence::High
+    }
+    fn migrate_document(&self, document: &mut Value) -> Result<(), String> {
+        let object = document
+            .as_object_mut()
+            .ok_or("document must be an object")?;
+        if object
+            .get("assembly")
+            .and_then(Value::as_object)
+            .is_some_and(|assembly| assembly.contains_key("jointBindings"))
+        {
+            return Err("schema 2 extension conflicts with assembly field jointBindings".into());
+        }
+        object.insert("schemaVersion".into(), Value::from(3));
+        Ok(())
+    }
+}
+
+impl MigrationStep for RootDefinitionMigration {
+    fn from_version(&self) -> u32 {
+        1
+    }
+    fn to_version(&self) -> u32 {
+        2
+    }
+    fn confidence(&self) -> MigrationConfidence {
+        MigrationConfidence::High
+    }
+
+    fn migrate_document(&self, document: &mut Value) -> Result<(), String> {
+        let object = document
+            .as_object_mut()
+            .ok_or("document must be an object")?;
+        for key in ["rootDefinition", "definitions", "assembly"] {
+            if object.contains_key(key) {
+                return Err(format!(
+                    "schema 1 extension conflicts with assembly field {key}"
+                ));
+            }
+        }
+        let id: crate::ids::DocumentId =
+            serde_json::from_value(object.get("id").cloned().ok_or("document id is missing")?)
+                .map_err(|error| format!("invalid document id: {error}"))?;
+        let mut root = serde_json::Map::new();
+        root.insert(
+            "id".into(),
+            serde_json::to_value(crate::document::component::root_definition_id(id))
+                .map_err(|error| error.to_string())?,
+        );
+        root.insert("name".into(), Value::String("Root".into()));
+        for key in [
+            "variables",
+            "sketches",
+            "sketchVisibility",
+            "datumPlanes",
+            "timeline",
+            "bodies",
+            "elements",
+            "repair",
+            "namedSelections",
+        ] {
+            if let Some(value) = object.remove(key) {
+                root.insert(key.into(), value);
+            }
+        }
+        object.insert("rootDefinition".into(), Value::Object(root));
+        object.insert("schemaVersion".into(), Value::from(2));
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for MigrationRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MigrationRegistry")
@@ -171,6 +291,16 @@ impl MigrationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Registry used for ordinary document loads.
+    #[must_use]
+    pub fn current() -> Self {
+        let mut registry = Self::new();
+        registry.register(Box::new(RootDefinitionMigration));
+        registry.register(Box::new(JointBindingMigration));
+        registry.register(Box::new(ImportIdentityMigration));
+        registry
     }
 
     /// Registers a step, keyed by its `from_version`. A later registration at the
@@ -568,6 +698,28 @@ fn migrate_absent_pattern_result_policies(value: &mut Value) -> Vec<Diagnostic> 
     diagnostics
 }
 
+fn sanitize_document_parts(value: &mut Value) -> Vec<Diagnostic> {
+    fn sanitize(part: &mut Value, diagnostics: &mut Vec<Diagnostic>) {
+        diagnostics.extend(sanitize_region_ids(part));
+        diagnostics.extend(sanitize_sketch_projections(part));
+        diagnostics.extend(migrate_absent_pattern_result_policies(part));
+    }
+    let mut diagnostics = Vec::new();
+    if value.get("rootDefinition").is_none() {
+        sanitize(value, &mut diagnostics);
+        return diagnostics;
+    }
+    if let Some(root) = value.get_mut("rootDefinition") {
+        sanitize(root, &mut diagnostics);
+    }
+    if let Some(definitions) = value.get_mut("definitions").and_then(Value::as_object_mut) {
+        for definition in definitions.values_mut() {
+            sanitize(definition, &mut diagnostics);
+        }
+    }
+    diagnostics
+}
+
 /// Runs the version-aware open policy over a raw document value (plan task 5).
 ///
 /// * `stored_version` is the manifest's `globalSchemaVersion`.
@@ -585,9 +737,7 @@ pub fn open_policy(
     match stored_version.cmp(&target_version) {
         Ordering::Equal => {
             // Same version: still normalize legacy placeholder region ids (M4a).
-            let mut diagnostics = sanitize_region_ids(&mut value);
-            diagnostics.extend(sanitize_sketch_projections(&mut value));
-            diagnostics.extend(migrate_absent_pattern_result_policies(&mut value));
+            let diagnostics = sanitize_document_parts(&mut value);
             let records_changed = !diagnostics.is_empty();
             Ok(MigratedValue {
                 value,
@@ -638,13 +788,8 @@ pub fn open_policy(
                 }
             });
             // Also normalize legacy placeholder region ids on the migrated value (M4a).
-            let region_diags = sanitize_region_ids(&mut value);
-            let projection_diags = sanitize_sketch_projections(&mut value);
-            let pattern_diags = migrate_absent_pattern_result_policies(&mut value);
-            let records_changed = applied
-                || !region_diags.is_empty()
-                || !projection_diags.is_empty()
-                || !pattern_diags.is_empty();
+            let part_diags = sanitize_document_parts(&mut value);
+            let records_changed = applied || !part_diags.is_empty();
             let mut diagnostics = Vec::new();
             if applied {
                 diagnostics.push(Diagnostic::info(
@@ -658,9 +803,7 @@ pub fn open_policy(
                     ),
                 ));
             }
-            diagnostics.extend(region_diags);
-            diagnostics.extend(projection_diags);
-            diagnostics.extend(pattern_diags);
+            diagnostics.extend(part_diags);
             if let Some(reason) = &read_only_reason {
                 diagnostics.push(Diagnostic::warning("migration-read-only", reason.clone()));
             }
@@ -695,6 +838,88 @@ pub(crate) fn migrate_and_decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joint_binding_migration_preserves_extensions_and_refuses_collision() {
+        let source = serde_json::json!({"schemaVersion": 2, "assembly": {"vendor": {"x": 1}}, "vendor": [1, 2]});
+        let mut migrated = source.clone();
+        MigrationRegistry::current()
+            .apply(&mut migrated, 2, 3)
+            .unwrap();
+        assert_eq!(migrated["schemaVersion"], 3);
+        assert_eq!(migrated["assembly"], source["assembly"]);
+        assert_eq!(migrated["vendor"], source["vendor"]);
+        let mut conflict = source;
+        conflict["assembly"]["jointBindings"] = serde_json::json!({"vendor": true});
+        let original = conflict.clone();
+        assert!(MigrationRegistry::current()
+            .apply(&mut conflict, 2, 3)
+            .is_err());
+        assert_eq!(conflict, original);
+    }
+
+    #[test]
+    fn legacy_schema_one_chains_through_schema_three() {
+        let source = serde_json::json!({
+            "id": "92a6ebf3-9192-447a-86ad-8e72521118cc",
+            "schemaVersion": 1,
+            "timeline": {"cursor": 1, "records": [{"id": "old-id", "opType": "vendor.op"}]},
+            "vendor": {"preserve": [1, 2]}
+        });
+        let mut migrated = source.clone();
+        MigrationRegistry::current()
+            .apply(&mut migrated, 1, 3)
+            .unwrap();
+        assert_eq!(migrated["schemaVersion"], 3);
+        assert_eq!(migrated["rootDefinition"]["timeline"], source["timeline"]);
+        assert_eq!(migrated["vendor"], source["vendor"]);
+        assert!(migrated.get("assembly").is_none());
+    }
+
+    #[test]
+    fn root_definition_migration_preserves_opaque_state_and_refuses_conflicts() {
+        let source = serde_json::json!({
+            "id": "92a6ebf3-9192-447a-86ad-8e72521118cc",
+            "schemaVersion": 1,
+            "timeline": {"cursor": 1, "records": [{"opType": "ThirdPartyOp", "future": {"x": 7}}]},
+            "sketches": {},
+            "modules": {"example.vendor": {"schemaVersion": 7, "payload": {"opaque": true}}},
+            "vendorExtension": {"unknown": [1, 2, 3]}
+        });
+        let mut migrated = source.clone();
+        MigrationRegistry::current()
+            .apply(&mut migrated, 1, 2)
+            .unwrap();
+        assert_eq!(migrated["rootDefinition"]["timeline"], source["timeline"]);
+        assert_eq!(migrated["modules"], source["modules"]);
+        assert_eq!(migrated["vendorExtension"], source["vendorExtension"]);
+        assert!(migrated.get("timeline").is_none());
+        let mut conflicting = source;
+        conflicting["assembly"] = serde_json::json!({"vendor": true});
+        let original = conflicting.clone();
+        assert!(MigrationRegistry::current()
+            .apply(&mut conflicting, 1, 2)
+            .is_err());
+        assert_eq!(conflicting, original);
+    }
+
+    #[test]
+    fn schema_three_migration_preserves_extensions_and_refuses_reserved_collision() {
+        let source = serde_json::json!({"schemaVersion":3,"vendor":{"opaque":[1,2,3]}});
+        let mut migrated = source.clone();
+        MigrationRegistry::current()
+            .apply(&mut migrated, 3, 4)
+            .unwrap();
+        assert_eq!(migrated["schemaVersion"], 4);
+        assert_eq!(migrated["vendor"], source["vendor"]);
+        let mut conflict = source;
+        conflict["vendor"]["importSourceIdentity"] = serde_json::json!({"future":true});
+        let before = conflict.clone();
+        assert!(MigrationRegistry::current()
+            .apply(&mut conflict, 3, 4)
+            .is_err());
+        assert_eq!(conflict, before);
+    }
 
     /// A synthetic v0→v1 step: renames a top-level document field. High confidence.
     struct RenameStep;

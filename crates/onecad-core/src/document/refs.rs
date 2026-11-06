@@ -105,6 +105,13 @@ pub struct AnchorIntent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ElementRef {
+    /// A critical, source-addressed imported-face certificate.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::import_source_identity::deserialize_present"
+    )]
+    pub import_source_identity: Option<super::import_source_identity::ImportSourceIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary: Option<PrimaryRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

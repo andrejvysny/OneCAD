@@ -65,6 +65,7 @@ fn plane_ref() -> SketchPlaneRef {
 /// A face ref on `body` naming element `el`.
 fn face_ref(body: BodyId, el: &str) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(el),
@@ -135,6 +136,7 @@ fn fillet_record(id: RecordId, body: BodyId, el: &str) -> OperationRecord {
     let op = Operation::Known(KnownOperation::Fillet(FilletParams {
         edge_ids: vec![ElementId::new(el)],
         edges: vec![ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new(el),

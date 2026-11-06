@@ -1,11 +1,13 @@
 //! Edit layer: the [`EditCommand`] vocabulary, the single-writer
 //! [`DocumentSession`], memento undo/redo, and command outcomes.
 
+pub mod assembly;
 pub mod command;
 pub mod outcome;
 pub mod session;
 pub mod undo;
 
+pub use assembly::AssemblyEdit;
 pub use command::{EditCommand, InputPath, InputRef, SketchEditOp, VisibilityTarget};
 pub use outcome::{CommandOutcome, ProjectionDelta, RegenHint};
 pub use session::{gate_items_for_moved, DocumentSession, SketchSquashOutcome};

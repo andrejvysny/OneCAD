@@ -106,6 +106,7 @@ fn element_ref_strategy() -> impl Strategy<Value = ElementRef> {
         extra_strategy(),
     )
         .prop_map(|(primary, intent, anchor, extra)| ElementRef {
+            import_source_identity: None,
             primary,
             intent,
             anchor,

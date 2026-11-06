@@ -64,20 +64,57 @@ pub const IMPORTS_DIR: &str = "imports/";
 /// and 256 MiB is already an order of magnitude past any realistic one.
 pub const MAX_IMPORT_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 
-/// One import source blob: its codec plus the raw bytes.
-///
-/// The bytes sit behind an [`Arc`] because a save must be able to *hand the whole
-/// carrier to a blocking writer thread* without deep-copying every source file
-/// (VF-B7: an import blob is up to [`MAX_IMPORT_BLOB_BYTES`], and the save/autosave
-/// lanes clone the carrier once per write while the runtime lock is held). Cloning
-/// an `ImportBlob` is therefore a refcount bump, not a `memcpy`. `Arc<T: Eq>` is
-/// itself `Eq`, so the derives are unchanged.
+/// Bytes and their optional host admission share one allocation lifetime.
+pub struct OwnedSource {
+    bytes: Vec<u8>,
+    _retention: Option<Arc<dyn Send + Sync>>,
+}
+
+impl OwnedSource {
+    #[must_use]
+    pub fn untracked(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            _retention: None,
+        }
+    }
+
+    #[must_use]
+    pub fn tracked(bytes: Vec<u8>, retention: Arc<dyn Send + Sync>) -> Self {
+        Self {
+            bytes,
+            _retention: Some(retention),
+        }
+    }
+}
+
+impl std::ops::Deref for OwnedSource {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl std::fmt::Debug for OwnedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OwnedSource").field(&self.bytes).finish()
+    }
+}
+
+impl PartialEq for OwnedSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+impl Eq for OwnedSource {}
+
+/// A codec and shared source bytes, retained by detached save payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBlob {
     /// Which codec the bytes are in (picks the section extension).
     pub codec: ImportSourceCodec,
     /// The source bytes, opaque to the core.
-    pub bytes: Arc<Vec<u8>>,
+    pub bytes: Arc<OwnedSource>,
 }
 
 /// The document-level import-blob carrier: `sha256 → blob`, keyed by the SAME
@@ -184,10 +221,16 @@ pub fn parse_import_blob_path(path: &str) -> Option<(String, ImportSourceCodec)>
 ///   reason — it is still in the timeline, so it is still live.
 #[must_use]
 pub fn referenced_import_shas(document: &Document) -> BTreeSet<String> {
-    document
+    let mut shas: BTreeSet<String> = document
         .timeline
         .records()
         .iter()
+        .chain(
+            document
+                .definitions
+                .values()
+                .flat_map(|def| def.timeline.records()),
+        )
         .flat_map(|rec| match &rec.op {
             Operation::Known(KnownOperation::ImportStep(p)) => {
                 // The replayed blob AND (brep-primary policy) the co-stored
@@ -217,7 +260,48 @@ pub fn referenced_import_shas(document: &Document) -> BTreeSet<String> {
                 .unwrap_or_default(),
             _ => Vec::new(),
         })
-        .collect()
+        .collect();
+    for (_, entry) in document.elements.iter().chain(
+        document
+            .definitions
+            .values()
+            .flat_map(|def| def.elements.iter()),
+    ) {
+        if let Some(identity) = &entry.import_source_identity {
+            shas.insert(identity.source_sha256.clone());
+        }
+    }
+    let mut pin = |reference: &crate::document::refs::ElementRef| {
+        if let Some(identity) = &reference.import_source_identity {
+            shas.insert(identity.source_sha256.clone());
+        }
+    };
+    for sketch in document.sketches.values().chain(
+        document
+            .definitions
+            .values()
+            .flat_map(|def| def.sketches.values()),
+    ) {
+        if let Some(reference) = sketch.host_face() {
+            pin(reference);
+        }
+    }
+    for binding in &document.assembly.joint_bindings {
+        pin(&binding.element);
+    }
+    for record in document.timeline.records().iter().chain(
+        document
+            .definitions
+            .values()
+            .flat_map(|def| def.timeline.records()),
+    ) {
+        if let Operation::Known(operation) = &record.op {
+            for reference in operation.stored_element_refs() {
+                pin(reference);
+            }
+        }
+    }
+    shas
 }
 
 /// Selects and validates the import sections to write: the referenced blobs
@@ -283,6 +367,28 @@ mod tests {
     use crate::document::variables::Scalar;
     use crate::ids::{DocumentId, RecordId};
     use uuid::Uuid;
+
+    #[test]
+    fn source_retention_follows_last_shared_bytes_owner() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let source = Arc::new(OwnedSource::tracked(
+            vec![1, 2, 3],
+            Arc::new(Guard(dropped.clone())),
+        ));
+        let save = source.clone();
+        drop(source);
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert_eq!(&save[..], &[1, 2, 3]);
+        drop(save);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     fn sha_of(bytes: &[u8]) -> String {
         super::super::sha256_hex(bytes)
@@ -512,14 +618,14 @@ mod tests {
             live_sha.clone(),
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: Arc::new(live.clone()),
+                bytes: Arc::new(OwnedSource::untracked(live.clone())),
             },
         );
         blobs.insert(
             orphan_sha,
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: Arc::new(orphan),
+                bytes: Arc::new(OwnedSource::untracked(orphan)),
             },
         );
 
@@ -548,7 +654,7 @@ mod tests {
             sha,
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: Arc::new(b"actually something else".to_vec()),
+                bytes: Arc::new(OwnedSource::untracked(b"actually something else".to_vec())),
             },
         );
         assert!(matches!(
@@ -571,7 +677,7 @@ mod tests {
             "../../etc/passwd".into(),
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: Arc::new(b"pwned".to_vec()),
+                bytes: Arc::new(OwnedSource::untracked(b"pwned".to_vec())),
             },
         );
         assert!(matches!(

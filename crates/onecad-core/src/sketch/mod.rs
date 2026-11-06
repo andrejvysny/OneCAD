@@ -1054,6 +1054,7 @@ mod tests {
     fn attachment_serde_shapes() {
         let host = SketchAttachment::HostFace {
             face: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 intent: None,
                 anchor: None,

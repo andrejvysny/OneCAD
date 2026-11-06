@@ -5,6 +5,7 @@
 //! WP-1.3) is the sole consumer and the only place this crate's types meet
 //! `onecad-core`'s.
 
+pub mod archive;
 pub mod blob;
 pub mod error;
 pub mod index;
@@ -12,6 +13,7 @@ pub mod package;
 pub mod registry;
 pub mod resolve;
 pub mod search;
+pub mod semantic;
 pub mod tables;
 pub mod template;
 
@@ -130,6 +132,23 @@ impl Library {
     /// [`LibraryError`] (never a load-breaking `Err`) — see [`resolve::resolve`].
     pub fn resolve_source(&self, req: &ResolveRequest<'_>) -> LibraryResult<ResolvedSource> {
         self.registry.resolve(req)
+    }
+
+    /// Capture and verify package metadata and payloads as one immutable snapshot.
+    pub fn resolve_snapshot(
+        &self,
+        req: &ResolveRequest<'_>,
+    ) -> LibraryResult<resolve::ResolvedSnapshot> {
+        resolve::resolve_snapshot(&self.root, &self.index, req)
+    }
+
+    /// Capture a snapshot under an aggregate document-and-blob byte limit.
+    pub fn resolve_snapshot_bounded(
+        &self,
+        req: &ResolveRequest<'_>,
+        limit: u64,
+    ) -> LibraryResult<resolve::ResolvedSnapshot> {
+        resolve::resolve_snapshot_bounded(&self.root, &self.index, req, limit)
     }
 
     /// "Save as Component" (spec §7 authoring) — writes a `document`-kind
@@ -493,6 +512,11 @@ generator_version = 1
     fn open_reindex_get_resolve_end_to_end() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());
+        let package_dir = dir.path().join("onecad.std.iso4762");
+        let raw =
+            std::fs::read_to_string(package_dir.join(package::COMPONENT_MANIFEST_FILE)).unwrap();
+        let pkg = package::parse(&raw, &package_dir).unwrap();
+        let revision = package::write_package(&package_dir, &pkg).unwrap();
         let mut lib = Library::open(dir.path()).unwrap();
         assert!(
             lib.index().components.is_empty(),
@@ -507,7 +531,7 @@ generator_version = 1
             .resolve_source(&ResolveRequest {
                 component_id: "onecad.std.iso4762",
                 component_version: "1.0.0",
-                component_revision: &format!("sha256:{}", "0".repeat(64)),
+                component_revision: &revision,
             })
             .unwrap();
         assert_eq!(
@@ -610,6 +634,68 @@ generator_version = 1
             .join("acme.bracket@1.0.0/source.onecad")
             .is_file());
         assert!(dir.path().join("acme.bracket@1.0.0/preview.png").is_file());
+    }
+
+    #[test]
+    fn bounded_snapshot_limits_document_and_blob_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let revision = lib
+            .save_component(new_component("acme.bracket", "1.0.0", b"geometry"))
+            .unwrap();
+        let req = ResolveRequest {
+            component_id: "acme.bracket",
+            component_version: "1.0.0",
+            component_revision: &revision,
+        };
+        let manifest = std::fs::metadata(dir.path().join("acme.bracket@1.0.0/component.toml"))
+            .unwrap()
+            .len();
+        let total = manifest + (b"frozen onecad container".len() + b"geometry".len()) as u64;
+        assert!(matches!(
+            lib.resolve_snapshot_bounded(&req, total - 1),
+            Err(LibraryError::BlobTooLarge { .. })
+        ));
+        assert!(lib.resolve_snapshot_bounded(&req, total).is_ok());
+        assert!(matches!(
+            lib.resolve_snapshot_bounded(&req, 4),
+            Err(LibraryError::BlobTooLarge { .. })
+        ));
+        assert!(matches!(
+            lib.resolve_snapshot_bounded(&req, manifest + 4),
+            Err(LibraryError::BlobTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn captured_snapshot_survives_later_source_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let revision = lib
+            .save_component(new_component("acme.bracket", "1.0.0", b"original geometry"))
+            .unwrap();
+        let req = ResolveRequest {
+            component_id: "acme.bracket",
+            component_version: "1.0.0",
+            component_revision: &revision,
+        };
+        let snapshot = lib.resolve_snapshot(&req).unwrap();
+        std::fs::write(
+            dir.path().join("acme.bracket@1.0.0/source.onecad"),
+            b"replacement document",
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.document.as_deref(),
+            Some(b"frozen onecad container".as_slice())
+        );
+        assert!(
+            matches!(snapshot.source, ResolvedSource::Document { ref blob, .. } if blob.bytes == b"original geometry")
+        );
+        assert!(matches!(
+            lib.resolve_snapshot(&req),
+            Err(LibraryError::RevisionMismatch { .. })
+        ));
     }
 
     #[test]

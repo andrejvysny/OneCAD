@@ -44,6 +44,9 @@ pub enum LibraryError {
         current: String,
     },
 
+    #[error("legacy component revision {0} cannot verify semantic package identity")]
+    UnverifiableLegacyRevision(String),
+
     #[error("library index at {path} is malformed: {message}")]
     MalformedIndex { path: PathBuf, message: String },
 

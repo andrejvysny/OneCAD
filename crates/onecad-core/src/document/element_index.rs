@@ -46,6 +46,13 @@ use crate::ids::{BodyId, ElementId};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ElementEntry {
+    /// A critical, source-addressed imported-face certificate.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::import_source_identity::deserialize_present"
+    )]
+    pub import_source_identity: Option<super::import_source_identity::ImportSourceIdentity>,
     /// The body this element currently belongs to (moves on split/merge).
     pub body: BodyId,
     /// The topological kind (face/edge/vertex).
@@ -66,6 +73,7 @@ impl ElementEntry {
     #[must_use]
     pub fn new(body: BodyId, kind: ElementKind) -> Self {
         Self {
+            import_source_identity: None,
             body,
             kind,
             anchor: None,
@@ -86,10 +94,20 @@ impl ElementEntry {
         self
     }
 
+    /// Attach critical source identity evidence from the negotiated worker.
+    #[must_use]
+    pub fn with_import_source_identity(
+        mut self,
+        identity: Option<super::import_source_identity::ImportSourceIdentity>,
+    ) -> Self {
+        self.import_source_identity = identity;
+        self
+    }
+
     /// Whether this entry can be re-bound in a fresh session at all.
     #[must_use]
     pub fn has_rebind_evidence(&self) -> bool {
-        self.anchor.is_some() || self.descriptor.is_some()
+        self.anchor.is_some() || self.descriptor.is_some() || self.import_source_identity.is_some()
     }
 }
 

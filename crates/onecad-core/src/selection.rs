@@ -440,6 +440,7 @@ fn item_from_candidate(c: &PickCandidate) -> SelectionItem {
     // demand); a sketch pick carries no topological ref.
     let element = if c.kind.is_model() {
         anchor_from_candidate(c).map(|anchor| ElementRef {
+            import_source_identity: None,
             primary: None,
             intent: None,
             anchor: Some(anchor),

@@ -223,7 +223,7 @@ impl LibraryIndex {
 /// `version` semver and every shipped package is a plain triple; a full semver
 /// implementation can replace this the day a pre-release actually ships, and
 /// the tests below say what today's rule is rather than implying more.
-pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let parts = |v: &str| -> Vec<u64> {
         v.split(['.', '-', '+'])
             .map(|p| p.parse::<u64>().unwrap_or(0))

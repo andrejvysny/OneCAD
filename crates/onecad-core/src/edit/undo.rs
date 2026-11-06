@@ -54,6 +54,14 @@ pub const UNDO_CAP: usize = 200;
 /// reverse.
 #[derive(Debug, Clone)]
 pub enum Inverse {
+    /// Restore component and occurrence state as one document undo step.
+    RestoreAssembly {
+        definition: Option<(
+            onecad_assembly::occurrence::ComponentDefId,
+            Option<Box<crate::document::component::ComponentDef>>,
+        )>,
+        assembly: Option<Box<crate::document::component::AssemblyState>>,
+    },
     /// Undo of `AddOperation`: delete the added record (Timeline.remove restores
     /// the cursor).
     RemoveRecord {
@@ -157,6 +165,7 @@ impl Inverse {
     #[must_use]
     pub fn dirty_floor(&self, doc: &Document) -> Option<usize> {
         match self {
+            Inverse::RestoreAssembly { .. } => None,
             // Undo of an add: the record is still present, so its index is exact.
             // A missing record should be impossible (the memento is applied against
             // the state it was captured over) — floor to 0 rather than guess.
@@ -197,6 +206,21 @@ impl Inverse {
     /// Restores the mementoed prior state onto `doc`.
     pub(crate) fn apply(self, doc: &mut Document) {
         match self {
+            Inverse::RestoreAssembly {
+                definition,
+                assembly,
+            } => {
+                if let Some((id, prior)) = definition {
+                    if let Some(prior) = prior {
+                        doc.definitions.insert(id, *prior);
+                    } else {
+                        doc.definitions.remove(&id);
+                    }
+                }
+                if let Some(assembly) = assembly {
+                    doc.assembly = *assembly;
+                }
+            }
             Inverse::RemoveRecord { record } => {
                 // The memento is applied against the exact state it was captured
                 // over, so the record must be present. Assert in debug to catch a

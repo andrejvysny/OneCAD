@@ -70,6 +70,7 @@ mod tests {
             Operation::Known(KnownOperation::Hole(HoleParams {
                 target_body: body,
                 face: ElementRef {
+                    import_source_identity: None,
                     primary: Some(PrimaryRef {
                         body,
                         element,

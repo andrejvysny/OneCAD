@@ -170,7 +170,7 @@ fn authoritative_document_load_refuses_broken_endpoint_relationship() {
     let value = serde_json::to_value(&doc).unwrap();
     assert!(document_io::document_from_value(value.clone()).is_ok());
     let mut broken = value;
-    broken["sketches"][id.to_string()]["constraints"]
+    broken["rootDefinition"]["sketches"][id.to_string()]["constraints"]
         .as_array_mut()
         .unwrap()
         .pop();

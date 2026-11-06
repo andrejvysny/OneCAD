@@ -67,6 +67,7 @@ pub fn profile() -> SketchRegionRef {
 /// nested-ref preservation test.
 pub fn face_ref() -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_a(),
             element: ElementId::new("el_face_1"),
@@ -217,6 +218,7 @@ pub fn op_chamfer() -> Operation {
 /// body dedup + the "intent-only ⇒ no body" rule in `derive_inputs`.
 pub fn op_fillet_with_edge_refs() -> Operation {
     let edge_on_body_a = |el: &str| ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_a(),
             element: ElementId::new(el),
@@ -228,6 +230,7 @@ pub fn op_fillet_with_edge_refs() -> Operation {
         extra: Default::default(),
     };
     let intent_only = ElementRef {
+        import_source_identity: None,
         primary: None,
         intent: Some(IntentQuery {
             version: 1,
@@ -331,6 +334,7 @@ pub fn op_sweep() -> Operation {
 /// test module.
 pub fn hole_face_ref() -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_a(),
             element: ElementId::new("el_face_top"),
@@ -378,6 +382,7 @@ pub fn op_mirror() -> Operation {
 /// `PrepareOffsetFace` evidence promotes into).
 pub fn offset_face_ref(el: &str, surface: &str, x: f64) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_a(),
             element: ElementId::new(el),

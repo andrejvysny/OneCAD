@@ -787,6 +787,9 @@ pub struct AcquireRequest {
 /// [`AcquireRequest`] evidence has been validated (REF-FRESH-1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ElementBinding {
+    /// Critical certified source identity, when available.
+    pub import_source_identity:
+        Option<crate::document::import_source_identity::ImportSourceIdentity>,
     pub element_id: ElementId,
     pub topo_key: TopoKey,
     pub body: BodyId,
@@ -810,6 +813,9 @@ pub struct BindElementIdsRequest {
 /// changed) — [`mint_element_ids`] then returns that same id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerElementEvidence {
+    /// Critical certified source identity, when available.
+    pub import_source_identity:
+        Option<crate::document::import_source_identity::ImportSourceIdentity>,
     pub topo_key: TopoKey,
     pub body: BodyId,
     pub kind: ElementKind,
@@ -1083,6 +1089,7 @@ mod tests {
     fn minted_ids_are_opaque_and_never_embed_body_id() {
         let body = BodyId(Uuid::from_u128(0xB0D1));
         let ev = WorkerElementEvidence {
+            import_source_identity: None,
             topo_key: TopoKey::new("f:22"),
             body,
             kind: ElementKind::Face,
@@ -1105,6 +1112,7 @@ mod tests {
         // element ⇒ one minted id, reused.
         let body = BodyId(Uuid::from_u128(1));
         let ev = |k: &str| WorkerElementEvidence {
+            import_source_identity: None,
             topo_key: TopoKey::new(k),
             body,
             kind: ElementKind::Face,
@@ -1132,6 +1140,7 @@ mod tests {
         // Invariant 1: an already-known element gets its same id back.
         let existing = ElementId::new("el_stable_42");
         let ev = WorkerElementEvidence {
+            import_source_identity: None,
             topo_key: TopoKey::new("f:22"),
             body: BodyId(Uuid::from_u128(1)),
             kind: ElementKind::Face,

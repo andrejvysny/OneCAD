@@ -40,9 +40,36 @@ pub fn parse_value(bytes: &[u8]) -> IoResult<Value> {
 /// # Errors
 /// [`IoError::Corrupt`] if the value does not match the document schema.
 pub fn document_from_value(value: Value) -> IoResult<Document> {
+    if value.get("rootDefinition").is_some() {
+        for key in [
+            "variables",
+            "sketches",
+            "sketchVisibility",
+            "datumPlanes",
+            "timeline",
+            "bodies",
+            "elements",
+            "repair",
+            "namedSelections",
+        ] {
+            if value.get(key).is_some() {
+                return Err(IoError::Corrupt(format!(
+                    "ambiguous root definition field {key}"
+                )));
+            }
+        }
+    }
+    if value.get("schemaVersion").and_then(Value::as_u64) == Some(4) {
+        super::import_identity::validate(&value).map_err(IoError::Corrupt)?;
+    }
     let document: Document = serde_json::from_value(value)
         .map_err(|e| IoError::Corrupt(format!("document.json decode: {e}")))?;
-    for sketch in document.sketches.values() {
+    for sketch in document.sketches.values().chain(
+        document
+            .definitions
+            .values()
+            .flat_map(|def| def.sketches.values()),
+    ) {
         sketch
             .validate_endpoint_tangencies()
             .map_err(|e| IoError::Corrupt(format!("sketch {}: {e}", sketch.id)))?;

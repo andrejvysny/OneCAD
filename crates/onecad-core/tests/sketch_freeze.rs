@@ -292,6 +292,7 @@ fn canonical_sketch() -> Sketch {
     // Host-face attachment with a fully-formed primary ElementRef.
     s.attachment = SketchAttachment::HostFace {
         face: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: BodyId(Uuid::from_u128(0xB0D1)),
                 element: ElementId::new("el_face_1"),

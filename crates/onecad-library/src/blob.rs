@@ -119,18 +119,7 @@ impl BlobStore {
                 LibraryError::Io(e.to_string())
             }
         })?;
-        let actual = file.metadata()?.len();
-        if actual > limit {
-            return Err(LibraryError::BlobTooLarge { limit, actual });
-        }
-        let mut bytes = Vec::new();
-        file.take(limit + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > limit {
-            return Err(LibraryError::BlobTooLarge {
-                limit,
-                actual: bytes.len() as u64,
-            });
-        }
+        let bytes = read_fixed_bounded(file, limit)?;
         let actual = sha256_hex(&bytes);
         if actual != sha256 {
             return Err(LibraryError::BlobHashMismatch {
@@ -148,6 +137,23 @@ impl BlobStore {
     pub fn contains(&self, sha256: &str) -> bool {
         self.path_for(sha256).is_ok_and(|p| p.is_file())
     }
+}
+
+pub(crate) fn read_fixed_bounded(mut file: std::fs::File, limit: u64) -> LibraryResult<Vec<u8>> {
+    let actual = file.metadata()?.len();
+    if actual > limit || usize::try_from(actual).is_err() {
+        return Err(LibraryError::BlobTooLarge { limit, actual });
+    }
+    let mut bytes = vec![0; actual as usize].into_boxed_slice();
+    file.read_exact(&mut bytes)?;
+    let mut extra = [0; 1];
+    if file.read(&mut extra)? != 0 {
+        return Err(LibraryError::BlobTooLarge {
+            limit: actual,
+            actual: actual.saturating_add(1),
+        });
+    }
+    Ok(bytes.into_vec())
 }
 
 fn verify_existing(key: &str, expected: &[u8], existing: &[u8]) -> LibraryResult<()> {
@@ -204,6 +210,23 @@ fn is_sha256_hex(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_read_refuses_oversize_before_allocating_and_keeps_exact_capacity() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"12345").unwrap();
+        let oversized = read_fixed_bounded(std::fs::File::open(file.path()).unwrap(), 4);
+        assert!(matches!(
+            oversized,
+            Err(LibraryError::BlobTooLarge {
+                limit: 4,
+                actual: 5
+            })
+        ));
+        let bytes = read_fixed_bounded(std::fs::File::open(file.path()).unwrap(), 5).unwrap();
+        assert_eq!(bytes, b"12345");
+        assert_eq!(bytes.capacity(), bytes.len());
+    }
 
     fn store() -> (tempfile::TempDir, BlobStore) {
         let dir = tempfile::tempdir().unwrap();

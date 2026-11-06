@@ -26,6 +26,7 @@ fn single() -> HoleParams {
     HoleParams {
         target_body: body(),
         face: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: body(),
                 element: ElementId::new("el_face_top"),

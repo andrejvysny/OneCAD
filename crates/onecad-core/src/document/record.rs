@@ -437,6 +437,51 @@ impl KnownOperation {
         }
     }
 
+    /// Read every stored topology reference, including inactive Extrude targets.
+    #[must_use]
+    pub fn stored_element_refs(&self) -> Vec<&ElementRef> {
+        match self {
+            KnownOperation::Fillet(p) => p.edges.iter().collect(),
+            KnownOperation::Chamfer(p) => {
+                p.edges.iter().chain(p.reference_face_refs.iter()).collect()
+            }
+            KnownOperation::Shell(p) => p.faces.iter().collect(),
+            KnownOperation::Extrude(p) => {
+                p.target_face.iter().chain(p.target_face2.iter()).collect()
+            }
+            KnownOperation::Sketch(p) => p.host_face.iter().collect(),
+            KnownOperation::Hole(p) => vec![&p.face],
+            KnownOperation::Gear(p) => p.placement.face.iter().collect(),
+            KnownOperation::Revolve(p) => match p.axis.as_ref() {
+                Some(AxisRef::Element {
+                    edge_ref: Some(reference),
+                    ..
+                }) => vec![reference],
+                _ => Vec::new(),
+            },
+            KnownOperation::OffsetFace(p) => p.faces.iter().chain(p.opposite_face.iter()).collect(),
+            KnownOperation::PlaceComponent(p) => p
+                .mate
+                .as_ref()
+                .map(|mate| vec![&mate.target])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// All stored topological references, including inactive Extrude targets.
+    #[must_use]
+    pub fn stored_element_refs_mut(&mut self) -> Vec<&mut ElementRef> {
+        match self {
+            KnownOperation::Extrude(params) => params
+                .target_face
+                .iter_mut()
+                .chain(params.target_face2.iter_mut())
+                .collect(),
+            _ => self.element_refs_mut(),
+        }
+    }
+
     /// Mutable access to every dimensional [`Scalar`] this op carries as a
     /// **parameter**, paired with its `opType.field` label for diagnostics and
     /// the [`Dimension`] that label is measured in.
@@ -3608,11 +3653,11 @@ impl PlaceComponentParams {
                 self.component_version
             ));
         }
-        match self.component_revision.strip_prefix("sha256:") {
+        match self.component_revision.strip_prefix("sha256:").or_else(|| self.component_revision.strip_prefix("sha256v2:")) {
             Some(hex) if is_sha256_hex(hex) => {}
             _ => {
                 return Err(format!(
-                "PlaceComponent componentRevision `{}` must be `sha256:` + 64 lowercase-hex chars",
+                "PlaceComponent componentRevision `{}` must be `sha256:` or `sha256v2:` + 64 lowercase-hex chars",
                 self.component_revision
             ))
             }
@@ -4311,6 +4356,7 @@ mod tests {
 
     fn hole_face_ref() -> ElementRef {
         ElementRef {
+            import_source_identity: None,
             primary: Some(crate::document::refs::PrimaryRef {
                 body: body(1),
                 element: ElementId::new("el_face_top"),
@@ -4489,6 +4535,7 @@ mod tests {
         // at regen time) but the host body is still a dependency.
         let intent_only = HoleParams {
             face: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 ..hole_face_ref()
             },
@@ -4515,6 +4562,7 @@ mod tests {
 
         let p = HoleParams {
             face: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 ..hole_face_ref()
             },
@@ -4873,6 +4921,7 @@ mod tests {
 
     fn offset_ref(el: &str) -> ElementRef {
         ElementRef {
+            import_source_identity: None,
             primary: Some(crate::document::refs::PrimaryRef {
                 body: body(1),
                 element: ElementId::new(el),
@@ -5008,6 +5057,7 @@ mod tests {
         assert!(p.validate().unwrap_err().contains("!= faceIds[0]"));
         let p = OffsetFaceParams {
             faces: vec![ElementRef {
+                import_source_identity: None,
                 primary: None,
                 ..offset_ref("el_f1")
             }],
@@ -5592,6 +5642,7 @@ mod tests {
         mated.mate = Some(ComponentMate {
             self_attachment: "shank_axis".to_string(),
             target: ElementRef {
+                import_source_identity: None,
                 primary: Some(crate::document::refs::PrimaryRef {
                     body: target_body,
                     element: ElementId::new("el_1"),
@@ -5631,6 +5682,11 @@ mod tests {
         let mut bad_revision = ok.clone();
         bad_revision.component_revision = "not-a-hash".to_string();
         assert!(bad_revision.validate().is_err());
+        let mut semantic_revision = ok.clone();
+        semantic_revision.component_revision = format!("sha256v2:{}", "a".repeat(64));
+        assert!(semantic_revision.validate().is_ok());
+        semantic_revision.component_revision = format!("sha256v2:{}", "A".repeat(64));
+        assert!(semantic_revision.validate().is_err());
 
         // The id/version pair names the package directory — a path-escaping
         // value must die at authoring, before any `Path::join` sees it.
@@ -5665,6 +5721,7 @@ mod tests {
         bad_mate.mate = Some(ComponentMate {
             self_attachment: String::new(),
             target: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 intent: None,
                 anchor: None,
@@ -5691,6 +5748,7 @@ mod tests {
         bare.mate = Some(ComponentMate {
             self_attachment: "shank_axis".to_string(),
             target: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 intent: None,
                 anchor: None,
@@ -5753,6 +5811,7 @@ mod tests {
         params.mate = Some(ComponentMate {
             self_attachment: "shank_axis".to_string(),
             target: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 intent: None,
                 anchor: None,
@@ -5830,6 +5889,7 @@ mod tests {
         let mate = |self_frame| ComponentMate {
             self_attachment: "shank_axis".to_string(),
             target: ElementRef {
+                import_source_identity: None,
                 primary: Some(crate::document::refs::PrimaryRef {
                     body: body(1),
                     element: ElementId::new("el_1"),
@@ -5887,6 +5947,7 @@ mod tests {
         params.mate = Some(ComponentMate {
             self_attachment: "shank_axis".to_string(),
             target: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 intent: None,
                 anchor: None,

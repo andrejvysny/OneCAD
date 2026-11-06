@@ -11,6 +11,7 @@
 //! | `meshes/<bodyId>.<lod>.mesh` | cache | 1 GB | Stored |
 //! | `checkpoints/<step>.json` / `.bin` | cache | 1 GB | Stored |
 //! | `imports/<sha256>.step`/`.brep` | **authoritative-for-a-record** (see [`super::imports`]) | 256 MB | Deflated |
+//! | `library/<sha256>.zip` | opaque referenced component archive | 256 MB | Stored |
 //! | `preview.png` | cache | 1 GB | Stored |
 //!
 //! Whole-container caps: **4 GB** total (declared uncompressed) and **10 000**
@@ -283,9 +284,9 @@ pub struct SaveMeta {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One in-memory section to write: its path and uncompressed bytes.
-struct Section {
+struct Section<'a> {
     path: String,
-    bytes: Vec<u8>,
+    bytes: std::borrow::Cow<'a, [u8]>,
 }
 
 /// Writes v2 `.onecad` containers atomically.
@@ -304,7 +305,16 @@ impl ContainerWriter {
         caches: &ContainerCaches,
         meta: &SaveMeta,
     ) -> IoResult<()> {
-        Self::save_inner(path, document, caches, &ImportBlobs::new(), meta, true).map(|_| ())
+        Self::save_inner(
+            path,
+            document,
+            caches,
+            &ImportBlobs::new(),
+            &super::library::LibraryArchives::new(),
+            meta,
+            true,
+        )
+        .map(|_| ())
     }
 
     /// Atomically writes `document` (+ optional `caches`) to `path`, additionally
@@ -328,7 +338,29 @@ impl ContainerWriter {
         imports: &ImportBlobs,
         meta: &SaveMeta,
     ) -> IoResult<()> {
-        Self::save_inner(path, document, caches, imports, meta, true).map(|_| ())
+        Self::save_inner(
+            path,
+            document,
+            caches,
+            imports,
+            &super::library::LibraryArchives::new(),
+            meta,
+            true,
+        )
+        .map(|_| ())
+    }
+
+    /// Save only the library archives explicitly referenced by the caller's document state.
+    /// The caller must include references in unknown module slices and omit unreferenced blobs.
+    pub fn save_with_imports_and_library(
+        path: &Path,
+        document: &Document,
+        caches: &ContainerCaches,
+        imports: &ImportBlobs,
+        archives: &super::library::LibraryArchives,
+        meta: &SaveMeta,
+    ) -> IoResult<()> {
+        Self::save_inner(path, document, caches, imports, archives, meta, true).map(|_| ())
     }
 
     /// Crash-simulation hook: writes + fsyncs the temp file but **skips** the
@@ -344,7 +376,15 @@ impl ContainerWriter {
         caches: &ContainerCaches,
         meta: &SaveMeta,
     ) -> IoResult<PathBuf> {
-        Self::save_inner(path, document, caches, &ImportBlobs::new(), meta, false)
+        Self::save_inner(
+            path,
+            document,
+            caches,
+            &ImportBlobs::new(),
+            &super::library::LibraryArchives::new(),
+            meta,
+            false,
+        )
     }
 
     fn save_inner(
@@ -352,13 +392,42 @@ impl ContainerWriter {
         document: &Document,
         caches: &ContainerCaches,
         imports: &ImportBlobs,
+        archives: &super::library::LibraryArchives,
         meta: &SaveMeta,
         commit: bool,
     ) -> IoResult<PathBuf> {
-        let sections = build_sections(document, caches, imports)?;
+        if document.schema_version != GLOBAL_SCHEMA_VERSION {
+            return Err(IoError::UnsupportedDocumentSchema {
+                found: document.schema_version,
+                supported: GLOBAL_SCHEMA_VERSION,
+            });
+        }
+        document
+            .assembly
+            .validate(document.root_definition_id, &document.definitions)
+            .map_err(|error| IoError::Corrupt(format!("invalid assembly: {error}")))?;
+        if archives.len() > MAX_ENTRIES.saturating_sub(3) {
+            return Err(IoError::TooLarge("too many library archives".into()));
+        }
+        let sections = build_sections(document, caches, imports, archives)?;
         let manifest = build_manifest(document, meta, &sections);
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| IoError::Corrupt(format!("manifest serialize: {e}")))?;
+
+        if !archives.is_empty() {
+            let total =
+                sections
+                    .iter()
+                    .try_fold(manifest_bytes.len() as u64, |size, section| {
+                        size.checked_add(section.bytes.len() as u64)
+                            .ok_or_else(|| IoError::TooLarge("container size overflow".into()))
+                    })?;
+            if sections.len() + 1 > MAX_ENTRIES || total > MAX_TOTAL_BYTES {
+                return Err(IoError::TooLarge(
+                    "container entry or size cap exceeded".into(),
+                ));
+            }
+        }
 
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent)?;
@@ -378,32 +447,42 @@ impl ContainerWriter {
 
 /// Builds the section list (authoritative + derived + imports + caches) with
 /// validated names.
-fn build_sections(
+fn build_sections<'a>(
     document: &Document,
     caches: &ContainerCaches,
     imports: &ImportBlobs,
-) -> IoResult<Vec<Section>> {
+    archives: &'a super::library::LibraryArchives,
+) -> IoResult<Vec<Section<'a>>> {
     let mut sections = Vec::new();
     sections.push(Section {
         path: DOCUMENT_PATH.to_string(),
-        bytes: document_io::serialize_document(document)?,
+        bytes: std::borrow::Cow::Owned(document_io::serialize_document(document)?),
     });
     sections.push(Section {
         path: OPS_PATH.to_string(),
-        bytes: history_io::serialize_ops_jsonl(document.timeline.records())?,
+        bytes: std::borrow::Cow::Owned(history_io::serialize_ops_jsonl(
+            document.timeline.records(),
+        )?),
     });
     // Authoritative-for-a-record import blobs, refcounted against live records.
     for (path, bytes) in import_sections(document, imports)? {
         guard_authored_name(&path)?;
         sections.push(Section {
             path,
-            bytes: bytes.to_vec(),
+            bytes: std::borrow::Cow::Owned(bytes.to_vec()),
+        });
+    }
+    for (sha, bytes) in archives {
+        super::library::validate(sha, bytes)?;
+        sections.push(Section {
+            path: super::library::path(sha),
+            bytes: std::borrow::Cow::Borrowed(bytes.as_slice()),
         });
     }
     for (body, bytes) in &caches.geometry {
         sections.push(Section {
             path: format!("{GEOMETRY_DIR}{body}.brep"),
-            bytes: bytes.clone(),
+            bytes: std::borrow::Cow::Owned(bytes.clone()),
         });
     }
     for mesh in &caches.meshes {
@@ -411,25 +490,25 @@ fn build_sections(
         guard_authored_name(&path)?;
         sections.push(Section {
             path,
-            bytes: mesh.bytes.as_ref().clone(),
+            bytes: std::borrow::Cow::Owned(mesh.bytes.as_ref().clone()),
         });
     }
     for cp in &caches.checkpoints {
         sections.push(Section {
             path: format!("{CHECKPOINTS_DIR}{}.json", cp.step),
-            bytes: cp.json.clone(),
+            bytes: std::borrow::Cow::Owned(cp.json.clone()),
         });
         if let Some(bin) = &cp.bin {
             sections.push(Section {
                 path: format!("{CHECKPOINTS_DIR}{}.bin", cp.step),
-                bytes: bin.clone(),
+                bytes: std::borrow::Cow::Owned(bin.clone()),
             });
         }
     }
     if let Some(png) = &caches.preview_png {
         sections.push(Section {
             path: PREVIEW_PATH.to_string(),
-            bytes: png.clone(),
+            bytes: std::borrow::Cow::Owned(png.clone()),
         });
     }
     Ok(sections)
@@ -581,6 +660,7 @@ pub struct LoadedContainer {
     /// Import blobs present in the archive, indexed from the ZIP directory at
     /// open (names + declared sizes only — **no bytes are read**).
     imports: Vec<ImportBlobInfo>,
+    library_archives: Vec<super::library::LibraryArchiveInfo>,
     /// The container path (reopened for lazy cache reads).
     source: PathBuf,
 }
@@ -651,6 +731,72 @@ impl LoadedContainer {
         let bytes = read_named(&mut archive, &info.path, MAX_IMPORT_BLOB_BYTES)?
             .ok_or_else(|| ImportBlobError::Missing(sha256.to_string()))?;
         verify_blob(sha256, bytes)
+    }
+
+    /// Archive names and sizes indexed at open; content is verified on read.
+    pub fn library_archives(&self) -> &[super::library::LibraryArchiveInfo] {
+        &self.library_archives
+    }
+
+    /// Read one referenced opaque archive, enforcing the per-entry cap and content hash.
+    pub fn read_library_archive(&self, sha: &str) -> IoResult<Vec<u8>> {
+        self.read_library_archive_bounded(sha, super::library::MAX_LIBRARY_ARCHIVE_BYTES)
+    }
+
+    /// Read with a caller-specific cap, never exceeding the global archive limit.
+    pub fn read_library_archive_bounded(&self, sha: &str, limit: u64) -> IoResult<Vec<u8>> {
+        if !crate::document::record::is_sha256_hex(sha) {
+            return Err(IoError::Corrupt("invalid library archive key".into()));
+        }
+        let info = self
+            .library_archives
+            .iter()
+            .find(|entry| entry.sha256 == sha)
+            .ok_or_else(|| IoError::Corrupt(format!("missing library archive {sha}")))?;
+        let limit = limit.min(super::library::MAX_LIBRARY_ARCHIVE_BYTES);
+        if info.declared_size > limit {
+            return Err(IoError::TooLarge(format!(
+                "library archive {sha} exceeds {limit} bytes"
+            )));
+        }
+        let mut archive = self.reopen()?;
+        let bytes = read_named(&mut archive, &info.path, limit)?
+            .ok_or_else(|| IoError::Corrupt(format!("missing library archive {sha}")))?;
+        super::library::validate(sha, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// Reads an indexed library archive into storage admitted by the caller.
+    pub fn read_library_archive_into(&self, sha: &str, output: &mut [u8]) -> IoResult<()> {
+        if !crate::document::record::is_sha256_hex(sha) {
+            return Err(IoError::Corrupt("invalid library archive key".into()));
+        }
+        let info = self
+            .library_archives
+            .iter()
+            .find(|entry| entry.sha256 == sha)
+            .ok_or_else(|| IoError::Corrupt(format!("missing library archive {sha}")))?;
+        if info.declared_size != output.len() as u64 {
+            return Err(IoError::Corrupt("archive admitted size mismatch".into()));
+        }
+        let mut archive = self.reopen()?;
+        let mut file = archive
+            .by_name(&info.path)
+            .map_err(|error| IoError::Corrupt(format!("read library archive: {error}")))?;
+        if file.size() != info.declared_size {
+            return Err(IoError::Corrupt("archive size changed".into()));
+        }
+        file.read_exact(output)
+            .map_err(|error| IoError::Corrupt(format!("read library archive: {error}")))?;
+        let mut probe = [0u8; 1];
+        if file
+            .read(&mut probe)
+            .map_err(|error| IoError::Corrupt(format!("archive CRC: {error}")))?
+            != 0
+        {
+            return Err(IoError::Corrupt("archive exceeds declared size".into()));
+        }
+        super::library::validate(sha, output)
     }
 
     /// Reads a cache blob by its archive path, on demand.
@@ -795,7 +941,7 @@ impl ContainerReader {
     /// # Errors
     /// [`IoError`] on a malformed / hostile / corrupt archive.
     pub fn open(path: &Path) -> IoResult<LoadedContainer> {
-        Self::open_with_registry(path, &MigrationRegistry::new())
+        Self::open_with_registry(path, &MigrationRegistry::current())
     }
 
     /// Opens a container, applying `registry`'s migration chain to older documents.
@@ -813,7 +959,7 @@ impl ContainerReader {
             .map_err(|e| IoError::Corrupt(format!("open archive: {e}")))?;
 
         // Caps + traversal guard, and (free, same walk) the import-blob index.
-        let imports = guard_directory(&mut archive)?;
+        let (imports, library_archives) = guard_directory(&mut archive)?;
 
         // Manifest (index) — identity-validated.
         let manifest_bytes = read_named(&mut archive, MANIFEST_PATH, MAX_MANIFEST_BYTES)?
@@ -821,12 +967,29 @@ impl ContainerReader {
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| IoError::Corrupt(format!("manifest parse: {e}")))?;
         manifest.validate_identity()?;
+        if manifest.global_schema_version > GLOBAL_SCHEMA_VERSION {
+            return Err(IoError::UnsupportedDocumentSchema {
+                found: manifest.global_schema_version,
+                supported: GLOBAL_SCHEMA_VERSION,
+            });
+        }
 
         // Authoritative document body.
         let doc_bytes = read_named(&mut archive, DOCUMENT_PATH, MAX_DOCUMENT_BYTES)?
             .ok_or_else(|| IoError::Corrupt("missing document.json".into()))?;
         verify_authoritative(&manifest, DOCUMENT_PATH, &doc_bytes)?;
         let doc_value = document_io::parse_value(&doc_bytes)?;
+        if let Some(version) = doc_value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+        {
+            if version != u64::from(manifest.global_schema_version) {
+                return Err(IoError::Corrupt(format!(
+                    "document schema {version} disagrees with manifest schema {}",
+                    manifest.global_schema_version
+                )));
+            }
+        }
 
         // Version-aware migration + typed decode.
         let (document, migrated) = super::migrate::migrate_and_decode(
@@ -865,6 +1028,7 @@ impl ContainerReader {
             manifest,
             outcome,
             imports,
+            library_archives,
             source: path.to_path_buf(),
         })
     }
@@ -872,7 +1036,12 @@ impl ContainerReader {
 
 /// Rejects typed Shell records whose dependency view and worker input view differ.
 fn validate_persisted_shells(document: &Document) -> IoResult<()> {
-    for record in document.timeline.records() {
+    for record in document.timeline.records().iter().chain(
+        document
+            .definitions
+            .values()
+            .flat_map(|def| def.timeline.records()),
+    ) {
         let Operation::Known(KnownOperation::Shell(params)) = &record.op else {
             continue;
         };
@@ -893,7 +1062,9 @@ fn validate_persisted_shells(document: &Document) -> IoResult<()> {
 /// [`LoadedContainer::read_import_blob`], never an open failure (see
 /// [`super::imports`]). Import blobs DO count against the whole-container caps
 /// enforced here.
-fn guard_directory<R: Read + Seek>(archive: &mut ZipArchive<R>) -> IoResult<Vec<ImportBlobInfo>> {
+fn guard_directory<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+) -> IoResult<(Vec<ImportBlobInfo>, Vec<super::library::LibraryArchiveInfo>)> {
     if archive.len() > MAX_ENTRIES {
         return Err(IoError::TooLarge(format!(
             "{} entries exceeds the {MAX_ENTRIES} cap",
@@ -901,6 +1072,7 @@ fn guard_directory<R: Read + Seek>(archive: &mut ZipArchive<R>) -> IoResult<Vec<
         )));
     }
     let mut imports = Vec::new();
+    let mut library_archives = Vec::new();
     let mut total: u64 = 0;
     for i in 0..archive.len() {
         let file = archive
@@ -923,6 +1095,19 @@ fn guard_directory<R: Read + Seek>(archive: &mut ZipArchive<R>) -> IoResult<Vec<
                 "declared uncompressed size exceeds the {MAX_TOTAL_BYTES}-byte cap"
             )));
         }
+        if let Some(sha256) = super::library::parse_path(file.name()) {
+            if library_archives
+                .iter()
+                .any(|entry: &super::library::LibraryArchiveInfo| entry.sha256 == sha256)
+            {
+                return Err(IoError::Corrupt("duplicate library archive".into()));
+            }
+            library_archives.push(super::library::LibraryArchiveInfo {
+                sha256,
+                declared_size: file.size(),
+                path: file.name().to_string(),
+            });
+        }
         if let Some((sha256, codec)) = parse_import_blob_path(file.name()) {
             imports.push(ImportBlobInfo {
                 sha256,
@@ -932,7 +1117,7 @@ fn guard_directory<R: Read + Seek>(archive: &mut ZipArchive<R>) -> IoResult<Vec<
             });
         }
     }
-    Ok(imports)
+    Ok((imports, library_archives))
 }
 
 /// Reads a named entry, bounding the decompressed size to `cap`. `Ok(None)` when
@@ -1029,6 +1214,28 @@ mod tests {
     use crate::ids::{BodyId, DocumentId, ElementId, RecordId};
     use uuid::Uuid;
 
+    #[test]
+    fn archive_sections_borrow_carrier_without_scratch_copy() {
+        let doc = Document::new(DocumentId(Uuid::from_u128(44)));
+        let bytes = b"archive payload".to_vec();
+        let sha = sha256_hex(&bytes);
+        let archived = std::sync::Arc::new(super::super::library::ArchiveBytes::untracked(bytes));
+        let archives = super::super::library::LibraryArchives::from([(sha, archived.clone())]);
+        let sections = build_sections(
+            &doc,
+            &ContainerCaches::none(),
+            &ImportBlobs::new(),
+            &archives,
+        )
+        .unwrap();
+        let section = sections
+            .iter()
+            .find(|section| section.path.starts_with("library/"))
+            .unwrap();
+        assert!(matches!(section.bytes, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(section.bytes.as_ptr(), archived.as_slice().as_ptr());
+    }
+
     fn extrude(seed: u128, distance: f64) -> crate::document::record::OperationRecord {
         let op = Operation::Known(KnownOperation::Extrude(ExtrudeParams {
             profile: None,
@@ -1096,6 +1303,7 @@ mod tests {
             thickness: Scalar::new(2.0),
             open_faces: vec![face.clone()],
             faces: vec![ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body: foreign,
                     element: face,

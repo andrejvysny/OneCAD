@@ -22,10 +22,12 @@
 //!   `{records, cursor}` alone (see [`crate::edit::undo`]).
 
 pub mod body;
+pub mod component;
 pub mod component_params;
 pub mod datum;
 pub mod element_index;
 pub mod hole_placement;
+pub mod import_source_identity;
 pub mod modules;
 pub mod record;
 pub mod refs;
@@ -35,6 +37,7 @@ pub mod variables;
 
 use std::collections::BTreeMap;
 
+use onecad_assembly::occurrence::ComponentDefId;
 use serde::{Deserialize, Serialize};
 
 use crate::document::body::BodyRegistry;
@@ -51,7 +54,7 @@ use crate::sketch::Sketch;
 
 /// The document-schema version stamped on freshly authored documents (V1/V2 §2.1
 /// `GlobalSchemaVersion`).
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 4;
 
 /// Document-wide settings (V1/V2 §2.1: units, tolerance policy, OCCT fingerprint).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +100,7 @@ pub struct NamedSelection {
 /// Root of an open document (V1/V2 §2.1). The single authoritative model owned
 /// by Rust; mutated only through [`DocumentSession`](crate::edit::DocumentSession).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "DocumentData", into = "DocumentData")]
+#[serde(try_from = "DocumentData", into = "DocumentData")]
 pub struct Document {
     /// Stable document identity.
     pub id: DocumentId,
@@ -133,6 +136,15 @@ pub struct Document {
     /// module is not installed is carried through load and save untouched, which
     /// is what lets a project survive a missing addon (ADR-0005).
     pub modules: ModuleStateTable,
+    /// Identity and metadata of the root definition, whose fields remain directly
+    /// accessible here for existing root-part operations.
+    pub root_definition_id: ComponentDefId,
+    pub root_definition_name: String,
+    pub root_definition_extra: Extra,
+    /// Embedded definitions excluding the root; each owns its local history.
+    pub definitions: BTreeMap<ComponentDefId, component::ComponentDef>,
+    /// Root-owned occurrence and joint state.
+    pub assembly: component::AssemblyState,
     /// Document-level unknown keys, preserved verbatim.
     pub extra: Extra,
 }
@@ -155,6 +167,11 @@ impl Document {
             repair: RepairState::new(),
             named_selections: Vec::new(),
             modules: ModuleStateTable::new(),
+            root_definition_id: component::root_definition_id(id),
+            root_definition_name: "Root".into(),
+            root_definition_extra: Extra::new(),
+            definitions: BTreeMap::new(),
+            assembly: component::AssemblyState::default(),
             extra: Extra::new(),
         }
     }
@@ -265,28 +282,38 @@ struct DocumentData {
     schema_version: u32,
     #[serde(default)]
     settings: DocumentSettings,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     variables: VariableTable,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     sketches: BTreeMap<SketchId, Sketch>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing)]
     sketch_visibility: BTreeMap<SketchId, bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     datum_planes: BTreeMap<DatumPlaneId, DatumPlane>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     timeline: TimelineWire,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     bodies: BodyRegistry,
-    #[serde(default, skip_serializing_if = "ElementIndex::is_empty")]
+    #[serde(default, skip_serializing)]
     elements: ElementIndex,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     repair: RepairState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing)]
     named_selections: Vec<NamedSelection>,
     /// Skipped when empty, so every document written before module state existed
     /// keeps serializing byte-identically (ADR-0004 — no format break).
     #[serde(default, skip_serializing_if = "ModuleStateTable::is_empty")]
     modules: ModuleStateTable,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root_definition: Option<component::ComponentDef>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "component::deserialize_definitions"
+    )]
+    definitions: BTreeMap<ComponentDefId, component::ComponentDef>,
+    #[serde(default)]
+    assembly: component::AssemblyState,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     extra: Extra,
 }
@@ -297,52 +324,132 @@ impl From<Document> for DocumentData {
             id: d.id,
             schema_version: d.schema_version,
             settings: d.settings,
-            variables: d.variables,
-            sketches: d.sketches,
-            sketch_visibility: d.sketch_visibility,
-            datum_planes: d.datum_planes,
-            timeline: TimelineWire::from(&d.timeline),
-            bodies: d.bodies,
-            elements: d.elements,
-            repair: d.repair,
-            named_selections: d.named_selections,
+            root_definition: Some(component::ComponentDef {
+                id: d.root_definition_id,
+                name: d.root_definition_name,
+                variables: d.variables,
+                sketches: d.sketches,
+                sketch_visibility: d.sketch_visibility,
+                datum_planes: d.datum_planes,
+                timeline: d.timeline,
+                bodies: d.bodies,
+                elements: d.elements,
+                repair: d.repair,
+                named_selections: d.named_selections,
+                extra: d.root_definition_extra,
+            }),
+            variables: VariableTable::new(),
+            sketches: BTreeMap::new(),
+            sketch_visibility: BTreeMap::new(),
+            datum_planes: BTreeMap::new(),
+            timeline: TimelineWire::default(),
+            bodies: BodyRegistry::new(),
+            elements: ElementIndex::new(),
+            repair: RepairState::new(),
+            named_selections: Vec::new(),
             modules: d.modules,
+            definitions: d.definitions,
+            assembly: d.assembly,
             extra: d.extra,
         }
     }
 }
 
-impl From<DocumentData> for Document {
-    fn from(w: DocumentData) -> Self {
+impl TryFrom<DocumentData> for Document {
+    type Error = String;
+
+    fn try_from(w: DocumentData) -> Result<Self, Self::Error> {
+        if w.root_definition.is_some()
+            && (!w.variables.is_empty()
+                || !w.sketches.is_empty()
+                || !w.sketch_visibility.is_empty()
+                || !w.datum_planes.is_empty()
+                || !w.timeline.records.is_empty()
+                || w.timeline.cursor != 0
+                || !w.bodies.is_empty()
+                || !w.elements.is_empty()
+                || !w.repair.is_empty()
+                || !w.named_selections.is_empty())
+        {
+            return Err("ambiguous root definition fields".into());
+        }
         let schema_version = if w.schema_version == 0 {
-            DOCUMENT_SCHEMA_VERSION
+            1
         } else {
             w.schema_version
         };
+        if schema_version > DOCUMENT_SCHEMA_VERSION {
+            return Err(format!("unsupported document schema {schema_version}"));
+        }
         // `from_records` marks every step Dirty; a loaded `RepairState` means the
         // last regen surfaced unresolved refs at those steps, so reflect that as
         // `NeedsRepair` (F3). `mark_state` is bounds-checked — a step_index past
         // the record count (tampered/stale) is silently ignored.
-        let mut timeline = Timeline::from(w.timeline);
-        for item in w.repair.items() {
-            let _ = timeline.mark_state(item.step_index, StepState::NeedsRepair);
+        let mut root = match w.root_definition {
+            Some(root) => root,
+            None if schema_version < 2 => component::ComponentDef {
+                id: component::root_definition_id(w.id),
+                name: "Root".into(),
+                variables: w.variables,
+                sketches: w.sketches,
+                sketch_visibility: w.sketch_visibility,
+                datum_planes: w.datum_planes,
+                timeline: Timeline::from(w.timeline),
+                bodies: w.bodies,
+                elements: w.elements,
+                repair: w.repair,
+                named_selections: w.named_selections,
+                extra: Extra::new(),
+            },
+            None => return Err("schema 2 requires rootDefinition".into()),
+        };
+        for item in root.repair.items() {
+            let _ = root
+                .timeline
+                .mark_state(item.step_index, StepState::NeedsRepair);
         }
-        Self {
+        if root.extra.contains_key("assembly") || root.extra.contains_key("occurrences") {
+            return Err("nested assembly state in root definition is unsupported".into());
+        }
+        w.assembly.validate(root.id, &w.definitions)?;
+        import_source_identity::validate_definition(&mut root)?;
+        let mut definitions = w.definitions;
+        for definition in definitions.values_mut() {
+            import_source_identity::validate_definition(definition)?;
+        }
+        for binding in &w.assembly.joint_bindings {
+            if let Some(definition) = definitions.get(&binding.definition) {
+                import_source_identity::validate_reference(&binding.element, &definition.elements)?;
+            }
+        }
+        for def in definitions.values_mut() {
+            for item in def.repair.items() {
+                let _ = def
+                    .timeline
+                    .mark_state(item.step_index, StepState::NeedsRepair);
+            }
+        }
+        Ok(Self {
             id: w.id,
             schema_version,
             settings: w.settings,
-            variables: w.variables,
-            sketches: w.sketches,
-            sketch_visibility: w.sketch_visibility,
-            datum_planes: w.datum_planes,
-            timeline,
-            bodies: w.bodies,
-            elements: w.elements,
-            repair: w.repair,
-            named_selections: w.named_selections,
+            variables: root.variables,
+            sketches: root.sketches,
+            sketch_visibility: root.sketch_visibility,
+            datum_planes: root.datum_planes,
+            timeline: root.timeline,
+            bodies: root.bodies,
+            elements: root.elements,
+            repair: root.repair,
+            named_selections: root.named_selections,
             modules: w.modules,
+            root_definition_id: root.id,
+            root_definition_name: root.name,
+            root_definition_extra: root.extra,
+            definitions,
+            assembly: w.assembly,
             extra: w.extra,
-        }
+        })
     }
 }
 
@@ -356,6 +463,46 @@ mod tests {
     use crate::ids::RecordId;
     use crate::sketch::WorldPlane;
     use uuid::Uuid;
+
+    #[test]
+    fn embedded_definition_round_trips_without_duplicating_root_fields() {
+        use onecad_assembly::{
+            math::RigidTransform,
+            occurrence::{ComponentDefId, Occurrence, OccurrenceId},
+        };
+        let mut doc = Document::new(DocumentId(Uuid::from_u128(90)));
+        doc.timeline.insert_at_cursor(extrude(91));
+        let id = ComponentDefId(Uuid::from_u128(92));
+        let mut definition = component::ComponentDef::new(id, "Part");
+        definition.timeline.insert_at_cursor(extrude(93));
+        doc.definitions.insert(id, definition);
+        let occurrence = Occurrence {
+            id: OccurrenceId(Uuid::from_u128(94)),
+            def: id,
+            parent: None,
+            local: RigidTransform::IDENTITY,
+            grounded: false,
+            name: "Part 1".into(),
+        };
+        doc.assembly.occurrences.insert(occurrence).unwrap();
+        let json = serde_json::to_value(&doc).unwrap();
+        assert!(json.get("timeline").is_none());
+        assert_eq!(
+            json["rootDefinition"]["timeline"]["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let decoded: Document = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(decoded.root_definition_id, doc.root_definition_id);
+        assert_eq!(
+            decoded.definitions[&id].timeline.records()[0].record_id,
+            RecordId(Uuid::from_u128(93))
+        );
+        assert_eq!(decoded.assembly.occurrences.len(), 1);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
 
     fn extrude(seed: u128) -> OperationRecord {
         let op = Operation::Known(KnownOperation::Extrude(ExtrudeParams {
@@ -392,9 +539,9 @@ mod tests {
 
         let json = serde_json::to_value(&doc).unwrap();
         // Timeline serializes as {records, cursor}, no `states`.
-        assert!(json["timeline"].get("states").is_none());
-        assert_eq!(json["timeline"]["cursor"], 1);
-        assert_eq!(json["schemaVersion"], 1);
+        assert!(json["rootDefinition"]["timeline"].get("states").is_none());
+        assert_eq!(json["rootDefinition"]["timeline"]["cursor"], 1);
+        assert_eq!(json["schemaVersion"], DOCUMENT_SCHEMA_VERSION);
 
         let back: Document = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(serde_json::to_value(&back).unwrap(), json);

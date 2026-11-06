@@ -12,6 +12,7 @@
 //! meshes/<bodyId>.<lod>.mesh   MESH1 cache
 //! checkpoints/<step>.json + .bin   optional checkpoint artifacts
 //! imports/<sha256>.step|.brep      import source blobs — AUTHORITATIVE-FOR-A-RECORD
+//! library/<sha256>.zip   opaque referenced component package archive
 //! preview.png            optional thumbnail
 //! ```
 //!
@@ -53,7 +54,9 @@
 pub mod container;
 pub mod document_io;
 pub mod history_io;
+mod import_identity;
 pub mod imports;
+pub mod library;
 pub mod manifest;
 pub mod migrate;
 pub mod project_import;
@@ -90,6 +93,14 @@ pub enum IoError {
         /// The version this build reads.
         expected: u32,
     },
+
+    /// Document schema is newer than the reader and must not be adopted.
+    #[error("unsupported document schema {found} (this build reads through {supported})")]
+    UnsupportedDocumentSchema { found: u32, supported: u32 },
+
+    /// The format is recognized, but its semantics are not supported here.
+    #[error("unsupported document feature: {0}")]
+    UnsupportedFeature(String),
 
     /// The archive, an authoritative section, or an authoritative entry hash is
     /// corrupt / malformed.
