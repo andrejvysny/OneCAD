@@ -1,0 +1,221 @@
+{
+  "schemaVersion": 1,
+  "classification": "Pinned offline inputs only; no native history, geometric equivalence, assembly or platform acceptance",
+  "files": [
+    {
+      "path": "framework/ExpansionCard_Printable_M2.pdf",
+      "byteLength": 87913,
+      "sha256": "92dd0e94832280c2b5a905a99160dd0a722b84fc11d0539ecd3b3370eb61f596",
+      "sourceUrl": "https://raw.githubusercontent.com/FrameworkComputer/ExpansionCards/2904a95d60d4ba771c5c3c56d6fdba7078243fe8/Mechanical/Printable/2D/ExpansionCard_Printable_M2.pdf",
+      "revision": "2904a95d60d4ba771c5c3c56d6fdba7078243fe8",
+      "archiveMember": null,
+      "license": "CC-BY-4.0",
+      "units": "mm",
+      "intendedUse": "Independent PCB plate dimensions only; not whole enclosure bounds"
+    },
+    {
+      "path": "framework/ExpansionCard_ThreadedInsert.stp",
+      "byteLength": 525859,
+      "sha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+      "sourceUrl": "https://raw.githubusercontent.com/FrameworkComputer/ExpansionCards/2904a95d60d4ba771c5c3c56d6fdba7078243fe8/Mechanical/Printable/3D/ExpansionCard_ThreadedInsert.stp",
+      "revision": "2904a95d60d4ba771c5c3c56d6fdba7078243fe8",
+      "archiveMember": null,
+      "license": "CC-BY-4.0",
+      "units": "mm",
+      "intendedUse": "Import separate product hierarchy; select enclosure subtree before native reconstruction",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "framework/LICENSE",
+      "byteLength": 18656,
+      "sha256": "9e5f1b3c610b9c2da5c313bf81d577a7d1acec686bdb0384edefa6df0f90cd94",
+      "sourceUrl": "https://raw.githubusercontent.com/FrameworkComputer/ExpansionCards/2904a95d60d4ba771c5c3c56d6fdba7078243fe8/LICENSE",
+      "revision": "2904a95d60d4ba771c5c3c56d6fdba7078243fe8",
+      "archiveMember": null,
+      "license": "CC-BY-4.0",
+      "units": "not-applicable",
+      "intendedUse": "Retained upstream attribution, license and source description"
+    },
+    {
+      "path": "framework/README.md",
+      "byteLength": 1116,
+      "sha256": "b04d28127eb43d9670b587df7453d87a0bd0dfb7658aba3d61b886fa3e40d6f2",
+      "sourceUrl": "https://raw.githubusercontent.com/FrameworkComputer/ExpansionCards/2904a95d60d4ba771c5c3c56d6fdba7078243fe8/README.md",
+      "revision": "2904a95d60d4ba771c5c3c56d6fdba7078243fe8",
+      "archiveMember": null,
+      "license": "CC-BY-4.0",
+      "units": "not-applicable",
+      "intendedUse": "Retained upstream attribution, license and source description"
+    },
+    {
+      "path": "nist/README.txt",
+      "byteLength": 2602,
+      "sha256": "a2fbaa562120251ec0a9654458f2e68fbeddc6f5c51ca14ff9c3cf3996b11936",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/README.txt",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "not-applicable",
+      "intendedUse": "Retained upstream attribution, license and source description"
+    },
+    {
+      "path": "nist/nist_ftc_07_asme1_rd.pdf",
+      "byteLength": 720347,
+      "sha256": "fcb214aa1aee70040b11eed88b65ebe42104f2ce1d0e94cb06668a75f8ec2456",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_07_asme1_rd.pdf",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "multiple STEP representation contexts; resolution pending",
+      "intendedUse": "Independent source drawing dimensions and feature specifications"
+    },
+    {
+      "path": "nist/nist_ftc_07_asme1_rd.stp",
+      "byteLength": 402549,
+      "sha256": "b0eecb1ee17386ec0785a90dcdde52d6a152991db33aec0c69c7e1bbd30d42fa",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_07_asme1_rd.stp",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "multiple STEP representation contexts; resolution pending",
+      "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "nist/nist_ftc_08_asme1_rc.pdf",
+      "byteLength": 244241,
+      "sha256": "4c4281a15857a585874b8193df5ab8fd22ecee507a3fe7de2143833403102260",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_08_asme1_rc.pdf",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "multiple STEP representation contexts; resolution pending",
+      "intendedUse": "Independent source drawing dimensions and feature specifications"
+    },
+    {
+      "path": "nist/nist_ftc_08_asme1_rc.stp",
+      "byteLength": 450747,
+      "sha256": "c0c59faae620c5cf1d1f5eba025b4e8666625bd0a7658ecd5625d3a8badc9a7b",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_08_asme1_rc.stp",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "multiple STEP representation contexts; resolution pending",
+      "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "nist/nist_ftc_09_asme1_rd.pdf",
+      "byteLength": 318757,
+      "sha256": "43156f3696e34c4d9222ffaade5910c8879d501e8939370512f3865796d98d90",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_09_asme1_rd.pdf",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "inch; bracketed drawing dimensions are mm",
+      "intendedUse": "Independent source drawing dimensions and feature specifications"
+    },
+    {
+      "path": "nist/nist_ftc_09_asme1_rd.stp",
+      "byteLength": 263934,
+      "sha256": "d12866d3ab0fc260efd0f1a5c54af47950be513486f61f65513877045582afa8",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_09_asme1_rd.stp",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "inch; bracketed drawing dimensions are mm",
+      "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "nist/nist_ftc_10_asme1_rb.pdf",
+      "byteLength": 875826,
+      "sha256": "26c71d56a9aa73fc47df8a9b6b4e916d237f3666d7146e410037fe49698849bc",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_10_asme1_rb.pdf",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "mm",
+      "intendedUse": "Independent source drawing dimensions and feature specifications"
+    },
+    {
+      "path": "nist/nist_ftc_10_asme1_rb.stp",
+      "byteLength": 323619,
+      "sha256": "7ab61ea7d6412b2df3b9b75123544d15810fe6792bf5adf7c820e6fe9e136424",
+      "sourceUrl": "https://www.nist.gov/document/nist-ftc-test-case-definitions",
+      "revision": "archive-sha256:3762211e6c5e6c75055f56366abe59c43d5824468fb313d7818ba8ee6b777c15",
+      "archiveMember": "NIST_MBE_PMI_FTC_Definitions/nist_ftc_10_asme1_rb.stp",
+      "license": "LicenseRef-NIST-public-domain",
+      "units": "mm",
+      "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "prusa/LICENSE",
+      "byteLength": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/LICENSE",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "not-applicable",
+      "intendedUse": "Retained upstream attribution, license and source description"
+    },
+    {
+      "path": "prusa/MINI-fsenzor-box.stp",
+      "byteLength": 336195,
+      "sha256": "c8b06ef5271166c367d27be13e9c8f93a7ae07707033e4d23bd1ed5997285cb6",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/STEP/PRINTED%20PARTS/MINI-fsenzor-box.stp",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "mm",
+      "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "prusa/MINI-fsenzor-cover.stp",
+      "byteLength": 89896,
+      "sha256": "e6391172f932b141483f7b8b1a0b560c4260ba1116e588873916ba0ecacb2bd5",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/STEP/PRINTED%20PARTS/MINI-fsenzor-cover.stp",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "mm",
+      "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "prusa/MINI-fsenzor-lever.stp",
+      "byteLength": 44308,
+      "sha256": "beee16c2e5c09d26777d4971df8c343d467f926121d1753c6b41bc0b5ff6bbc6",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/STEP/PRINTED%20PARTS/MINI-fsenzor-lever.stp",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "mm",
+      "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "prusa/README.md",
+      "byteLength": 733,
+      "sha256": "d991b7cd21a1e3328f6b21152503d71e7dad18cbcd8cd6d93540191cb6dfe5d2",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/README.md",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "not-applicable",
+      "intendedUse": "Retained upstream attribution, license and source description"
+    }
+  ],
+  "quarantined": [
+    {
+      "sourceUrl": "https://github.com/roboninecom/SO-ARM100-101-102-Parallel-Gripper/blob/e7cb78a7a1cd073ea8f845486398a23549343c7b/models/RB9.01.062.000%20Gripper.STEP",
+      "revision": "e7cb78a7a1cd073ea8f845486398a23549343c7b",
+      "byteLength": 5731780,
+      "sha256": "3d10caca74f4e82e8d0b26c0ef2254e12dc1495c027eba1eae207944521d2104",
+      "reason": "Embedded vendor-derived geometry provenance not yet audited; bytes not redistributed"
+    }
+  ]
+}

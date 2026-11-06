@@ -2,6 +2,7 @@ mod checks;
 mod evidence;
 mod hygiene;
 mod icons;
+mod reference_inputs;
 mod release;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -26,6 +27,7 @@ fn run() -> Result {
         | "kernelbench-manifest" => evidence::run(command, args),
         "bake-cad-icons" => icons::run(args),
         "check-hygiene" => hygiene::run(args),
+        "verify-reference-inputs" => reference_inputs::run(args),
         "prepare-release-materials"
         | "verify-release-materials"
         | "worker-manifest"
