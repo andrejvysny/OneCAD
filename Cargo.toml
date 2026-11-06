@@ -42,7 +42,7 @@ onecad-core = { path = "crates/onecad-core" }
 onecad-protocol = { path = "crates/onecad-protocol" }
 onecad-embedded-worker = { path = "crates/onecad-embedded-worker" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
