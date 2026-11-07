@@ -1,5 +1,9 @@
 //! Native embedded assembly and literal local-datum joint controls.
-use crate::{app::App, bridge::Command};
+use crate::{
+    app::App,
+    bridge::Command,
+    diagnostics::{Source, State as DiagnosticState},
+};
 use onecad_assembly::{
     joint::{Joint, JointId},
     occurrence::{ComponentDefId, OccurrenceId},
@@ -113,8 +117,16 @@ pub(crate) fn submit(app: &mut App, action: Action) {
             state.pending_session = Some(display.context.runtime_session.clone());
             state.cancellation = cancellation;
             app.doc.status = "Applying assembly change…".into();
+            app.doc
+                .diagnostics
+                .record(Source::Assembly, DiagnosticState::Pending, &app.doc.status);
         }
-        Err(error) => app.doc.status = error,
+        Err(error) => {
+            app.doc.status = error;
+            app.doc
+                .diagnostics
+                .record(Source::Assembly, DiagnosticState::Failed, &app.doc.status);
+        }
     }
 }
 
@@ -135,6 +147,13 @@ pub(crate) fn receive(app: &mut App, sequence: u64, session: &str, result: Resul
     state.pending = false;
     state.pending_session = None;
     state.cancellation = None;
+    let diagnostic_message = result.as_ref().err().cloned();
+    let diagnostic_state = match &result {
+        Ok(reply) if reply.capture_error.is_some() => DiagnosticState::Failed,
+        Ok(_) => DiagnosticState::Succeeded,
+        Err(error) if error == "stale preview: joint solve cancelled" => DiagnosticState::Cancelled,
+        Err(_) => DiagnosticState::Failed,
+    };
     match result {
         Ok(reply) => {
             state.report = reply.report;
@@ -159,6 +178,11 @@ pub(crate) fn receive(app: &mut App, sequence: u64, session: &str, result: Resul
         }
         Err(error) => app.doc.status = format!("Assembly: {error}"),
     }
+    app.doc.diagnostics.record(
+        Source::Assembly,
+        diagnostic_state,
+        diagnostic_message.as_deref().unwrap_or(&app.doc.status),
+    );
     app.draw_dirty = true;
 }
 

@@ -17,6 +17,7 @@ pub enum Source {
     Worker,
     Sketch,
     Model,
+    Assembly,
     Viewport,
     Application,
     Autosave,
@@ -72,6 +73,13 @@ impl Diagnostics {
         }
         self.entries
             .retain(|entry| matches!(entry.source, Source::Worker | Source::Viewport));
+        if self
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.source == Source::Assembly)
+        {
+            self.failure = None;
+        }
         self.observed_status = previous_status.into();
         self.runtime_session = Some(runtime_session.into());
         self.profile = None;
@@ -140,6 +148,13 @@ impl Diagnostics {
         self.entries.retain(|previous| previous.source != source);
         if state == State::Failed {
             self.failure = Some(failure(&entry));
+        } else if source == Source::Assembly
+            && self
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.source == source)
+        {
+            self.failure = None;
         }
         self.entries.push_front(entry);
     }
@@ -171,6 +186,7 @@ impl Source {
             Self::Worker => "Modeling worker",
             Self::Sketch => "Sketch",
             Self::Model => "Feature",
+            Self::Assembly => "Assembly",
             Self::Viewport => "Viewport",
             Self::Application => "Application",
             Self::Autosave => "Recovery checkpoint",
@@ -259,6 +275,24 @@ mod tests {
         diagnostics.observe("feature failed");
         assert_eq!(diagnostics.entries.len(), 1);
         assert!(diagnostics.contains(Source::Worker, State::Failed, "worker unavailable"));
+    }
+
+    #[test]
+    fn assembly_failure_survives_information_until_retry_or_replacement() {
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.runtime("first", "");
+        diagnostics.record(Source::Assembly, State::Failed, "invalid limits [1, 0]");
+        let first = diagnostics.latest_failure().unwrap().clone();
+        diagnostics.observe("unrelated status");
+        assert_eq!(diagnostics.latest_failure(), Some(&first));
+        diagnostics.record(Source::Assembly, State::Pending, "retry");
+        assert!(diagnostics.latest_failure().is_none());
+        assert!(!diagnostics.contains(Source::Assembly, State::Failed, "invalid limits"));
+        diagnostics.record(Source::Assembly, State::Failed, "invalid limits [1, 0]");
+        assert_ne!(diagnostics.latest_failure().unwrap().id, first.id);
+        diagnostics.runtime("second", "");
+        assert!(diagnostics.latest_failure().is_none());
+        assert!(!diagnostics.contains(Source::Assembly, State::Failed, "invalid limits"));
     }
 
     #[test]
