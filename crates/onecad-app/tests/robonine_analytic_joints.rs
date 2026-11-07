@@ -1,4 +1,6 @@
 //! Source-qualified imported Robonine datum workflow; not contact or travel qualification.
+#[path = "robonine_analytic_support/export_reimport.rs"]
+mod export_reimport;
 #[path = "robonine_analytic_support/joints.rs"]
 mod joint_support;
 mod robonine_analytic_support;
@@ -163,6 +165,36 @@ fn assert_pose_near(a: RigidTransform, b: RigidTransform) {
     for axis in [Vec3d::X, Vec3d::Y, Vec3d::Z] {
         assert!((a.apply_vector(axis) - b.apply_vector(axis)).norm() < SOLVE_TOLERANCE);
     }
+}
+fn retain_export(source: &Path, destination: &Path) {
+    use std::io::Write;
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .unwrap();
+    let bytes = std::fs::read(source).unwrap();
+    out.write_all(&bytes).unwrap();
+    out.sync_all().unwrap();
+    let manifest = serde_json::json!({
+        "format": "flattened STEP, millimetres; no assembly joints or hierarchy",
+        "stepSha256": digest(&bytes),
+        "sourceFiles": FILES, "sourceSha256": HASHES,
+        "occurrenceDefinitionIndices": MAP,
+        "drives": {"clamp1Mm": -1.0, "clamp2Mm": -2.0, "gearRad": 0.2},
+        "expectedSolidCount": 6,
+        "scope": "Kinematic fixture, not contact or physical range qualification"
+    });
+    let oracle_path = destination.with_extension("oracle.json");
+    let mut oracle = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(oracle_path)
+        .unwrap();
+    oracle
+        .write_all(&serde_json::to_vec_pretty(&manifest).unwrap())
+        .unwrap();
+    oracle.sync_all().unwrap();
 }
 fn stable(p: &AssemblyProjectionDto) -> serde_json::Value {
     serde_json::json!({"root":p.root_definition,"occurrences":p.occurrences,"joints":p.joints,"bindings":p.joint_bindings})
@@ -346,6 +378,22 @@ async fn source_qualified_analytic_joints_cold_reopen() {
         .unwrap();
     assert!((pose(&saved, 1).translation.x + 1.0).abs() < 1e-6);
     assert!((pose(&saved, 4).translation.x - 2.0).abs() < 1e-6);
+    let export_path = area.path().join("robonine-posed.step");
+    assert!(!export_path.exists());
+    let target = export_path.to_string_lossy().into_owned();
+    let exported = api::export_step_file(&state, host.clone(), Some(target.clone()))
+        .await
+        .unwrap();
+    assert_eq!(exported.as_deref(), Some(target.as_str()));
+    assert!(export_path.metadata().unwrap().len() > 0);
+    let after_export = api::get_assembly_projection(&state, &session)
+        .await
+        .unwrap();
+    assert_eq!(stable(&after_export), stable(&saved));
+    export_reimport::verify(&export_path, area.path()).await;
+    if let Some(destination) = std::env::var_os("ONECAD_ROBONINE_EXPORT_OUT") {
+        retain_export(&export_path, Path::new(&destination));
+    }
     std::fs::write(
         area.path().join("joints-expected.json"),
         serde_json::to_vec(&stable(&saved)).unwrap(),
