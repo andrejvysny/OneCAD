@@ -391,6 +391,7 @@ pub struct RegenExecutor<E: GeometryEngine> {
     engine: E,
     /// Optional cache-fill channel for inline prepared meshes (see [`MeshSink`]).
     mesh_sink: Option<MeshSink>,
+    require_checkpoint: bool,
 }
 
 impl<E: GeometryEngine> RegenExecutor<E> {
@@ -400,6 +401,7 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         Self {
             engine,
             mesh_sink: None,
+            require_checkpoint: false,
         }
     }
 
@@ -408,6 +410,13 @@ impl<E: GeometryEngine> RegenExecutor<E> {
     #[must_use]
     pub fn with_mesh_sink(mut self, sink: MeshSink) -> Self {
         self.mesh_sink = Some(sink);
+        self
+    }
+
+    /// Requires a successfully restored checkpoint; never falls back to replay from zero.
+    #[must_use]
+    pub fn require_checkpoint(mut self) -> Self {
+        self.require_checkpoint = true;
         self
     }
 
@@ -437,7 +446,17 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         cancel: &CancelToken,
         publisher: &SnapshotPublisher,
     ) -> Outcome {
+        if self.require_checkpoint && request.base_checkpoint.is_none() {
+            return Outcome::EngineFailed(EngineError::Protocol {
+                message: "checkpoint required but not selected".into(),
+            });
+        }
         if request.start_step().is_none() {
+            if self.require_checkpoint {
+                return Outcome::EngineFailed(EngineError::Protocol {
+                    message: "checkpoint required but no continuation was planned".into(),
+                });
+            }
             return Outcome::NoOp; // empty plan.
         }
         // Capture the retry ingredients before the request is consumed.
@@ -458,7 +477,14 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         let mut guard = DiscardOnDrop::armed(&self.engine, job);
 
         let outcome = match self
-            .run_attempt(request, session, gate, cancel, publisher, had_checkpoint)
+            .run_attempt(
+                request,
+                session,
+                gate,
+                cancel,
+                publisher,
+                had_checkpoint && !self.require_checkpoint,
+            )
             .await
         {
             AttemptOutcome::Settled(outcome) => outcome,

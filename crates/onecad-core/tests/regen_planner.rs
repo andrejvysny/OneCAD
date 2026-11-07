@@ -30,9 +30,9 @@ use onecad_core::ids::{
 use onecad_core::math::Vec3;
 use onecad_core::regen::{
     history_prefix_hash, CancelToken, CheckpointArtifact, CheckpointArtifacts, CheckpointEnvelope,
-    CheckpointStore, HistoryPrefixHash, InMemoryCheckpointStore, OpFailureCode, Outcome,
-    PlanArtifacts, PolicyVersions, RegenExecutor, RegenPlanner, RegenRequest, RegenSession,
-    SnapshotPublisher, StoppedReason,
+    CheckpointStore, EngineError, HistoryPrefixHash, InMemoryCheckpointStore, OpFailureCode,
+    Outcome, PlanArtifacts, PolicyVersions, RegenExecutor, RegenPlanner, RegenRequest,
+    RegenSession, SnapshotPublisher, StoppedReason,
 };
 
 use support::*;
@@ -73,6 +73,208 @@ fn artifacts_for(step: usize, envelope: CheckpointEnvelope) -> CheckpointArtifac
         signatures: sigs(step),
         history_prefix_hash: envelope.history_prefix_hash,
     }
+}
+
+fn checkpoint_request(
+    timeline: &Timeline,
+    include_checkpoint: bool,
+) -> onecad_core::regen::PlanRequest {
+    let mut store = InMemoryCheckpointStore::new();
+    if include_checkpoint {
+        store.save(1, artifacts_for(1, compatible_envelope(1, timeline)));
+    }
+    RegenPlanner::plan(
+        timeline,
+        &DependencyGraph::new(),
+        &store.list(),
+        RegenRequest::ToEnd { from: 2 },
+        &default_ctx(),
+    )
+    .into_request(
+        JOB,
+        REV,
+        EPOCH,
+        PolicyVersions::default(),
+        PlanArtifacts::default(),
+    )
+}
+
+#[tokio::test]
+async fn required_checkpoint_refuses_missing_before_dispatch() {
+    let timeline = timeline_of(4);
+    let req = checkpoint_request(&timeline, false);
+    assert!(req.base_checkpoint.is_none());
+    let exec = RegenExecutor::new(FakeEngine::all_ok()).require_checkpoint();
+    let mut session = RegenSession::with_timeline(timeline);
+    let publisher = SnapshotPublisher::new();
+    let result = exec
+        .run(
+            req,
+            &mut session,
+            &|| (REV, EPOCH),
+            &CancelToken::new(),
+            &publisher,
+        )
+        .await;
+    assert!(
+        matches!(result, Outcome::EngineFailed(EngineError::Protocol { .. })),
+        "{result:?}"
+    );
+    assert_eq!(exec.engine().restore_calls(), 0);
+    let log = exec.engine().log();
+    assert!(log.plans.is_empty() && log.accepts.is_empty() && log.discards.is_empty());
+    assert!(publisher.latest().is_none());
+}
+
+#[tokio::test]
+async fn required_checkpoint_refuses_empty_continuation_without_claiming_restore() {
+    let timeline = timeline_of(4);
+    let mut req = checkpoint_request(&timeline, true);
+    assert!(req.base_checkpoint.is_some());
+    req.ops.clear();
+    let exec = RegenExecutor::new(FakeEngine::all_ok()).require_checkpoint();
+    let mut session = RegenSession::with_timeline(timeline);
+    let publisher = SnapshotPublisher::new();
+    let result = exec
+        .run(
+            req,
+            &mut session,
+            &|| (REV, EPOCH),
+            &CancelToken::new(),
+            &publisher,
+        )
+        .await;
+    assert!(
+        matches!(result, Outcome::EngineFailed(EngineError::Protocol { .. })),
+        "{result:?}"
+    );
+    assert_eq!(exec.engine().restore_calls(), 0);
+    assert!(exec.engine().log().plans.is_empty());
+    assert!(publisher.latest().is_none());
+}
+
+#[tokio::test]
+async fn required_checkpoint_rejects_restore_failure_and_drift_without_replay() {
+    for (restored, drift) in [(false, false), (true, true)] {
+        let timeline = timeline_of(4);
+        let req = checkpoint_request(&timeline, true);
+        assert!(req.base_checkpoint.is_some());
+        let config = RestoreConfig {
+            restored,
+            drift,
+            base_registry: BodyRegistry::new(),
+            base_elements: ElementIndex::new(),
+        };
+        let exec =
+            RegenExecutor::new(FakeEngine::all_ok().with_restore(config)).require_checkpoint();
+        let mut session = RegenSession::with_timeline(timeline);
+        let publisher = SnapshotPublisher::new();
+        let result = exec
+            .run(
+                req,
+                &mut session,
+                &|| (REV, EPOCH),
+                &CancelToken::new(),
+                &publisher,
+            )
+            .await;
+        assert!(
+            matches!(result, Outcome::EngineFailed(EngineError::Protocol { .. })),
+            "{result:?}"
+        );
+        assert_eq!(exec.engine().restore_calls(), 1);
+        let log = exec.engine().log();
+        assert!(log.plans.is_empty() && log.accepts.is_empty(), "{log:?}");
+        assert_eq!(log.discards, vec![JOB]);
+        assert!(publisher.latest().is_none());
+    }
+}
+
+#[tokio::test]
+async fn required_checkpoint_executes_only_suffix_after_successful_restore() {
+    let timeline = timeline_of(4);
+    let req = checkpoint_request(&timeline, true);
+    assert!(req.base_checkpoint.is_some());
+    let exec = RegenExecutor::new(FakeEngine::all_ok()).require_checkpoint();
+    let mut session = RegenSession::with_timeline(timeline);
+    let publisher = SnapshotPublisher::new();
+    let result = exec
+        .run(
+            req,
+            &mut session,
+            &|| (REV, EPOCH),
+            &CancelToken::new(),
+            &publisher,
+        )
+        .await;
+    assert!(matches!(result, Outcome::Published(_)), "{result:?}");
+    assert_eq!(exec.engine().restore_calls(), 1);
+    let log = exec.engine().log();
+    assert_eq!(log.plans.len(), 1);
+    assert!(log.plans[0].base_checkpoint.is_some());
+    assert!(!log.plans[0].checkpoint_fallback_replay);
+    assert_eq!(
+        log.plans[0]
+            .ops
+            .iter()
+            .map(|op| op.step_index)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(log.accepts.len(), 1);
+    assert!(publisher.latest().is_some());
+}
+
+#[tokio::test]
+async fn required_checkpoint_does_not_retry_pre_step_engine_failure() {
+    let timeline = timeline_of(4);
+    let req = checkpoint_request(&timeline, true);
+    let exec = RegenExecutor::new(FakeEngine::new(BTreeMap::from([(2, StepScript::Crash)])))
+        .require_checkpoint();
+    let mut session = RegenSession::with_timeline(timeline);
+    let publisher = SnapshotPublisher::new();
+    let result = exec
+        .run(
+            req,
+            &mut session,
+            &|| (REV, EPOCH),
+            &CancelToken::new(),
+            &publisher,
+        )
+        .await;
+    assert!(
+        matches!(result, Outcome::EngineFailed(EngineError::Crashed { .. })),
+        "{result:?}"
+    );
+    assert_eq!(exec.engine().restore_calls(), 1);
+    let log = exec.engine().log();
+    assert_eq!(log.plans.len(), 1);
+    assert!(log.plans[0].base_checkpoint.is_some());
+    assert_eq!(log.discards, vec![JOB]);
+    assert!(log.accepts.is_empty());
+    assert!(publisher.latest().is_none());
+}
+
+#[tokio::test]
+async fn required_checkpoint_cancellation_discards_without_publication() {
+    let timeline = timeline_of(4);
+    let req = checkpoint_request(&timeline, true);
+    let exec = RegenExecutor::new(FakeEngine::new(BTreeMap::from([(2, StepScript::Hang)])))
+        .require_checkpoint();
+    let mut session = RegenSession::with_timeline(timeline);
+    let publisher = SnapshotPublisher::new();
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let result = exec
+        .run(req, &mut session, &|| (REV, EPOCH), &cancel, &publisher)
+        .await;
+    assert!(matches!(result, Outcome::Cancelled), "{result:?}");
+    let log = exec.engine().log();
+    assert_eq!(log.plans.len(), 1);
+    assert_eq!(log.cancels, vec![JOB]);
+    assert!(log.discards.contains(&JOB));
+    assert!(log.accepts.is_empty());
+    assert!(publisher.latest().is_none());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
