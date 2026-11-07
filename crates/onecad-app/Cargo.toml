@@ -41,6 +41,7 @@ libc = "0.2"
 trash = "5"
 
 [dev-dependencies]
+onecad-core = { workspace = true, features = ["test-hooks"] }
 # Virtual-time autosave scheduling tests must not depend on filesystem latency.
 tokio = { workspace = true, features = ["test-util"] }
 zip = { workspace = true }

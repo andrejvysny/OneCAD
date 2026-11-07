@@ -947,6 +947,20 @@ fn runtime_with(backend: Arc<FakeBackend>) -> DocumentRuntime {
     DocumentRuntime::new_blank(engine, meshes, solver)
 }
 
+pub(crate) async fn promotable_fake_runtime() -> (DocumentRuntime, BodyId, SnapshotId) {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+    (
+        rt,
+        BodyId(Uuid::from_u128(0x10)),
+        SnapshotId(report.snapshot_id),
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────

@@ -185,6 +185,8 @@ pub struct AppState {
         )>,
     >,
     #[cfg(test)]
+    pub(crate) save_io_hook: StdMutex<Option<crate::autosave::SaveHook>>,
+    #[cfg(test)]
     pub(crate) save_before_admission: StdMutex<
         Option<(
             tokio::sync::oneshot::Sender<()>,
@@ -386,6 +388,8 @@ impl AppState {
             joint_before_commit: StdMutex::new(None),
             #[cfg(test)]
             save_before_admission: StdMutex::new(None),
+            #[cfg(test)]
+            save_io_hook: StdMutex::new(None),
             #[cfg(test)]
             open_before_publish: StdMutex::new(None),
             #[cfg(test)]
@@ -904,6 +908,8 @@ impl AppState {
             joint_before_commit: StdMutex::new(None),
             #[cfg(test)]
             save_before_admission: StdMutex::new(None),
+            #[cfg(test)]
+            save_io_hook: StdMutex::new(None),
             #[cfg(test)]
             open_before_publish: StdMutex::new(None),
             #[cfg(test)]

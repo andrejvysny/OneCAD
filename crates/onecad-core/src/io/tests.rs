@@ -429,3 +429,11 @@ fn process_container_replacements_are_whole_for_shared_and_distinct_targets() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn directory_sync_reports_missing_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = fsync_dir(&dir.path().join("absent")).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}

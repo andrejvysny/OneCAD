@@ -45,7 +45,8 @@ fn a_save_target_that_does_not_exist_yet_is_still_comparable() {
 #[test]
 fn dropping_a_claim_releases_only_that_lease() {
     let table = Arc::new(Reservations::default());
-    let path = Path::new("/nonexistent/onecad/A.onecad");
+    let area = tempfile::tempdir().unwrap();
+    let path = &area.path().join("A.onecad");
     let first = table.claim_path(1, path).unwrap();
     let second = table.claim_path(1, path).unwrap();
     drop(first);
@@ -96,4 +97,86 @@ fn a_poisoned_table_still_serves() {
     .join();
     let _claim = table.claim_document(1, id(1)).unwrap();
     assert_eq!(table.open_documents(), 1);
+}
+
+#[test]
+fn relative_basename_claim_survives_target_creation() {
+    const CHILD: &str = "ONECAD_RELATIVE_CLAIM_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let table = Arc::new(Reservations::default());
+        let target = Path::new("target.onecad");
+        let claim = table.claim_path(1, target).unwrap();
+        std::fs::write(target, b"saved").unwrap();
+        let absolute = std::env::current_dir().unwrap().join(target);
+        assert!(table.claim_path(2, &absolute).is_err());
+        assert!(table.claim_path(2, target).is_err());
+        drop(claim);
+        assert!(table.claim_path(2, &absolute).is_ok());
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .current_dir(tmp.path())
+        .env(CHILD, "1")
+        .args([
+            "--exact",
+            "reservations::tests::relative_basename_claim_survives_target_creation",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_entry_and_referent_remain_claimed_across_replacement() {
+    use std::os::unix::fs::symlink;
+    let table = Arc::new(Reservations::default());
+    let dir = tempfile::tempdir().unwrap();
+    let referent = dir.path().join("referent.onecad");
+    let link = dir.path().join("link.onecad");
+    std::fs::write(&referent, b"old").unwrap();
+    symlink(&referent, &link).unwrap();
+    let first = table.claim_path(1, &link).unwrap();
+    let second = table.claim_path(1, &link).unwrap();
+    assert!(table.claim_path(2, &referent).is_err());
+    let replacement = dir.path().join("replacement");
+    std::fs::write(&replacement, b"new").unwrap();
+    std::fs::rename(&replacement, &link).unwrap();
+    assert!(table.claim_path(2, &link).is_err());
+    assert!(table.claim_path(2, &referent).is_err());
+    drop(first);
+    assert!(table.claim_path(2, &link).is_err());
+    assert!(table.claim_path(2, &referent).is_err());
+    drop(second);
+    assert!(table.claim_path(2, &link).is_ok());
+    assert!(table.claim_path(2, &referent).is_ok());
+}
+
+#[test]
+fn nonexistent_parent_is_refused_without_creating_it() {
+    let table = Arc::new(Reservations::default());
+    let area = tempfile::tempdir().unwrap();
+    let parent = area.path().join("missing");
+    let target = parent.join("model.onecad");
+    assert!(matches!(table.claim_path(1, &target), Err(ApiError::Io(_))));
+    assert!(!parent.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn conflicting_referent_does_not_partially_claim_entry() {
+    use std::os::unix::fs::symlink;
+    let table = Arc::new(Reservations::default());
+    let dir = tempfile::tempdir().unwrap();
+    let referent = dir.path().join("referent.onecad");
+    let link = dir.path().join("link.onecad");
+    std::fs::write(&referent, b"old").unwrap();
+    symlink(&referent, &link).unwrap();
+    let claim = table.claim_path(1, &referent).unwrap();
+    assert!(table.claim_path(2, &link).is_err());
+    let entry = Key::Path(dir.path().canonicalize().unwrap().join("link.onecad"));
+    assert!(!table.owners().contains_key(&entry));
+    drop(claim);
+    assert!(table.claim_path(2, &link).is_ok());
 }

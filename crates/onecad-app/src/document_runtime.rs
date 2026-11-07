@@ -3119,8 +3119,8 @@ impl DocumentRuntime {
     /// document paint before its from-0 regen finishes.
     ///
     /// # Errors
-    /// [`IoError`] on a serialization / filesystem failure; the target is left
-    /// untouched on any failure.
+    /// [`IoError`] on a serialization or filesystem failure. Before rename, the
+    /// target is untouched; a later directory-sync failure leaves durability unconfirmed.
     pub fn save(&mut self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
         let payload = self.build_save_payload(meta, SaveCaches::explicit());
         let generation = self.persisted_generation();
@@ -3276,8 +3276,8 @@ impl DocumentRuntime {
     /// to `tokio::task::spawn_blocking`.
     ///
     /// # Errors
-    /// [`IoError`] on a serialization / filesystem failure; the target is left
-    /// untouched on any failure.
+    /// [`IoError`] on a serialization or filesystem failure. Before rename, the
+    /// target is untouched; a later directory-sync failure leaves durability unconfirmed.
     pub fn write_payload(path: &Path, payload: &SavePayload) -> Result<(), IoError> {
         if let Some(error) = &payload.library_error {
             return Err(IoError::Corrupt(error.clone()));
@@ -3291,6 +3291,28 @@ impl DocumentRuntime {
             &payload.imports,
             &payload.library_archives,
             &payload.meta,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_payload_with_test_hook(
+        path: &Path,
+        payload: &SavePayload,
+        hook: &mut dyn FnMut(onecad_core::io::container::SaveTestStage) -> std::io::Result<()>,
+    ) -> Result<(), IoError> {
+        if let Some(error) = &payload.library_error {
+            return Err(IoError::Corrupt(error.clone()));
+        }
+        crate::library_archive::require_complete(&payload.doc, &payload.library_archives)
+            .map_err(IoError::Corrupt)?;
+        ContainerWriter::save_with_test_hook(
+            path,
+            &payload.doc,
+            &payload.caches,
+            &payload.imports,
+            &payload.library_archives,
+            &payload.meta,
+            hook,
         )
     }
 
@@ -3327,8 +3349,8 @@ impl DocumentRuntime {
     /// [`io::recovery`]: onecad_core::io::recovery
     ///
     /// # Errors
-    /// [`IoError`] on a serialization / filesystem failure; the target is left
-    /// untouched on any failure.
+    /// [`IoError`] on a serialization or filesystem failure. Before rename, the
+    /// target is untouched; a later directory-sync failure leaves durability unconfirmed.
     pub fn write_autosave(&mut self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
         Self::write_payload(path, &self.build_save_payload(meta, SaveCaches::none()))
     }
@@ -7639,4 +7661,4 @@ pub use unsaved::UnsavedChanges;
 pub mod solver_lane;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
