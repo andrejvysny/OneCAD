@@ -51,6 +51,7 @@ fn view(id: &str, status: ComponentStatusDto) -> InstanceView {
 
 fn item(id: &str, applicable: bool) -> UpgradeItemDto {
     UpgradeItemDto {
+        runtime_session: String::new(),
         record_id: id.into(),
         from_version: "1.0.0".into(),
         to_version: "1.1.0".into(),

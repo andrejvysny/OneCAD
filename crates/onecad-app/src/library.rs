@@ -24,10 +24,10 @@ use onecad_core::math::Vec3;
 use onecad_core::regen::{CancelToken, GeometryEngine, Outcome, RegenRequest};
 
 use onecad_library::index::{IndexEntry, LibraryIndex};
-use onecad_library::package::{
-    self, ComponentPackage, ParameterRole, ParameterSpec, COMPONENT_MANIFEST_FILE,
-};
-use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSource};
+#[cfg(test)]
+use onecad_library::package::COMPONENT_MANIFEST_FILE;
+use onecad_library::package::{self, ComponentPackage, ParameterRole, ParameterSpec};
+use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSnapshot, ResolvedSource};
 use onecad_library::search::{SearchQuery, SearchSort};
 use onecad_library::Library;
 
@@ -287,6 +287,7 @@ async fn resolve_mate_input(
     state: &AppState,
     input: &PlaceComponentMateInput,
     self_frame: Option<MateFrame>,
+    runtime_session: &str,
 ) -> Result<ComponentMate, ApiError> {
     if input.self_attachment.trim().is_empty() {
         return Err(ApiError::InvalidCommand(
@@ -303,11 +304,12 @@ async fn resolve_mate_input(
             self_frame,
         ));
     }
-    let element = promote_mate_target(
+    let element = promote_mate_target_for_session(
         state,
         &input.target_body_id,
         &input.target_topo_key,
         input.anchor_world_point,
+        Some(runtime_session),
     )
     .await?;
     Ok(component_mate_from_input(
@@ -331,6 +333,23 @@ pub async fn promote_mate_target(
     target_topo_key: &str,
     anchor_world_point: [f64; 3],
 ) -> Result<String, ApiError> {
+    promote_mate_target_for_session(
+        state,
+        target_body_id,
+        target_topo_key,
+        anchor_world_point,
+        None,
+    )
+    .await
+}
+
+async fn promote_mate_target_for_session(
+    state: &AppState,
+    target_body_id: &str,
+    target_topo_key: &str,
+    anchor_world_point: [f64; 3],
+    expected_session: Option<&str>,
+) -> Result<String, ApiError> {
     let body = crate::worker::wire::parse_body_id(target_body_id)
         .map_err(|e| ApiError::InvalidCommand(format!("placeComponent: mate.targetBodyId: {e}")))?;
     let anchor = AnchorIntent {
@@ -348,6 +367,9 @@ pub async fn promote_mate_target(
     let rt = guard
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("placeComponent".into()))?;
+    if let Some(expected) = expected_session {
+        require_runtime_session(rt, expected)?;
+    }
     let Some(head) = rt.head_snapshot_id() else {
         return Err(ApiError::InvalidCommand(
             "placeComponent: cannot record a mate before the first publish — re-pick".into(),
@@ -491,6 +513,7 @@ pub struct PlaceComponentRequest {
 pub struct PreparedPlacement {
     pub command: EditCommand,
     pub blob: Option<StagedBlob>,
+    pub runtime_session: String,
 }
 
 /// The testable core of [`place_component`] — `pub` for the same reason
@@ -522,7 +545,13 @@ pub async fn place_component_at(
         },
     )
     .await?;
-    stage_blob_and_apply(state, prepared.blob, prepared.command).await
+    stage_blob_and_apply(
+        state,
+        prepared.blob,
+        prepared.command,
+        &prepared.runtime_session,
+    )
+    .await
 }
 
 /// Everything [`place_component_at`] does up to, but not including, staging
@@ -536,6 +565,24 @@ pub async fn prepare_place_component_at(
     state: &AppState,
     req: PlaceComponentRequest,
 ) -> Result<PreparedPlacement, ApiError> {
+    let runtime_session = current_runtime_session(state, "placeComponent").await?;
+    prepare_place_with_session(
+        root,
+        state,
+        req,
+        runtime_session,
+        onecad_library::blob::MAX_BLOB_BYTES,
+    )
+    .await
+}
+
+async fn prepare_place_with_session(
+    root: &Path,
+    state: &AppState,
+    req: PlaceComponentRequest,
+    runtime_session: String,
+    source_limit: u64,
+) -> Result<PreparedPlacement, ApiError> {
     let PlaceComponentRequest {
         component_id,
         component_version,
@@ -545,9 +592,25 @@ pub async fn prepare_place_component_at(
         mate,
         configuration,
     } = req;
-    let package = component_package_at("placeComponent", root, &component_id, &component_version)?;
+    let snapshot = component_snapshot_at_bounded(
+        "placeComponent",
+        root,
+        &component_id,
+        &component_version,
+        None,
+        source_limit,
+    )
+    .map_err(|error| match error {
+        onecad_library::LibraryError::BlobTooLarge { .. }
+            if source_limit == MAX_CAPTURED_DRAFT_BYTES =>
+        {
+            ApiError::InvalidCommand("placement draft source exceeds the 32 MiB limit".into())
+        }
+        other => ApiError::from(other),
+    })?;
+    let package = &snapshot.package;
     let free_params = match &configuration {
-        Some(name) => configured_params(&package, &component_id, name, free_params)?,
+        Some(name) => configured_params(package, &component_id, name, free_params)?,
         None => free_params,
     };
     // Role enforcement at the PLACE site, not just the edit site (WP-A3): the
@@ -555,12 +618,12 @@ pub async fn prepare_place_component_at(
     // rim), and a placement that writes a non-free key would author a record
     // `set_component_params` would then refuse to touch.
     if !free_params.is_empty() {
-        validate_component_params("placeComponent", &package, &component_id, &free_params)?;
+        validate_component_params("placeComponent", package, &component_id, &free_params)?;
     }
     // Refused BEFORE the mate is promoted: promotion mints identity, and a
     // refused placement must leave nothing behind.
     if let Some(input) = &mate {
-        refuse_variant_mate(&package, &input.self_attachment, &free_params)?;
+        refuse_variant_mate(package, &input.self_attachment, &free_params)?;
     }
     // Promote FIRST (its own short lock): identity must exist before the record
     // that names it is authored; `stage_blob_and_apply` re-locks below.
@@ -571,27 +634,14 @@ pub async fn prepare_place_component_at(
     // revision that moves its attachment never silently moves this instance.
     let mate = match &mate {
         Some(input) => {
-            let self_frame = attachment_frame(&package, &input.self_attachment);
-            Some(resolve_mate_input(state, input, self_frame).await?)
+            let self_frame = attachment_frame(package, &input.self_attachment);
+            Some(resolve_mate_input(state, input, self_frame, &runtime_session).await?)
         }
         None => None,
     };
-    let library = open_at(root)?;
-    let (_version, entry) = library
-        .get(&component_id, Some(&component_version))
-        .ok_or_else(|| {
-            ApiError::InvalidCommand(format!(
-                "placeComponent: unknown component {component_id}@{component_version}"
-            ))
-        })?;
-    let revision = entry.revision.clone();
-    let declared = declared_numeric_params(&entry.parameters);
-    let resolved = library.resolve_source(&ResolveRequest {
-        component_id: &component_id,
-        component_version: &component_version,
-        component_revision: &revision,
-    })?;
-    let (source, blob) = component_source_from_resolved(resolved, &component_id, &declared)?;
+    let revision = snapshot.package.identity.revision.clone();
+    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let (source, blob) = component_source_from_resolved(snapshot.source, &component_id, &declared)?;
 
     let mut params = PlaceComponentParams {
         component_id,
@@ -610,7 +660,14 @@ pub async fn prepare_place_component_at(
         },
         extra: Default::default(),
     };
-    let (source, blob) = placed_source(root, state, &params, blob).await?;
+    let (source, blob) = placed_source(
+        state,
+        &snapshot.package,
+        snapshot.document.as_deref(),
+        &params,
+        blob,
+    )
+    .await?;
     params.source = source;
     let op = Operation::Known(KnownOperation::PlaceComponent(params));
     let record = OperationRecord::new(RecordId::new(), 0, "Place Component", op);
@@ -620,7 +677,26 @@ pub async fn prepare_place_component_at(
             at_cursor: true,
         },
         blob,
+        runtime_session,
     })
+}
+
+async fn current_runtime_session(state: &AppState, what: &str) -> Result<String, ApiError> {
+    let guard = state.runtime.lock().await;
+    guard
+        .as_ref()
+        .map(DocumentRuntime::runtime_session)
+        .ok_or_else(|| ApiError::NoDocument(what.into()))
+}
+
+fn require_runtime_session(rt: &DocumentRuntime, expected: &str) -> Result<(), ApiError> {
+    if rt.matches_runtime_session(expected) {
+        Ok(())
+    } else {
+        Err(ApiError::StalePreview(
+            "document session changed; retry the component operation".into(),
+        ))
+    }
 }
 
 /// Stages a prepared placement's blob into the open document without applying
@@ -628,18 +704,20 @@ pub async fn prepare_place_component_at(
 /// Idempotent.
 pub async fn stage_prepared_blob(
     state: &AppState,
-    blob: &Option<StagedBlob>,
+    prepared: &PreparedPlacement,
 ) -> Result<(), ApiError> {
-    let Some(b) = blob else {
-        return Ok(());
-    };
     let mut guard = state.runtime.lock().await;
     let rt = guard
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("library".into()))?;
-    rt.stage_component_blob(&b.sha256, b.codec, &b.bytes)?;
+    require_runtime_session(rt, &prepared.runtime_session)?;
+    if let Some(blob) = &prepared.blob {
+        blob.stage_into(rt)?;
+    }
     Ok(())
 }
+
+const MAX_CAPTURED_DRAFT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Arms a placement draft: authors the record the commit will use and stages its
 /// blob, returning the record's `params` for the preview/commit pair to share.
@@ -660,21 +738,89 @@ pub async fn prepare_component_draft_at(
             ));
         }
     }
-    let prepared = prepare_place_component_at(root, state, req).await?;
-    stage_prepared_blob(state, &prepared.blob).await?;
-    match prepared.command {
-        EditCommand::AddOperation {
-            record:
-                OperationRecord {
-                    op: Operation::Known(KnownOperation::PlaceComponent(params)),
-                    ..
-                },
-            ..
-        } => Ok(params),
-        _ => Err(ApiError::Internal(
-            "prepare_component_draft: placement did not author a PlaceComponent".into(),
-        )),
+    let (runtime_session, generation) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("placeComponent".into()))?;
+        let _slot = state.captured_library_draft.lock().unwrap();
+        let generation = state
+            .captured_library_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        (rt.runtime_session(), generation)
+    };
+    let pending =
+        prepare_place_with_session(root, state, req, runtime_session, MAX_CAPTURED_DRAFT_BYTES);
+    finish_draft_when_ready(state, pending, generation).await
+}
+
+async fn finish_draft_when_ready<F>(
+    state: &AppState,
+    pending: F,
+    generation: u64,
+) -> Result<PlaceComponentParams, ApiError>
+where
+    F: std::future::Future<Output = Result<PreparedPlacement, ApiError>>,
+{
+    let prepared = pending.await?;
+    if prepared
+        .blob
+        .as_ref()
+        .is_some_and(|b| b.bytes.len() as u64 > MAX_CAPTURED_DRAFT_BYTES)
+    {
+        return Err(ApiError::InvalidCommand(
+            "placement draft geometry exceeds the 32 MiB source limit".into(),
+        ));
     }
+    finish_component_draft(state, prepared, generation).await
+}
+
+async fn finish_component_draft(
+    state: &AppState,
+    prepared: PreparedPlacement,
+    generation: u64,
+) -> Result<PlaceComponentParams, ApiError> {
+    let EditCommand::AddOperation {
+        record:
+            OperationRecord {
+                op: Operation::Known(KnownOperation::PlaceComponent(params)),
+                ..
+            },
+        ..
+    } = prepared.command
+    else {
+        return Err(ApiError::Internal(
+            "prepare_component_draft: placement did not author a PlaceComponent".into(),
+        ));
+    };
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("library".into()))?;
+    require_runtime_session(rt, &prepared.runtime_session)?;
+    let mut slot = state.captured_library_draft.lock().unwrap();
+    if state
+        .captured_library_generation
+        .load(std::sync::atomic::Ordering::Relaxed)
+        != generation
+    {
+        return Err(ApiError::StalePreview(
+            "component draft was superseded or cancelled".into(),
+        ));
+    }
+    if let Some(blob) = &prepared.blob {
+        blob.stage_into(rt)?;
+    }
+    *slot = Some(CapturedDraft {
+        component_id: params.component_id.clone(),
+        component_version: params.component_version.clone(),
+        component_revision: params.component_revision.clone(),
+        source_sha: params.source.blob_ref().map(|b| b.sha256.to_string()),
+        runtime_session: prepared.runtime_session,
+        blob: prepared.blob,
+    });
+    Ok(params)
 }
 
 /// [`prepare_component_draft_at`] over the app's library root.
@@ -688,51 +834,84 @@ pub async fn prepare_component_draft(
     prepare_component_draft_at(&root, state, req).await
 }
 
-/// Re-stages a draft's geometry blob before commit. A cancelled/closed/reopened
-/// document may have lost the arm-time staging, and the commit's regen must see
-/// the bytes. No-op for a `generator`; for a blob kind, ALWAYS re-materializes:
-/// from the bytes the document already carries when it has them (so a deleted
-/// library never blocks a commit), otherwise re-resolved from the library by the
-/// draft's own id/version/revision.
+/// Re-stage geometry from the document carrier or the single captured draft.
+/// No package or blob paths are read after the draft was prepared.
 pub async fn restage_component_blob_at(
-    root: &Path,
+    _root: &Path,
     state: &AppState,
     params: &PlaceComponentParams,
 ) -> Result<(), ApiError> {
-    let Some(want) = params.source.blob_ref().map(|b| b.sha256.to_string()) else {
+    let want = params.source.blob_ref().map(|b| b.sha256.to_string());
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("restageComponentBlob".into()))?;
+    let mut slot = state.captured_library_draft.lock().unwrap();
+    let draft = slot.as_mut().filter(|draft| draft.matches(params));
+    if let Some(draft) = draft.as_ref() {
+        require_runtime_session(rt, &draft.runtime_session)?;
+    }
+    let Some(want) = want else {
         return Ok(());
     };
-    {
-        // Always re-materialize (idempotent): the workspace file may have been
-        // swept or lost across a reopen even though the bytes are carried.
-        let mut guard = state.runtime.lock().await;
-        let rt = guard
-            .as_mut()
-            .ok_or_else(|| ApiError::NoDocument("restageComponentBlob".into()))?;
-        if rt.restage_carried_blob(&want)? {
-            return Ok(());
+    if rt.restage_carried_blob(&want)? {
+        if let Some(draft) = draft {
+            draft.blob = None;
         }
+        return Ok(());
     }
-    let missing = |why: &str| {
+    let draft = draft.ok_or_else(|| {
         ApiError::InvalidCommand(format!(
-            "placeComponent: geometry for {}@{} is not in the document and {why}",
+            "placeComponent: geometry for {}@{} is not in the document or captured draft",
             params.component_id, params.component_version
         ))
-    };
-    let library = open_at(root).map_err(|_| missing("the library cannot be opened"))?;
-    let resolved = library
-        .resolve_source(&ResolveRequest {
-            component_id: &params.component_id,
-            component_version: &params.component_version,
-            component_revision: &params.component_revision,
+    })?;
+    let blob = draft.blob.as_ref().ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "placeComponent: geometry for {}@{} is not in the document or captured draft",
+            params.component_id, params.component_version
+        ))
+    })?;
+    blob.stage_into(rt)?;
+    draft.blob = None;
+    Ok(())
+}
+
+/// Release the host's single captured draft, for cancellation and shutdown.
+pub fn clear_component_draft_capture(state: &AppState) {
+    let mut slot = state.captured_library_draft.lock().unwrap();
+    state
+        .captured_library_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    *slot = None;
+}
+
+/// Bytes retained by the host's single draft lease for aggregate accounting.
+#[must_use]
+pub fn captured_component_draft_bytes(state: &AppState) -> usize {
+    state
+        .captured_library_draft
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or(0, |draft| {
+            draft.blob.as_ref().map_or(0, |blob| blob.bytes.len())
         })
-        .map_err(|_| missing("the library no longer has it"))?;
-    let (_, blob) =
-        component_source_from_resolved(resolved, &params.component_id, &Default::default())?;
-    match blob {
-        Some(b) if b.sha256 == want => stage_prepared_blob(state, &Some(b)).await,
-        _ => Err(missing("the library's geometry differs from the draft's")),
-    }
+}
+
+/// Session captured with the currently armed matching draft, when present.
+#[must_use]
+pub fn captured_component_draft_session(
+    state: &AppState,
+    params: &PlaceComponentParams,
+) -> Option<String> {
+    state
+        .captured_library_draft
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|draft| draft.matches(params))
+        .map(|draft| draft.runtime_session.clone())
 }
 
 /// [`restage_component_blob_at`] over the app's library root.
@@ -943,8 +1122,9 @@ fn source_with_free_params(
 /// designation on the default's geometry (spec §0 invariant 4). The document
 /// sha stays the package's frozen one; only the baked blob moves.
 async fn placed_source(
-    root: &Path,
     state: &AppState,
+    package: &ComponentPackage,
+    document: Option<&[u8]>,
     params: &PlaceComponentParams,
     blob: Option<StagedBlob>,
 ) -> Result<(ComponentSourceRef, Option<StagedBlob>), ApiError> {
@@ -955,16 +1135,10 @@ async fn placed_source(
             extra,
             ..
         } if !merged.is_empty() => {
-            let package = component_package_at(
-                "placeComponent",
-                root,
-                &params.component_id,
-                &params.component_version,
-            )?;
             let staged = rebake_document_component(
                 state.services().backend(),
-                root,
-                &package,
+                package,
+                document,
                 params,
                 document_sha256.as_str(),
                 merged,
@@ -1092,14 +1266,33 @@ pub struct StagedBlob {
     sha256: String,
     codec: ImportSourceCodec,
     format: Option<u32>,
-    bytes: Vec<u8>,
+    bytes: std::sync::Arc<Vec<u8>>,
+}
+
+/// One host-owned draft payload; bounded by the import blob limit.
+pub(crate) struct CapturedDraft {
+    component_id: String,
+    component_version: String,
+    component_revision: String,
+    source_sha: Option<String>,
+    runtime_session: String,
+    blob: Option<StagedBlob>,
+}
+
+impl CapturedDraft {
+    fn matches(&self, params: &PlaceComponentParams) -> bool {
+        self.component_id == params.component_id
+            && self.component_version == params.component_version
+            && self.component_revision == params.component_revision
+            && self.source_sha.as_deref() == params.source.blob_ref().map(|b| b.sha256)
+    }
 }
 
 impl StagedBlob {
     /// Stages the bytes into `rt`'s carrier; callers hold the runtime lock and
     /// do this BEFORE the edit that names the blob.
     pub(crate) fn stage_into(&self, rt: &mut DocumentRuntime) -> Result<(), ApiError> {
-        rt.stage_component_blob(&self.sha256, self.codec, &self.bytes)
+        rt.stage_component_blob_shared(&self.sha256, self.codec, self.bytes.clone())
     }
 }
 
@@ -1220,7 +1413,7 @@ fn staged_blob(blob: ResolvedBlob, component_id: &str) -> Result<StagedBlob, Api
         sha256: blob.sha256,
         codec,
         format: blob.format,
-        bytes: blob.bytes,
+        bytes: std::sync::Arc::new(blob.bytes),
     })
 }
 
@@ -1235,13 +1428,15 @@ async fn stage_blob_and_apply(
     state: &AppState,
     blob: Option<StagedBlob>,
     command: EditCommand,
+    expected_session: &str,
 ) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
     let mut guard = state.runtime.lock().await;
     let rt = guard
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("library".into()))?;
+    require_runtime_session(rt, expected_session)?;
     if let Some(b) = blob {
-        rt.stage_component_blob(&b.sha256, b.codec, &b.bytes)?;
+        b.stage_into(rt)?;
     }
     let outcome = rt.apply(command)?;
     Ok((outcome, rt.projection()))
@@ -1254,11 +1449,13 @@ async fn stage_blob_and_apply_unchanged(
     blob: Option<StagedBlob>,
     command: EditCommand,
     (record, expected): (RecordId, &PlaceComponentParams),
+    expected_session: &str,
 ) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
     let mut guard = state.runtime.lock().await;
     let rt = guard
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("library".into()))?;
+    require_runtime_session(rt, expected_session)?;
     let live = rt
         .operation_params(record)
         .and_then(|raw| serde_json::from_value::<PlaceComponentParams>(raw).ok());
@@ -1268,7 +1465,7 @@ async fn stage_blob_and_apply_unchanged(
         )));
     }
     if let Some(b) = blob {
-        rt.stage_component_blob(&b.sha256, b.codec, &b.bytes)?;
+        b.stage_into(rt)?;
     }
     let outcome = rt.apply(command)?;
     Ok((outcome, rt.projection()))
@@ -1332,28 +1529,23 @@ async fn resolve_component_source_at(
     component_id: String,
     component_version: String,
 ) -> Result<ComponentSourceRef, ApiError> {
-    let library = open_at(root)?;
-    let (_version, entry) = library
-        .get(&component_id, Some(&component_version))
-        .ok_or_else(|| {
-            ApiError::InvalidCommand(format!(
-                "resolveComponentSource: unknown component {component_id}@{component_version}"
-            ))
-        })?;
-    let revision = entry.revision.clone();
-    let declared = declared_numeric_params(&entry.parameters);
-    let resolved = library.resolve_source(&ResolveRequest {
-        component_id: &component_id,
-        component_version: &component_version,
-        component_revision: &revision,
-    })?;
-    let (source, blob) = component_source_from_resolved(resolved, &component_id, &declared)?;
+    let runtime_session = current_runtime_session(state, "resolveComponentSource").await?;
+    let snapshot = component_snapshot_at(
+        "resolveComponentSource",
+        root,
+        &component_id,
+        &component_version,
+        None,
+    )?;
+    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let (source, blob) = component_source_from_resolved(snapshot.source, &component_id, &declared)?;
     if let Some(blob) = blob {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("resolveComponentSource".into()))?;
-        rt.stage_component_blob(&blob.sha256, blob.codec, &blob.bytes)?;
+        require_runtime_session(rt, &runtime_session)?;
+        blob.stage_into(rt)?;
     }
     Ok(source)
 }
@@ -1373,24 +1565,54 @@ pub async fn resolve_component_source(
 /// — the index only carries `parameter_keys` (names, WP-1.4/1.5), never the
 /// `role`/`domain` shape `set_component_params_at` needs to enforce spec
 /// §3.2's role=free rule.
+#[cfg(test)]
 pub(crate) fn component_package_at(
     what: &str,
     root: &Path,
     component_id: &str,
     component_version: &str,
 ) -> Result<ComponentPackage, ApiError> {
-    let library = open_at(root)?;
-    let (_version, entry) = library
-        .get(component_id, Some(component_version))
-        .ok_or_else(|| {
-            ApiError::InvalidCommand(format!(
-                "{what}: unknown component {component_id}@{component_version}"
-            ))
-        })?;
-    let manifest_path = root.join(&entry.path).join(COMPONENT_MANIFEST_FILE);
-    let raw = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| ApiError::Internal(format!("read {}: {e}", manifest_path.display())))?;
-    package::parse(&raw, &manifest_path).map_err(ApiError::from)
+    Ok(component_snapshot_at(what, root, component_id, component_version, None)?.package)
+}
+
+pub(crate) fn component_snapshot_at(
+    what: &str,
+    root: &Path,
+    id: &str,
+    version: &str,
+    revision: Option<&str>,
+) -> Result<ResolvedSnapshot, ApiError> {
+    component_snapshot_at_bounded(
+        what,
+        root,
+        id,
+        version,
+        revision,
+        onecad_library::blob::MAX_BLOB_BYTES,
+    )
+    .map_err(ApiError::from)
+}
+
+fn component_snapshot_at_bounded(
+    _what: &str,
+    root: &Path,
+    id: &str,
+    version: &str,
+    revision: Option<&str>,
+    limit: u64,
+) -> onecad_library::LibraryResult<ResolvedSnapshot> {
+    let library = Library::open(root)?;
+    let (_, entry) = library
+        .get(id, Some(version))
+        .ok_or_else(|| onecad_library::LibraryError::NotFound(format!("{id}@{version}")))?;
+    library.resolve_snapshot_bounded(
+        &ResolveRequest {
+            component_id: id,
+            component_version: version,
+            component_revision: revision.unwrap_or(&entry.revision),
+        },
+        limit,
+    )
 }
 
 // ── The re-bake lane (WP-F1.3, spec §3.2 + §13.3 deviation 3) ───────────────
@@ -1423,42 +1645,18 @@ impl Drop for EphemeralWorker {
 /// `RevisionMismatch`). The refusal is the honest answer and costs nothing: the
 /// instance's baked geometry is cached in the document's own `imports/` section,
 /// so the document still renders exactly as before — only the EDIT fails.
-fn frozen_source_document(
-    root: &Path,
-    package: &ComponentPackage,
+fn frozen_source_document<'a>(
+    document: Option<&'a [u8]>,
     current: &PlaceComponentParams,
     recorded_document_sha256: &str,
-) -> Result<Vec<u8>, ApiError> {
-    let library = open_at(root)?;
-    let (_version, entry) = library
-        .get(&current.component_id, Some(&current.component_version))
-        .ok_or_else(|| {
-            ApiError::InvalidCommand(format!(
-                "setComponentParams: unknown component {}@{}",
-                current.component_id, current.component_version
-            ))
-        })?;
-    let package_dir = root.join(&entry.path);
-    library.resolve_source(&ResolveRequest {
-        component_id: &current.component_id,
-        component_version: &current.component_version,
-        component_revision: &current.component_revision,
-    })?;
-
-    let package::SourceSpec::Document { file, .. } = &package.source else {
-        return Err(ApiError::InvalidCommand(format!(
+) -> Result<&'a [u8], ApiError> {
+    let bytes = document.ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
             "setComponentParams: {} is not a document-source component",
             current.component_id
-        )));
-    };
-    let path = package_dir.join(file);
-    let bytes = std::fs::read(&path).map_err(|e| {
-        ApiError::Io(format!(
-            "setComponentParams: read frozen source {}: {e}",
-            path.display()
         ))
     })?;
-    let actual = onecad_library::blob::sha256_hex(&bytes);
+    let actual = onecad_library::blob::sha256_hex(bytes);
     if actual != recorded_document_sha256 {
         return Err(ApiError::InvalidCommand(format!(
             "setComponentParams: {} carries a frozen document hashing to {actual}, but this \
@@ -1519,14 +1717,14 @@ fn variable_overrides(
 /// into [`AppState`], and is dropped with the worker.
 async fn rebake_document_component(
     backend: &WorkerBackend,
-    root: &Path,
     package: &ComponentPackage,
+    document: Option<&[u8]>,
     current: &PlaceComponentParams,
     recorded_document_sha256: &str,
     merged: &BTreeMap<String, ComponentParamValue>,
 ) -> Result<StagedBlob, ApiError> {
     let overrides = variable_overrides(package, &current.component_id, merged)?;
-    let frozen = frozen_source_document(root, package, current, recorded_document_sha256)?;
+    let frozen = frozen_source_document(document, current, recorded_document_sha256)?;
 
     // Scratch alongside the authoring bake's (same process-scoped temp root, same
     // "worker hand-off material, not user data" status). Swept on every path.
@@ -1539,7 +1737,7 @@ async fn rebake_document_component(
         .map_err(|e| ApiError::Internal(format!("setComponentParams: scratch dir: {e}")))?;
     let document_path = scratch.join("source.onecad");
     let geometry_path = scratch.join("geometry.xbf");
-    let staged = match std::fs::write(&document_path, &frozen) {
+    let staged = match std::fs::write(&document_path, frozen) {
         Ok(()) => {
             replay_and_bake(
                 backend,
@@ -1681,7 +1879,7 @@ async fn replay_and_bake(
         sha256: crate::imports::sha256_hex(&bytes),
         codec,
         format: Some(baked.format),
-        bytes,
+        bytes: std::sync::Arc::new(bytes),
     })
 }
 
@@ -1727,7 +1925,7 @@ pub(crate) async fn set_component_params_removing_at(
     let record = RecordId::from_str(&record_id)
         .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
 
-    let current = {
+    let (current, runtime_session) = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
@@ -1737,22 +1935,25 @@ pub(crate) async fn set_component_params_removing_at(
                 "setComponentParams: no params for record {record_id}"
             ))
         })?;
-        serde_json::from_value::<PlaceComponentParams>(raw).map_err(|e| {
+        let current = serde_json::from_value::<PlaceComponentParams>(raw).map_err(|e| {
             ApiError::InvalidCommand(format!(
                 "setComponentParams: record {record_id} is not a placed component: {e}"
             ))
-        })?
+        })?;
+        (current, rt.runtime_session())
     };
 
-    let package = component_package_at(
+    let snapshot = component_snapshot_at(
         "setComponentParams",
         root,
         &current.component_id,
         &current.component_version,
+        Some(&current.component_revision),
     )?;
+    let package = &snapshot.package;
     validate_component_params(
         "setComponentParams",
-        &package,
+        package,
         &current.component_id,
         &params,
     )?;
@@ -1832,7 +2033,7 @@ pub(crate) async fn set_component_params_removing_at(
                 .mate
                 .as_ref()
                 .is_some_and(|m| m.self_frame.is_some())
-                && differs_from_defaults(&package, &merged)
+                && differs_from_defaults(package, &merged)
             {
                 return Err(ApiError::InvalidCommand(format!(
                     "setComponentParams: {VARIANT_MATE_REFUSAL}; re-place it unmated or reset \
@@ -1841,8 +2042,8 @@ pub(crate) async fn set_component_params_removing_at(
             }
             let staged = rebake_document_component(
                 state.services().backend(),
-                root,
-                &package,
+                &snapshot.package,
+                snapshot.document.as_deref(),
                 &current,
                 document_sha256.as_str(),
                 &merged,
@@ -1882,6 +2083,7 @@ pub(crate) async fn set_component_params_removing_at(
         blob,
         EditCommand::UpdateOperationParams { record, op },
         (record, &current),
+        &runtime_session,
     )
     .await
 }
@@ -1942,22 +2144,16 @@ pub async fn component_preview_mesh_at(
     component_version: String,
     params: Option<BTreeMap<String, ComponentParamValue>>,
 ) -> Result<crate::dto::PreviewResultDto, ApiError> {
-    let library = open_at(root)?;
-    let (_version, entry) = library
-        .get(&component_id, Some(&component_version))
-        .ok_or_else(|| {
-            ApiError::InvalidCommand(format!(
-                "componentPreviewMesh: unknown component {component_id}@{component_version}"
-            ))
-        })?;
-    let revision = entry.revision.clone();
-    let declared = declared_numeric_params(&entry.parameters);
-    let resolved = library.resolve_source(&ResolveRequest {
-        component_id: &component_id,
-        component_version: &component_version,
-        component_revision: &revision,
-    })?;
-    let (source, blob) = component_source_from_resolved(resolved, &component_id, &declared)?;
+    let snapshot = component_snapshot_at(
+        "componentPreviewMesh",
+        root,
+        &component_id,
+        &component_version,
+        None,
+    )?;
+    let revision = snapshot.package.identity.revision.clone();
+    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let (source, blob) = component_source_from_resolved(snapshot.source, &component_id, &declared)?;
     // Free params select geometry only for the two kinds that re-derive it: a
     // GENERATOR and (WP-C) a PROFILE, whose `length` is the whole point of the
     // preview. A BAKED component previews the solid its package carries, so its
@@ -2789,6 +2985,7 @@ pub(crate) struct PreparedReplace {
     pub(crate) command: EditCommand,
     pub(crate) blob: Option<StagedBlob>,
     pub(crate) report: ReplaceComponentReportDto,
+    runtime_session: String,
 }
 
 /// Swaps a placed instance to a DIFFERENT component (spec §3.3
@@ -2830,8 +3027,13 @@ async fn replace_component_at(
         free_params,
     )
     .await?;
-    let (outcome, projection) =
-        stage_blob_and_apply(state, prepared.blob, prepared.command).await?;
+    let (outcome, projection) = stage_blob_and_apply(
+        state,
+        prepared.blob,
+        prepared.command,
+        &prepared.runtime_session,
+    )
+    .await?;
     Ok((outcome, projection, prepared.report.dropped_mate_attachment))
 }
 
@@ -2845,44 +3047,61 @@ pub(crate) async fn prepare_replace_component_at(
     component_version: String,
     free_params: BTreeMap<String, ComponentParamValue>,
 ) -> Result<PreparedReplace, ApiError> {
+    let runtime_session = current_runtime_session(state, "replaceComponent").await?;
+    let snapshot = component_snapshot_at(
+        "replaceComponent",
+        root,
+        &component_id,
+        &component_version,
+        None,
+    )?;
+    prepare_replace_component_from_snapshot(
+        state,
+        record_id,
+        component_id,
+        component_version,
+        free_params,
+        snapshot,
+        &runtime_session,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_replace_component_from_snapshot(
+    state: &AppState,
+    record_id: String,
+    component_id: String,
+    component_version: String,
+    free_params: BTreeMap<String, ComponentParamValue>,
+    snapshot: ResolvedSnapshot,
+    expected_session: &str,
+) -> Result<PreparedReplace, ApiError> {
     let record = RecordId::from_str(&record_id)
         .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
 
-    let current = {
+    let (current, runtime_session) = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("replaceComponent".into()))?;
+        require_runtime_session(rt, expected_session)?;
         let raw = rt.operation_params(record).ok_or_else(|| {
             ApiError::InvalidCommand(format!(
                 "replaceComponent: no params for record {record_id}"
             ))
         })?;
-        serde_json::from_value::<PlaceComponentParams>(raw).map_err(|e| {
+        let current = serde_json::from_value::<PlaceComponentParams>(raw).map_err(|e| {
             ApiError::InvalidCommand(format!(
                 "replaceComponent: record {record_id} is not a placed component: {e}"
             ))
-        })?
+        })?;
+        (current, rt.runtime_session())
     };
 
-    let library = open_at(root)?;
-    let (_version, entry) = library
-        .get(&component_id, Some(&component_version))
-        .ok_or_else(|| {
-            ApiError::InvalidCommand(format!(
-                "replaceComponent: unknown component {component_id}@{component_version}"
-            ))
-        })?;
-    let revision = entry.revision.clone();
-    let declared = declared_numeric_params(&entry.parameters);
-    let resolved = library.resolve_source(&ResolveRequest {
-        component_id: &component_id,
-        component_version: &component_version,
-        component_revision: &revision,
-    })?;
-
-    let package =
-        component_package_at("replaceComponent", root, &component_id, &component_version)?;
+    let revision = snapshot.package.identity.revision.clone();
+    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let resolved = snapshot.source;
+    let package = snapshot.package;
     // Params are checked against the NEW signature, not the old one: a key the
     // old component called free may not exist here at all.
     validate_component_params("replaceComponent", &package, &component_id, &free_params)?;
@@ -2924,6 +3143,7 @@ pub(crate) async fn prepare_replace_component_at(
         report: ReplaceComponentReportDto {
             dropped_mate_attachment: dropped_attachment,
         },
+        runtime_session,
     })
 }
 
@@ -3089,6 +3309,77 @@ pub async fn component_detail(
     blocking(move || component_detail_at(&root, &component_id, &component_version)).await
 }
 
+/// Returns editor details from the exact verified revision recorded by a placement.
+pub fn component_detail_pinned_at(
+    root: &Path,
+    component_id: &str,
+    component_version: &str,
+    revision: &str,
+) -> Result<ComponentDetailDto, ApiError> {
+    let library = open_at(root)?;
+    let (version, entry) = library
+        .get(component_id, Some(component_version))
+        .ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "componentDetail: unknown component {component_id}@{component_version}"
+            ))
+        })?;
+    let snapshot = library.resolve_snapshot(&ResolveRequest {
+        component_id,
+        component_version,
+        component_revision: revision,
+    })?;
+    let pkg = snapshot.package;
+    let mut component = component_dto(root, component_id, version, entry);
+    component.name = pkg.metadata.name;
+    component.category = pkg.metadata.category;
+    component.tags = pkg.metadata.tags;
+    component.designation = pkg.metadata.designation;
+    component.standard = pkg.metadata.standard;
+    component.unit = Some(pkg.metadata.unit);
+    component.revision = pkg.identity.revision;
+    component.attachments = pkg.attachments;
+    component.parameters = pkg.parameters;
+    component.configurations = pkg.configurations;
+    component.default_configuration = pkg.metadata.default_configuration;
+    let (kind, generator, generator_version) = match pkg.source {
+        package::SourceSpec::Generator {
+            generator,
+            generator_version,
+        } => ("generator", Some(generator), Some(generator_version)),
+        package::SourceSpec::Embedded { .. } => ("embedded", None, None),
+        package::SourceSpec::Profile { .. } => ("profile", None, None),
+        package::SourceSpec::Document { .. } => ("document", None, None),
+    };
+    component.source_kind = kind.into();
+    component.generator_id = generator;
+    component.generator_version = generator_version;
+    let versions = library
+        .index()
+        .versions(component_id)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    Ok(ComponentDetailDto {
+        component,
+        versions,
+    })
+}
+
+pub async fn component_detail_pinned(
+    app: HostContext,
+    component_id: String,
+    component_version: String,
+    revision: String,
+) -> Result<ComponentDetailDto, ApiError> {
+    let root = library_root(&app)
+        .ok_or_else(|| ApiError::Internal("componentDetail: no app data dir".into()))?;
+    blocking(move || {
+        component_detail_pinned_at(&root, &component_id, &component_version, &revision)
+    })
+    .await
+}
+
 /// How a placed instance relates to the library right now. Reads the library
 /// only, so any host can call it per record. Missing id@version wins over an
 /// unreadable manifest, which wins over a revision mismatch, which wins over
@@ -3122,6 +3413,15 @@ pub fn component_status_with(
         return ComponentStatusDto::RevisionMismatch {
             recorded: placed.component_revision.clone(),
             current,
+        };
+    }
+    if let Err(error) = library.resolve_snapshot(&ResolveRequest {
+        component_id: &placed.component_id,
+        component_version: &placed.component_version,
+        component_revision: &placed.component_revision,
+    }) {
+        return ComponentStatusDto::DefinitionUnreadable {
+            reason: error.to_string(),
         };
     }
     match library
@@ -3310,6 +3610,12 @@ mod tests {
         }))
     }
 
+    fn stamp_package(dir: &Path) {
+        let raw = std::fs::read_to_string(dir.join("component.toml")).unwrap();
+        let pkg = package::parse(&raw, dir).unwrap();
+        package::write_package(dir, &pkg).unwrap();
+    }
+
     fn write_generator_package(root: &Path, id: &str, name: &str) {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3331,6 +3637,7 @@ generator_version = 1
             "0".repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     /// Same as `write_generator_package`, plus an `[attachments]` table where
@@ -3362,6 +3669,7 @@ shank_axis = {{ on = "cylinder:shank", accepts = ["cylinder", "hole"] }}
             "0".repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     /// Same as `write_generator_package`, plus a `[parameters]` table with
@@ -3396,6 +3704,7 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
             "0".repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     #[test]
@@ -3805,6 +4114,7 @@ generator_version = 1
             zeros = "0".repeat(64)
         );
         std::fs::write(dir.join(COMPONENT_MANIFEST_FILE), toml).unwrap();
+        stamp_package(&dir);
     }
 
     /// Places `component_id`, then hand-authors a mate onto the resulting
@@ -4384,6 +4694,7 @@ geometry_format = 4
             zeros = "0".repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
         sha
     }
 
@@ -4392,6 +4703,114 @@ geometry_format = 4
     /// renders with the library folder gone. The record keeps the authoring
     /// document's digest as provenance, and the two digests must not be swapped
     /// (one is what regen reads, the other is only evidence).
+    #[tokio::test]
+    async fn failed_restage_keeps_captured_bytes_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document_package(dir.path(), "acme.bracket", b"captured geometry");
+        reindex_library_at(dir.path()).unwrap();
+        let state = pending_app_state();
+        let (engine, meshes, solver) = state.make_backend();
+        *state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let req = PlaceComponentRequest {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            translate: [0.0; 3],
+            rotate: None,
+            params: Default::default(),
+            mate: None,
+            configuration: None,
+        };
+        let draft = prepare_component_draft_at(dir.path(), &state, req)
+            .await
+            .unwrap();
+        let workspace = state
+            .runtime
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .import_workspace_dir()
+            .to_path_buf();
+        std::fs::remove_dir_all(&workspace).unwrap();
+        std::fs::write(&workspace, b"not a directory").unwrap();
+        assert!(restage_component_blob_at(dir.path(), &state, &draft)
+            .await
+            .is_err());
+        assert_eq!(
+            captured_component_draft_bytes(&state),
+            b"captured geometry".len()
+        );
+        std::fs::remove_file(&workspace).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        restage_component_blob_at(dir.path(), &state, &draft)
+            .await
+            .unwrap();
+        assert_eq!(captured_component_draft_bytes(&state), 0);
+        assert!(captured_component_draft_session(&state, &draft).is_some());
+        clear_component_draft_capture(&state);
+    }
+
+    #[tokio::test]
+    async fn captured_draft_over_native_source_limit_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let oversized = vec![7u8; 32 * 1024 * 1024 + 1];
+        write_document_package(dir.path(), "acme.bracket", &oversized);
+        reindex_library_at(dir.path()).unwrap();
+        let state = pending_app_state();
+        let (engine, meshes, solver) = state.make_backend();
+        *state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let req = PlaceComponentRequest {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            translate: [0.0; 3],
+            rotate: None,
+            params: Default::default(),
+            mate: None,
+            configuration: None,
+        };
+        let error = prepare_component_draft_at(dir.path(), &state, req)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("32 MiB"), "{error}");
+        assert_eq!(captured_component_draft_bytes(&state), 0);
+        assert!(state
+            .runtime
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .import_blob_shas()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn captured_draft_reports_its_size_and_can_be_released() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document_package(dir.path(), "acme.bracket", b"captured geometry");
+        reindex_library_at(dir.path()).unwrap();
+        let state = pending_app_state();
+        let (engine, meshes, solver) = state.make_backend();
+        *state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let req = PlaceComponentRequest {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            translate: [0.0; 3],
+            rotate: None,
+            params: Default::default(),
+            mate: None,
+            configuration: None,
+        };
+        prepare_component_draft_at(dir.path(), &state, req)
+            .await
+            .unwrap();
+        assert_eq!(
+            captured_component_draft_bytes(&state),
+            b"captured geometry".len()
+        );
+        clear_component_draft_capture(&state);
+        assert_eq!(captured_component_draft_bytes(&state), 0);
+    }
+
     #[tokio::test]
     async fn a_document_component_places_its_baked_solid_and_caches_the_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -4533,6 +4952,7 @@ geometry_format = 4
             ),
         )
         .unwrap();
+        stamp_package(&pkg);
         reindex_library_at(dir.path()).unwrap();
 
         let app_state = pending_app_state();
@@ -4639,6 +5059,7 @@ length = {{ role = "free", key = "length", value = 500.0, min = 1.0 }}
             zeros = "0".repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
         sha
     }
 
@@ -4872,6 +5293,7 @@ format = 4
             zeros = "0".repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
         sha
     }
 
@@ -4950,6 +5372,7 @@ generator_version = 1
             "0".repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     const VALIDATED_PARAMS: &str = r#"
@@ -5077,6 +5500,27 @@ generator_version = 1
     }
 
     #[test]
+    fn pinned_detail_refuses_changed_manifest_without_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        write_param_package(dir.path(), "acme.part", "1.0.0", VALIDATED_PARAMS);
+        reindex_library_at(dir.path()).unwrap();
+        let library = open_at(dir.path()).unwrap();
+        let revision = library
+            .get("acme.part", Some("1.0.0"))
+            .unwrap()
+            .1
+            .revision
+            .clone();
+        assert!(component_detail_pinned_at(dir.path(), "acme.part", "1.0.0", &revision).is_ok());
+        let path = dir.path().join("acme.part@1.0.0/component.toml");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("name = \"Part\"", "name = \"changed\"");
+        std::fs::write(path, raw).unwrap();
+        assert!(component_detail_pinned_at(dir.path(), "acme.part", "1.0.0", &revision).is_err());
+    }
+
+    #[test]
     fn detail_lists_versions_ascending_and_the_preview_path_only_when_present() {
         let dir = tempfile::tempdir().unwrap();
         write_param_package(dir.path(), "acme.part", "1.10.0", VALIDATED_PARAMS);
@@ -5111,7 +5555,10 @@ generator_version = 1
         let dir = tempfile::tempdir().unwrap();
         write_param_package(dir.path(), "acme.part", "1.0.0", VALIDATED_PARAMS);
         reindex_library_at(dir.path()).unwrap();
-        let zero = format!("sha256:{}", "0".repeat(64));
+        let zero = open_at(dir.path())
+            .unwrap()
+            .declared_revision("acme.part", "1.0.0")
+            .unwrap();
 
         let status = |p: &PlaceComponentParams| component_status_for(dir.path(), p);
         assert_eq!(
@@ -5210,9 +5657,7 @@ generator_version = 1
         .await
         .unwrap();
         assert!(prepared.blob.is_none());
-        stage_prepared_blob(&app_state, &prepared.blob)
-            .await
-            .unwrap();
+        stage_prepared_blob(&app_state, &prepared).await.unwrap();
         assert!(app_state
             .runtime
             .lock()
@@ -5222,9 +5667,14 @@ generator_version = 1
             .projection()
             .features
             .is_empty());
-        let (_, projection) = stage_blob_and_apply(&app_state, prepared.blob, prepared.command)
-            .await
-            .unwrap();
+        let (_, projection) = stage_blob_and_apply(
+            &app_state,
+            prepared.blob,
+            prepared.command,
+            &prepared.runtime_session,
+        )
+        .await
+        .unwrap();
         let placed_id = projection.features[0].id.clone();
 
         let statuses = component_statuses_at(Some(dir.path()), &app_state)
@@ -5516,6 +5966,213 @@ loose = {{ on = "face:loose", accepts = ["plane"] }}
         );
     }
 
+    async fn reopen_same_document(state: &AppState) -> (String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same.onecad");
+        let (document_id, session) = {
+            let mut guard = state.runtime.lock().await;
+            let rt = guard.as_mut().unwrap();
+            rt.save(&path, crate::api::save_meta()).unwrap();
+            (rt.document_id(), rt.runtime_session())
+        };
+        let (engine, meshes, solver) = state.make_backend();
+        let reopened = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
+        assert_eq!(reopened.document_id(), document_id);
+        assert_ne!(reopened.runtime_session(), session);
+        *state.runtime.lock().await = Some(reopened);
+        (document_id, session)
+    }
+
+    #[tokio::test]
+    async fn prepared_draft_rejects_same_document_reopen_and_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document_package(dir.path(), "acme.bracket", b"captured geometry");
+        reindex_library_at(dir.path()).unwrap();
+        let state = pending_app_state();
+        let (engine, meshes, solver) = state.make_backend();
+        *state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let req = || PlaceComponentRequest {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            translate: [0.0; 3],
+            rotate: None,
+            params: Default::default(),
+            mate: None,
+            configuration: None,
+        };
+        let generation = state
+            .captured_library_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let prepared = prepare_place_component_at(dir.path(), &state, req())
+            .await
+            .unwrap();
+        reopen_same_document(&state).await;
+        assert!(matches!(
+            finish_component_draft(&state, prepared, generation).await,
+            Err(ApiError::StalePreview(_))
+        ));
+        assert!(state
+            .runtime
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .import_blob_shas()
+            .is_empty());
+        let generation = state
+            .captured_library_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let prepared = prepare_place_component_at(dir.path(), &state, req())
+            .await
+            .unwrap();
+        clear_component_draft_capture(&state);
+        assert!(matches!(
+            finish_component_draft(&state, prepared, generation).await,
+            Err(ApiError::StalePreview(_))
+        ));
+        assert_eq!(captured_component_draft_bytes(&state), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_draft_preparation_is_pending_refuses_late_result() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document_package(dir.path(), "acme.bracket", b"captured geometry");
+        reindex_library_at(dir.path()).unwrap();
+        let state = std::sync::Arc::new(pending_app_state());
+        let (engine, meshes, solver) = state.make_backend();
+        *state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let req = PlaceComponentRequest {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            translate: [0.0; 3],
+            rotate: None,
+            params: Default::default(),
+            mate: None,
+            configuration: None,
+        };
+        let generation = state
+            .captured_library_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let prepared = prepare_place_component_at(dir.path(), &state, req)
+            .await
+            .unwrap();
+        let (release, pending) = tokio::sync::oneshot::channel();
+        let held = state.clone();
+        let task = tokio::spawn(async move {
+            finish_draft_when_ready(
+                &held,
+                async {
+                    pending.await.unwrap();
+                    Ok(prepared)
+                },
+                generation,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        clear_component_draft_capture(&state);
+        release.send(()).unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(ApiError::StalePreview(_))
+        ));
+        assert!(state
+            .runtime
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .import_blob_shas()
+            .is_empty());
+        assert_eq!(captured_component_draft_bytes(&state), 0);
+    }
+
+    #[tokio::test]
+    async fn draft_restage_rejects_same_document_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document_package(dir.path(), "acme.bracket", b"captured geometry");
+        reindex_library_at(dir.path()).unwrap();
+        let state = pending_app_state();
+        let (engine, meshes, solver) = state.make_backend();
+        *state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let req = PlaceComponentRequest {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            translate: [0.0; 3],
+            rotate: None,
+            params: Default::default(),
+            mate: None,
+            configuration: None,
+        };
+        let draft = prepare_component_draft_at(dir.path(), &state, req)
+            .await
+            .unwrap();
+        let (_, old_session) = reopen_same_document(&state).await;
+        assert_eq!(
+            captured_component_draft_session(&state, &draft),
+            Some(old_session)
+        );
+        assert!(matches!(
+            restage_component_blob_at(dir.path(), &state, &draft).await,
+            Err(ApiError::StalePreview(_))
+        ));
+        assert_eq!(
+            captured_component_draft_bytes(&state),
+            b"captured geometry".len()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_params_result_cannot_edit_same_document_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        write_param_package(dir.path(), "acme.part", "1.0.0", VALIDATED_PARAMS);
+        reindex_library_at(dir.path()).unwrap();
+        let state = pending_app_state();
+        let (engine, meshes, solver) = state.make_backend();
+        *state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let (_, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "acme.part".into(),
+            "1.0.0".into(),
+            [0.0; 3],
+            None,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let record = RecordId::from_str(&projection.features[0].id).unwrap();
+        let current = {
+            let guard = state.runtime.lock().await;
+            serde_json::from_value::<PlaceComponentParams>(
+                guard.as_ref().unwrap().operation_params(record).unwrap(),
+            )
+            .unwrap()
+        };
+        let (_, old_session) = reopen_same_document(&state).await;
+        let live = {
+            let guard = state.runtime.lock().await;
+            guard.as_ref().unwrap().operation_params(record).unwrap()
+        };
+        assert_eq!(
+            serde_json::from_value::<PlaceComponentParams>(live).unwrap(),
+            current
+        );
+        let command = EditCommand::UpdateOperationParams {
+            record,
+            op: Operation::Known(KnownOperation::PlaceComponent(current.clone())),
+        };
+        assert!(matches!(
+            stage_blob_and_apply_unchanged(&state, None, command, (record, &current), &old_session)
+                .await,
+            Err(ApiError::StalePreview(_))
+        ));
+    }
+
     #[tokio::test]
     async fn a_params_edit_computed_from_an_old_record_is_refused_as_stale() {
         let dir = tempfile::tempdir().unwrap();
@@ -5553,11 +6210,13 @@ loose = {{ on = "face:loose", accepts = ["plane"] }}
         .await
         .unwrap();
         let op = Operation::Known(KnownOperation::PlaceComponent(old.clone()));
+        let session = current_runtime_session(&app_state, "test").await.unwrap();
         let err = stage_blob_and_apply_unchanged(
             &app_state,
             None,
             EditCommand::UpdateOperationParams { record, op },
             (record, &old),
+            &session,
         )
         .await
         .unwrap_err();

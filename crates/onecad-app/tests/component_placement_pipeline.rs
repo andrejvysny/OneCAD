@@ -412,7 +412,7 @@ fn add(record: OperationRecord) -> EditCommand {
 fn request(translate: [f64; 3]) -> PlaceComponentRequest {
     PlaceComponentRequest {
         component_id: SCREW.into(),
-        component_version: "1.0.0".into(),
+        component_version: "1.0.1".into(),
         translate,
         rotate: None,
         params: BTreeMap::new(),
@@ -735,6 +735,7 @@ async fn bored_component(
 fn bored_request() -> PlaceComponentRequest {
     PlaceComponentRequest {
         component_id: "acme.bored".into(),
+        component_version: "1.0.0".into(),
         ..request([0.0, 0.0, 0.0])
     }
 }
@@ -766,14 +767,20 @@ async fn restage_is_a_no_op_for_generators_and_restores_blobs_for_baked_componen
     let draft = prepare_component_draft_at(library.path(), &state, bored_request())
         .await
         .expect("arm baked");
-    open_blank(&state).await; // arm-time staging is gone
+    assert!(onecad_app::library::captured_component_draft_bytes(&state) > 0);
+    std::fs::remove_dir_all(library.path().join("acme.bored@1.0.0")).unwrap();
     restage_component_blob_at(library.path(), &state, &draft)
         .await
-        .expect("restage from the library");
+        .expect("restage from captured draft");
     let record = place_record(draft.clone());
     api::apply_operation(&state, host(), vec![add(record)], None)
         .await
         .expect("commit");
+    onecad_app::library::clear_component_draft_capture(&state);
+    assert_eq!(
+        onecad_app::library::captured_component_draft_bytes(&state),
+        0
+    );
     let snap = regen(&state).await;
     assert_eq!(snap.bodies.len(), 1);
     let volume = exact_volume(&wm, snap.bodies[0].body).await;

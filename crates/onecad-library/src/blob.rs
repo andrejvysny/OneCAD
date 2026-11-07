@@ -7,7 +7,10 @@
 //! zip-container-embedded `imports/` section, so it cannot literally be the
 //! same Rust type.
 
-use std::path::PathBuf;
+use std::{
+    io::{Read, Write},
+    path::PathBuf,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -49,6 +52,14 @@ impl BlobStore {
     /// # Errors
     /// Too large, or an I/O failure.
     pub fn put(&self, bytes: &[u8]) -> LibraryResult<String> {
+        self.put_with_writer(bytes, |file, bytes| file.write_all(bytes))
+    }
+
+    fn put_with_writer(
+        &self,
+        bytes: &[u8],
+        write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    ) -> LibraryResult<String> {
         if bytes.len() as u64 > MAX_BLOB_BYTES {
             return Err(LibraryError::BlobTooLarge {
                 limit: MAX_BLOB_BYTES,
@@ -57,23 +68,29 @@ impl BlobStore {
         }
         let sha256 = sha256_hex(bytes);
         let path = self.path_for(&sha256)?;
-        if path.exists() {
-            // Already present — verify rather than trust (a prior write may
-            // have been interrupted). A mismatch here means a hash COLLISION
-            // or filesystem corruption, not an ordinary code path; refuse
-            // loudly rather than silently overwrite.
-            let existing = std::fs::read(&path)?;
-            if existing != bytes {
-                return Err(LibraryError::BlobHashMismatch {
-                    sha256: sha256.clone(),
-                    expected: sha256,
-                    actual: sha256_hex(&existing),
-                });
-            }
+        if path.try_exists()? {
+            let existing = self.get(&sha256)?;
+            verify_existing(&sha256, bytes, &existing)?;
+            std::fs::File::open(&path)?.sync_all()?;
+            create_durable_directory(&self.root)?;
+            std::fs::File::open(&self.root)?.sync_all()?;
             return Ok(sha256);
         }
-        std::fs::create_dir_all(&self.root)?;
-        std::fs::write(&path, bytes)?;
+        create_durable_directory(&self.root)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
+        write(temporary.as_file_mut(), bytes)?;
+        temporary.as_file().sync_all()?;
+        // A hard link publishes complete bytes without replacing another writer's
+        // winner. Only this writer owns cleanup of its temporary.
+        match std::fs::hard_link(temporary.path(), &path) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                verify_existing(&sha256, bytes, &self.get(&sha256)?)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        temporary.close()?;
+        std::fs::File::open(&self.root)?.sync_all()?;
         Ok(sha256)
     }
 
@@ -86,8 +103,14 @@ impl BlobStore {
     /// `BlobMissing` when absent, `BlobHashMismatch` when the bytes on disk
     /// disagree with `sha256`.
     pub fn get(&self, sha256: &str) -> LibraryResult<Vec<u8>> {
+        self.get_bounded(sha256, MAX_BLOB_BYTES)
+    }
+
+    /// Verifies bytes with a caller's smaller admission cap before allocation.
+    pub fn get_bounded(&self, sha256: &str, limit: u64) -> LibraryResult<Vec<u8>> {
+        let limit = limit.min(MAX_BLOB_BYTES);
         let path = self.path_for(sha256)?;
-        let bytes = std::fs::read(&path).map_err(|e| {
+        let file = std::fs::File::open(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 LibraryError::BlobMissing {
                     sha256: sha256.to_string(),
@@ -96,6 +119,18 @@ impl BlobStore {
                 LibraryError::Io(e.to_string())
             }
         })?;
+        let actual = file.metadata()?.len();
+        if actual > limit {
+            return Err(LibraryError::BlobTooLarge { limit, actual });
+        }
+        let mut bytes = Vec::new();
+        file.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit {
+            return Err(LibraryError::BlobTooLarge {
+                limit,
+                actual: bytes.len() as u64,
+            });
+        }
         let actual = sha256_hex(&bytes);
         if actual != sha256 {
             return Err(LibraryError::BlobHashMismatch {
@@ -113,6 +148,44 @@ impl BlobStore {
     pub fn contains(&self, sha256: &str) -> bool {
         self.path_for(sha256).is_ok_and(|p| p.is_file())
     }
+}
+
+fn verify_existing(key: &str, expected: &[u8], existing: &[u8]) -> LibraryResult<()> {
+    if existing != expected {
+        return Err(LibraryError::BlobHashMismatch {
+            sha256: key.to_string(),
+            expected: key.to_string(),
+            actual: sha256_hex(existing),
+        });
+    }
+    Ok(())
+}
+
+fn create_durable_directory(path: &std::path::Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        create_durable_directory(parent)?;
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => (),
+        Err(error) => return Err(error),
+    }
+    if let Some(parent) = parent {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -152,6 +225,86 @@ mod tests {
         let sha1 = store.put(b"same bytes").unwrap();
         let sha2 = store.put(b"same bytes").unwrap();
         assert_eq!(sha1, sha2);
+        assert_eq!(
+            store
+                .put_with_writer(b"same bytes", |_, _| {
+                    panic!("an existing valid blob must not need a new writer")
+                })
+                .unwrap(),
+            sha1
+        );
+    }
+
+    #[test]
+    fn partial_failed_writer_never_publishes_and_removes_only_its_temporary() {
+        let (dir, store) = store();
+        std::fs::create_dir_all(&store.root).unwrap();
+        let foreign = store.root.join("foreign-temporary");
+        std::fs::write(&foreign, b"another writer").unwrap();
+        let bytes = b"complete payload";
+        let key = sha256_hex(bytes);
+        let error = store.put_with_writer(bytes, |file, bytes| {
+            file.write_all(&bytes[..3])?;
+            assert!(!store.contains(&key));
+            Err(std::io::Error::other("injected disk-full write"))
+        });
+        assert!(error.is_err());
+        assert!(!store.contains(&key));
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"another writer");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(BLOBS_DIR))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(store.put(bytes).unwrap(), key);
+        assert_eq!(store.get(&key).unwrap(), bytes);
+    }
+
+    #[test]
+    fn concurrent_complete_writers_publish_one_verified_blob() {
+        let (dir, store) = store();
+        let barrier = std::sync::Barrier::new(2);
+        let bytes = b"concurrent immutable payload";
+        std::thread::scope(|scope| {
+            let write = || {
+                store.put_with_writer(bytes, |file, bytes| {
+                    file.write_all(bytes)?;
+                    barrier.wait();
+                    Ok(())
+                })
+            };
+            let first = scope.spawn(write);
+            let second = scope.spawn(write);
+            assert_eq!(
+                first.join().unwrap().unwrap(),
+                second.join().unwrap().unwrap()
+            );
+        });
+        assert_eq!(store.get(&sha256_hex(bytes)).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(BLOBS_DIR))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn put_refuses_existing_corrupt_content_without_replacing_it() {
+        let (_dir, store) = store();
+        let bytes = b"valid content";
+        let key = store.put(bytes).unwrap();
+        std::fs::write(store.path_for(&key).unwrap(), b"corrupt").unwrap();
+        assert!(matches!(
+            store.put(bytes),
+            Err(LibraryError::BlobHashMismatch { .. })
+        ));
+        assert_eq!(
+            std::fs::read(store.path_for(&key).unwrap()).unwrap(),
+            b"corrupt"
+        );
+        assert_eq!(std::fs::read_dir(&store.root).unwrap().count(), 1);
     }
 
     #[test]
@@ -159,6 +312,24 @@ mod tests {
         let (_dir, store) = store();
         let err = store.get(&"a".repeat(64)).unwrap_err();
         assert!(matches!(err, LibraryError::BlobMissing { .. }));
+    }
+
+    #[test]
+    fn oversized_external_blob_is_refused_before_reading_its_payload() {
+        let (_dir, store) = store();
+        std::fs::create_dir_all(&store.root).unwrap();
+        let key = "a".repeat(64);
+        let file = std::fs::File::create(store.path_for(&key).unwrap()).unwrap();
+        file.set_len(MAX_BLOB_BYTES + 1).unwrap();
+        assert!(matches!(
+            store.get(&key),
+            Err(LibraryError::BlobTooLarge { .. })
+        ));
+        let key = store.put(b"small valid blob").unwrap();
+        assert!(matches!(
+            store.get_bounded(&key, 4),
+            Err(LibraryError::BlobTooLarge { limit: 4, .. })
+        ));
     }
 
     #[test]

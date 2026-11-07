@@ -3331,19 +3331,34 @@ impl DocumentRuntime {
     ) -> Result<(), ApiError> {
         if bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
             return Err(ApiError::Io(format!(
+                "component geometry blob {sha256} exceeds the {MAX_IMPORT_BLOB_BYTES}-byte limit"
+            )));
+        }
+        self.stage_component_blob_shared(sha256, codec, Arc::new(bytes.to_vec()))
+    }
+
+    /// Stages an owned shared payload without duplicating its bytes.
+    pub fn stage_component_blob_shared(
+        &mut self,
+        sha256: &str,
+        codec: ImportSourceCodec,
+        bytes: Arc<Vec<u8>>,
+    ) -> Result<(), ApiError> {
+        if bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
+            return Err(ApiError::Io(format!(
                 "component geometry blob {sha256} is {} bytes, over the \
                  {MAX_IMPORT_BLOB_BYTES}-byte limit",
                 bytes.len()
             )));
         }
-        let actual = crate::imports::sha256_hex(bytes);
+        let actual = crate::imports::sha256_hex(&bytes);
         if actual != sha256 {
             return Err(ApiError::InvalidCommand(format!(
                 "component geometry blob is keyed {sha256} but its bytes hash to {actual}"
             )));
         }
         self.import_workspace
-            .materialize(sha256, codec, bytes)
+            .materialize(sha256, codec, &bytes)
             .map_err(|e| {
                 ApiError::Io(format!(
                     "cannot stage component geometry {sha256} for the geometry worker: {e}"
@@ -3351,10 +3366,7 @@ impl DocumentRuntime {
             })?;
         self.imports
             .entry(sha256.to_string())
-            .or_insert_with(|| ImportBlob {
-                codec,
-                bytes: Arc::new(bytes.to_vec()),
-            });
+            .or_insert_with(|| ImportBlob { codec, bytes });
         Ok(())
     }
 

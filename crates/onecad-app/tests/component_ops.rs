@@ -698,6 +698,42 @@ async fn a_baked_component_survives_save_and_reopen_with_no_library() {
     wm2.shutdown().await;
 }
 
+/// Replays an immutable legacy document captured from the pre-v2 baseline writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn baseline_legacy_component_fixture_reopens_without_library() {
+    const FIXTURE: &[u8] = include_bytes!("fixtures/legacy_component_baseline.onecad");
+    assert_eq!(
+        onecad_app::imports::sha256_hex(FIXTURE),
+        "94747540e5e57ff58269165eeb06ff7ea9878404f1d5cfe292aefab2d2735239"
+    );
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy.onecad");
+    std::fs::write(&path, FIXTURE).unwrap();
+    let wm = spawn_worker(bin).await;
+    let mut rt = open_over(&wm, &path);
+    let record = RecordId(Uuid::from_u128(0xd2));
+    let params: PlaceComponentParams =
+        serde_json::from_value(rt.operation_params(record).expect("legacy record")).unwrap();
+    assert_eq!(
+        params.component_revision,
+        format!("sha256:{}", "0".repeat(64))
+    );
+    assert!(matches!(params.source, ComponentSourceRef::Document { .. }));
+    let report = regen_all(&mut rt).await;
+    let snapshot = published(&report, "legacy fixture");
+    assert_eq!(snapshot.bodies.len(), 1);
+    let volume = exact_volume(&wm, snapshot.bodies[0].body).await;
+    assert!(
+        (volume - m6_shcs_volume()).abs() < 1e-6,
+        "legacy volume {volume}"
+    );
+    wm.shutdown().await;
+}
+
 /// A component whose blob is NOT in the document fails that ONE step, loudly,
 /// and leaves the rest of the document alone — the `io::imports` blast-radius
 /// rule. The dangerous alternative is publishing something else instead.

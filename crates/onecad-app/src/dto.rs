@@ -809,6 +809,9 @@ pub struct DroppedOverrideDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpgradeItemDto {
+    /// Runtime identity captured when the plan was made; prevents document ABA.
+    #[serde(default)]
+    pub runtime_session: String,
     pub record_id: String,
     pub from_version: String,
     pub to_version: String,

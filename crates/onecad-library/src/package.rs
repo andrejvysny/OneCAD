@@ -479,7 +479,14 @@ pub fn write_package(package_dir: &Path, pkg: &ComponentPackage) -> LibraryResul
     let manifest_path = package_dir.join(COMPONENT_MANIFEST_FILE);
     std::fs::write(&manifest_path, to_toml(pkg)?)?;
 
-    let revision = compute_revision(package_dir)?;
+    let document = match &pkg.source {
+        SourceSpec::Document { file, .. } => {
+            Some(crate::resolve::read_document(package_dir, file)?)
+        }
+        _ => None,
+    };
+    let canonical = crate::semantic::parse(&to_toml(pkg)?, &manifest_path)?;
+    let revision = crate::semantic::revision(&canonical, document.as_deref())?;
     let mut stamped = pkg.clone();
     stamped.identity.revision = revision.clone();
     std::fs::write(&manifest_path, to_toml(&stamped)?)?;
@@ -526,7 +533,12 @@ pub fn validate_identity(pkg: &ComponentPackage) -> LibraryResult<()> {
             pkg.identity.version
         )));
     }
-    match pkg.identity.revision.strip_prefix("sha256:") {
+    match pkg
+        .identity
+        .revision
+        .strip_prefix("sha256:")
+        .or_else(|| pkg.identity.revision.strip_prefix(crate::semantic::PREFIX))
+    {
         Some(hex) if is_sha256_hex(hex) => {}
         _ => {
             return Err(LibraryError::InvalidIdentity(format!(
@@ -1011,7 +1023,7 @@ shank_axis = { on = "cylinder:shank", accepts = ["cylinder", "hole", "circularEd
         )
         .unwrap();
         assert_eq!(on_disk.identity.revision, recorded);
-        assert_eq!(recorded, compute_revision(&pkg_dir).unwrap());
+        assert_eq!(recorded, crate::semantic::revision(&on_disk, None).unwrap());
         assert_ne!(recorded, format!("sha256:{}", "f".repeat(64)));
     }
 

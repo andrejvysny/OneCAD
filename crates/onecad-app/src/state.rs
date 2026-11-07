@@ -156,6 +156,9 @@ pub struct AppState {
     /// The single open document (V1), or `None` when nothing is open. The regen
     /// driver and every command lock this one runtime (single writer).
     pub runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    /// One captured placement draft, replaced by the next arm and consumed on restage.
+    pub(crate) captured_library_draft: StdMutex<Option<crate::library::CapturedDraft>>,
+    pub(crate) captured_library_generation: std::sync::atomic::AtomicU64,
     /// Exact manager/runtime pair allowed to react to a restart. Updated only
     /// while holding `runtime`; callbacks use the same runtime -> owner order.
     restart_owner: Arc<StdMutex<Option<(u64, String)>>>,
@@ -303,6 +306,8 @@ impl AppState {
             services,
             tasks: Default::default(),
             claims: StdMutex::new(Vec::new()),
+            captured_library_draft: StdMutex::new(None),
+            captured_library_generation: std::sync::atomic::AtomicU64::new(0),
             live: Arc::new(StdMutex::new(None)),
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
@@ -775,6 +780,8 @@ impl AppState {
             services,
             tasks: Default::default(),
             claims: StdMutex::new(Vec::new()),
+            captured_library_draft: StdMutex::new(None),
+            captured_library_generation: std::sync::atomic::AtomicU64::new(0),
             live,
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),

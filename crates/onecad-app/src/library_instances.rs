@@ -18,6 +18,7 @@ use onecad_core::document::record::{
 use onecad_core::edit::{CommandOutcome, EditCommand};
 use onecad_core::ids::RecordId;
 use onecad_library::package::{ComponentPackage, SourceSpec};
+use onecad_library::resolve::ResolveRequest;
 use onecad_library::Library;
 
 use crate::dto::{
@@ -26,9 +27,12 @@ use crate::dto::{
 };
 use crate::error::ApiError;
 use crate::host::HostContext;
+#[cfg(test)]
+use crate::library::component_package_at;
 use crate::library::{
-    component_package_at, component_status_with, finish, free_defaults, library_root, open_at,
-    prepare_replace_component_at, set_component_params_removing_at, validate_component_params,
+    component_snapshot_at, component_status_with, finish, free_defaults, library_root, open_at,
+    prepare_replace_component_from_snapshot, set_component_params_removing_at,
+    validate_component_params,
 };
 use crate::state::AppState;
 
@@ -79,10 +83,19 @@ fn linked_instance(
     record: &OperationRecord,
     placed: &PlaceComponentParams,
 ) -> ComponentInstanceDto {
-    let entry = library
-        .and_then(|l| l.get(&placed.component_id, Some(&placed.component_version)))
-        .map(|(_, entry)| entry);
-    let defaults = entry.map_or_else(Params::new, |e| free_defaults(&e.parameters));
+    let package = library
+        .and_then(|l| {
+            l.resolve_snapshot(&ResolveRequest {
+                component_id: &placed.component_id,
+                component_version: &placed.component_version,
+                component_revision: &placed.component_revision,
+            })
+            .ok()
+        })
+        .map(|snapshot| snapshot.package);
+    let defaults = package
+        .as_ref()
+        .map_or_else(Params::new, |p| free_defaults(&p.parameters));
     let mut effective = defaults.clone();
     effective.extend(placed.params.clone());
     let overrides = placed
@@ -91,8 +104,9 @@ fn linked_instance(
         .filter(|(key, value)| defaults.get(*key) != Some(*value))
         .map(|(key, _)| key.clone())
         .collect();
-    let designation = entry
-        .and_then(|e| e.designation.as_deref())
+    let designation = package
+        .as_ref()
+        .and_then(|p| p.metadata.designation.as_deref())
         .map(|template| resolve_designation(template, &effective));
     let status = match library {
         Some(library) => component_status_with(library, placed),
@@ -186,10 +200,12 @@ struct Planned {
     item: UpgradeItemDto,
     component_id: String,
     snapshot: Option<PlaceComponentParams>,
+    target: Option<onecad_library::resolve::ResolvedSnapshot>,
 }
 
 fn refused(record_id: &str, from: &str, to: &str, reason: String) -> UpgradeItemDto {
     UpgradeItemDto {
+        runtime_session: String::new(),
         record_id: record_id.to_string(),
         from_version: from.to_string(),
         to_version: to.to_string(),
@@ -298,30 +314,39 @@ fn plan_placed(
 ) -> Planned {
     let from = placed.component_version.clone();
     let component_id = placed.component_id.clone();
-    let plan = |item, snapshot| Planned {
+    let plan = |item, snapshot, target| Planned {
         item,
         component_id: component_id.clone(),
         snapshot,
+        target,
     };
     let to = match resolve_target(library, &placed, requested) {
         Ok(to) => to,
-        Err((to, why)) => return plan(refused(record_id, &from, &to, why), None),
+        Err((to, why)) => return plan(refused(record_id, &from, &to, why), None, None),
     };
-    let package = match component_package_at("upgrade", root, &component_id, &to) {
-        Ok(p) => p,
-        Err(e) => return plan(refused(record_id, &from, &to, e.to_string()), None),
+    let target = match component_snapshot_at("upgrade", root, &component_id, &to, None) {
+        Ok(snapshot) => snapshot,
+        Err(e) => return plan(refused(record_id, &from, &to, e.to_string()), None, None),
     };
-    let old = match component_package_at("upgrade", root, &component_id, &from) {
-        Ok(p) => p,
-        Err(e) => return plan(refused(record_id, &from, &to, e.to_string()), None),
+    let package = &target.package;
+    let old = match component_snapshot_at(
+        "upgrade",
+        root,
+        &component_id,
+        &from,
+        Some(&placed.component_revision),
+    ) {
+        Ok(snapshot) => snapshot.package,
+        Err(e) => return plan(refused(record_id, &from, &to, e.to_string()), None, None),
     };
-    let (kept_overrides, dropped_overrides) = reconcile_overrides(&placed, &old, &package);
+    let (kept_overrides, dropped_overrides) = reconcile_overrides(&placed, &old, package);
     let dropped_mate_attachment = placed
         .mate
         .as_ref()
         .map(|m| m.self_attachment.clone())
         .filter(|name| !package.attachments.contains_key(name));
     let item = UpgradeItemDto {
+        runtime_session: String::new(),
         record_id: record_id.to_string(),
         from_version: from,
         to_version: to,
@@ -332,7 +357,7 @@ fn plan_placed(
         applicable: true,
         refusal: None,
     };
-    plan(item, Some(placed))
+    plan(item, Some(placed), Some(target))
 }
 
 /// Reads each requested record once, under one lock: `None` marks a record that
@@ -341,11 +366,19 @@ async fn read_placed(
     state: &AppState,
     ids: &[String],
 ) -> Result<Vec<Option<PlaceComponentParams>>, ApiError> {
+    Ok(read_placed_with_session(state, ids).await?.1)
+}
+
+async fn read_placed_with_session(
+    state: &AppState,
+    ids: &[String],
+) -> Result<(String, Vec<Option<PlaceComponentParams>>), ApiError> {
     let guard = state.runtime.lock().await;
     let rt = guard
         .as_ref()
         .ok_or_else(|| ApiError::NoDocument("componentUpgrades".into()))?;
-    ids.iter()
+    let placed = ids
+        .iter()
         .map(|id| {
             let record = RecordId::from_str(id)
                 .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {id:?}: {e}")))?;
@@ -354,7 +387,8 @@ async fn read_placed(
                 _ => None,
             }))
         })
-        .collect()
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok((rt.runtime_session(), placed))
 }
 
 async fn plan_targets(
@@ -368,23 +402,28 @@ async fn plan_targets(
         .filter(|(id, _)| seen.insert(id.clone()))
         .collect();
     let ids: Vec<String> = targets.iter().map(|(id, _)| id.clone()).collect();
-    let placed = read_placed(state, &ids).await?;
+    let (runtime_session, placed) = read_placed_with_session(state, &ids).await?;
     let library = open_at(root)?;
     Ok(targets
         .into_iter()
         .zip(placed)
-        .map(|((id, requested), placed)| match placed {
-            Some(p) => plan_placed(root, &library, &id, p, requested.as_deref()),
-            None => Planned {
-                item: refused(
-                    &id,
-                    "",
-                    requested.as_deref().unwrap_or(""),
-                    "not a linked component instance".into(),
-                ),
-                component_id: String::new(),
-                snapshot: None,
-            },
+        .map(|((id, requested), placed)| {
+            let mut planned = match placed {
+                Some(p) => plan_placed(root, &library, &id, p, requested.as_deref()),
+                None => Planned {
+                    item: refused(
+                        &id,
+                        "",
+                        requested.as_deref().unwrap_or(""),
+                        "not a linked component instance".into(),
+                    ),
+                    component_id: String::new(),
+                    snapshot: None,
+                    target: None,
+                },
+            };
+            planned.item.runtime_session = runtime_session.clone();
+            planned
         })
         .collect())
 }
@@ -443,7 +482,7 @@ pub async fn apply_component_upgrades_at(
     if replanned.len() != approved.len() || replanned.iter().zip(&approved).any(|(a, b)| *a != b) {
         return Err(stale());
     }
-    let planned: Vec<Planned> = planned.into_iter().filter(|p| p.item.applicable).collect();
+    let mut planned: Vec<Planned> = planned.into_iter().filter(|p| p.item.applicable).collect();
     if planned.is_empty() {
         return Err(ApiError::InvalidCommand(
             "no applicable component upgrades".into(),
@@ -451,26 +490,26 @@ pub async fn apply_component_upgrades_at(
     }
     let mut commands = Vec::with_capacity(planned.len());
     let mut blobs = Vec::new();
-    for p in &planned {
-        let prepared = prepare_replace_component_at(
-            root,
+    for p in &mut planned {
+        let prepared = prepare_replace_component_from_snapshot(
             state,
             p.item.record_id.clone(),
             p.component_id.clone(),
             p.item.to_version.clone(),
             p.item.kept_overrides.clone(),
+            p.target.take().ok_or_else(stale)?,
+            &p.item.runtime_session,
         )
         .await?;
         commands.push(prepared.command);
         blobs.extend(prepared.blob);
     }
-    commit_upgrades(root, state, &planned, blobs, commands).await
+    commit_upgrades(state, &planned, blobs, commands).await
 }
 
 /// Stages every blob and applies the transaction under one runtime lock, after
 /// re-checking each record still equals the state the plan was built from.
 async fn commit_upgrades(
-    root: &Path,
     state: &AppState,
     planned: &[Planned],
     blobs: Vec<crate::library::StagedBlob>,
@@ -480,14 +519,11 @@ async fn commit_upgrades(
     let rt = guard
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("applyComponentUpgrades".into()))?;
-    let library = open_at(root)?;
     for (p, command) in planned.iter().zip(&commands) {
-        // The library moves independently of the document: the target must still
-        // declare the revision the user approved, and the record we authored
-        // must name that same revision.
-        let declared = library
-            .declared_revision(&p.component_id, &p.item.to_version)
-            .map_err(|_| stale())?;
+        if !rt.matches_runtime_session(&p.item.runtime_session) {
+            return Err(stale());
+        }
+        // The command must use the exact verified target captured during replanning.
         let authored = match command {
             EditCommand::UpdateOperationParams {
                 op: Operation::Known(KnownOperation::PlaceComponent(c)),
@@ -495,7 +531,7 @@ async fn commit_upgrades(
             } => Some(c.component_revision.as_str()),
             _ => None,
         };
-        if declared != p.item.to_revision || authored != Some(p.item.to_revision.as_str()) {
+        if authored != Some(p.item.to_revision.as_str()) {
             return Err(stale());
         }
         let record = RecordId::from_str(&p.item.record_id)
@@ -609,6 +645,12 @@ mod tests {
 
     /// v1.0.0 declares `thread` (M3..M8), `length` and `thread_detail`; v1.1.0
     /// narrows `thread` to M3..M6 and drops `thread_detail` as a free parameter.
+    fn stamp_package(dir: &Path) {
+        let raw = std::fs::read_to_string(dir.join("component.toml")).unwrap();
+        let pkg = onecad_library::package::parse(&raw, dir).unwrap();
+        onecad_library::package::write_package(dir, &pkg).unwrap();
+    }
+
     fn write_version(root: &Path, version: &str) {
         let v11 = version == "1.1.0";
         let (domain, detail) = if v11 {
@@ -645,6 +687,7 @@ length = {{ role = "free", value = 20, min = 2 }}
             if v11 { "1" } else { "0" }.repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     fn num(v: f64) -> ComponentParamValue {
@@ -844,6 +887,33 @@ length = {{ role = "free", value = 20, min = 2 }}
     }
 
     #[tokio::test]
+    async fn same_document_reopen_invalidates_upgrade_plan() {
+        let (dir, state, [a, _, _]) = fixture().await;
+        let plan = plan_component_upgrades_at(dir.path(), &state, vec![a.clone()], None)
+            .await
+            .unwrap();
+        let path_dir = tempfile::tempdir().unwrap();
+        let path = path_dir.path().join("same.onecad");
+        let (old_id, old_session) = {
+            let mut guard = state.runtime.lock().await;
+            let rt = guard.as_mut().unwrap();
+            rt.save(&path, crate::api::save_meta()).unwrap();
+            (rt.document_id(), rt.runtime_session())
+        };
+        let (engine, meshes, solver) = state.make_backend();
+        let reopened = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
+        assert_eq!(reopened.document_id(), old_id);
+        assert_ne!(reopened.runtime_session(), old_session);
+        *state.runtime.lock().await = Some(reopened);
+        let before = placed(&state, &a).await;
+        let error = apply_component_upgrades_at(dir.path(), &state, plan)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(placed(&state, &a).await, before);
+    }
+
+    #[tokio::test]
     async fn a_stale_plan_is_refused_and_nothing_changes() {
         let (dir, state, [a, b, _]) = fixture().await;
         let plan = plan_component_upgrades_at(dir.path(), &state, vec![a.clone(), b.clone()], None)
@@ -933,6 +1003,7 @@ thread_detail = {{ role = "free", value = "{default}", domain = ["cosmetic", "si
             if version == "1.1.0" { "1" } else { "0" }.repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     async fn blank_state() -> AppState {
@@ -995,6 +1066,22 @@ thread_detail = {{ role = "free", value = "{default}", domain = ["cosmetic", "si
     }
 
     #[tokio::test]
+    async fn upgrade_refuses_replaced_original_revision() {
+        let (dir, state, [a, _, _]) = fixture().await;
+        let manifest = dir.path().join(format!("{ID}@1.0.0/component.toml"));
+        let edited = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("generator = \"iso4762\"", "generator = \"other\"");
+        std::fs::write(&manifest, edited).unwrap();
+        stamp_package(manifest.parent().unwrap());
+        reindex_library_at(dir.path()).unwrap();
+        let plan = plan_component_upgrades_at(dir.path(), &state, vec![a], None)
+            .await
+            .unwrap();
+        assert!(!plan[0].applicable, "{plan:?}");
+    }
+
+    #[tokio::test]
     async fn a_package_resaved_with_new_content_after_the_plan_is_refused() {
         let (dir, state, [a, _, _]) = fixture().await;
         let plan = plan_component_upgrades_at(dir.path(), &state, vec![a.clone()], None)
@@ -1005,8 +1092,9 @@ thread_detail = {{ role = "free", value = "{default}", domain = ["cosmetic", "si
         let manifest = dir.path().join(format!("{ID}@1.1.0/component.toml"));
         let edited = std::fs::read_to_string(&manifest)
             .unwrap()
-            .replace(&"1".repeat(64), &"2".repeat(64));
+            .replace("generator = \"iso4762\"", "generator = \"other\"");
         std::fs::write(&manifest, edited).unwrap();
+        stamp_package(manifest.parent().unwrap());
         reindex_library_at(dir.path()).unwrap();
 
         let before = placed(&state, &a).await;
@@ -1092,6 +1180,7 @@ thread = {{ role = "free", key = "M6", domain = ["M5", "M6", "M8"] }}
             ),
         )
         .unwrap();
+        stamp_package(&pkg);
         reindex_library_at(dir.path()).unwrap();
         let state = blank_state().await;
         place_component_at(

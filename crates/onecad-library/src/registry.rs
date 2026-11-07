@@ -94,6 +94,10 @@ generator_version = 1
     fn reindex_persists_then_resolve_reads_it_back() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());
+        let package_dir = dir.path().join("onecad.std.iso4762");
+        let raw = std::fs::read_to_string(package_dir.join(COMPONENT_MANIFEST_FILE)).unwrap();
+        let pkg = crate::package::parse(&raw, &package_dir).unwrap();
+        let revision = crate::package::write_package(&package_dir, &pkg).unwrap();
         let registry = LocalRegistry::new(dir.path());
 
         let (index, report) = registry.reindex().unwrap();
@@ -108,7 +112,7 @@ generator_version = 1
             .resolve(&ResolveRequest {
                 component_id: "onecad.std.iso4762",
                 component_version: "1.0.0",
-                component_revision: &format!("sha256:{}", "0".repeat(64)),
+                component_revision: &revision,
             })
             .unwrap();
         assert_eq!(

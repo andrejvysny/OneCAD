@@ -3608,11 +3608,11 @@ impl PlaceComponentParams {
                 self.component_version
             ));
         }
-        match self.component_revision.strip_prefix("sha256:") {
+        match self.component_revision.strip_prefix("sha256:").or_else(|| self.component_revision.strip_prefix("sha256v2:")) {
             Some(hex) if is_sha256_hex(hex) => {}
             _ => {
                 return Err(format!(
-                "PlaceComponent componentRevision `{}` must be `sha256:` + 64 lowercase-hex chars",
+                "PlaceComponent componentRevision `{}` must be `sha256:` or `sha256v2:` + 64 lowercase-hex chars",
                 self.component_revision
             ))
             }
@@ -5631,6 +5631,11 @@ mod tests {
         let mut bad_revision = ok.clone();
         bad_revision.component_revision = "not-a-hash".to_string();
         assert!(bad_revision.validate().is_err());
+        let mut semantic_revision = ok.clone();
+        semantic_revision.component_revision = format!("sha256v2:{}", "a".repeat(64));
+        assert!(semantic_revision.validate().is_ok());
+        semantic_revision.component_revision = format!("sha256v2:{}", "A".repeat(64));
+        assert!(semantic_revision.validate().is_err());
 
         // The id/version pair names the package directory — a path-escaping
         // value must die at authoring, before any `Path::join` sees it.

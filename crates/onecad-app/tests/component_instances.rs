@@ -219,6 +219,9 @@ length = {{ role = "free", value = 20, min = 2 }}
         rev = if v11 { "1" } else { "0" }.repeat(64)
     );
     std::fs::write(dir.join("component.toml"), toml).unwrap();
+    let raw = std::fs::read_to_string(dir.join("component.toml")).unwrap();
+    let package = onecad_library::package::parse(&raw, &dir).unwrap();
+    onecad_library::package::write_package(&dir, &package).unwrap();
 }
 
 fn request(translate: [f64; 3], params: Params) -> PlaceComponentRequest {

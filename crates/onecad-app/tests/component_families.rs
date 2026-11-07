@@ -293,7 +293,7 @@ async fn every_seeded_family_places_meshes_and_survives_reopen() {
             library.path(),
             &state,
             id.to_string(),
-            "1.0.0".to_string(),
+            "1.0.1".to_string(),
             [0.0, 0.0, 0.0],
             None,
             params,
@@ -511,7 +511,7 @@ async fn place_mated(
         library,
         state,
         id.to_string(),
-        "1.0.0".to_string(),
+        "1.0.1".to_string(),
         // Deliberately wrong in z (the mate must re-seat it) but over solid
         // plate in xy: a coincident seat is projected along the normal and
         // must land ON the face, not in the hole.

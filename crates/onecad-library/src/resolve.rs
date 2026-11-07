@@ -19,6 +19,14 @@ pub struct ResolveRequest<'a> {
     pub component_revision: &'a str,
 }
 
+/// Immutable, verified closure captured from one manifest and its payloads.
+#[derive(Debug, Clone)]
+pub struct ResolvedSnapshot {
+    pub package: ComponentPackage,
+    pub source: ResolvedSource,
+    pub document: Option<Vec<u8>>,
+}
+
 /// The worker-consumable geometry source a resolution produced — all three spec
 /// §2.1 kinds as of WP-3.2.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +94,24 @@ pub fn resolve(
     index: &LibraryIndex,
     req: &ResolveRequest,
 ) -> LibraryResult<ResolvedSource> {
+    Ok(resolve_snapshot(library_root, index, req)?.source)
+}
+
+pub fn resolve_snapshot(
+    library_root: &Path,
+    index: &LibraryIndex,
+    req: &ResolveRequest,
+) -> LibraryResult<ResolvedSnapshot> {
+    resolve_snapshot_bounded(library_root, index, req, crate::blob::MAX_BLOB_BYTES)
+}
+
+/// Capture a snapshot within a caller's aggregate document-and-blob byte limit.
+pub fn resolve_snapshot_bounded(
+    library_root: &Path,
+    index: &LibraryIndex,
+    req: &ResolveRequest,
+    limit: u64,
+) -> LibraryResult<ResolvedSnapshot> {
     let (_version, entry) = index
         .get(req.component_id, Some(req.component_version))
         .ok_or_else(|| {
@@ -101,10 +127,39 @@ pub fn resolve(
     }
 
     let manifest_path = library_root.join(&entry.path).join(COMPONENT_MANIFEST_FILE);
-    let raw = std::fs::read_to_string(&manifest_path)?;
-    let pkg: ComponentPackage = package::parse(&raw, &manifest_path)?;
-
-    match pkg.source {
+    let raw = read_manifest_bounded(&manifest_path, limit)?;
+    let remaining = limit.saturating_sub(raw.len() as u64);
+    if !req.component_revision.starts_with(crate::semantic::PREFIX) {
+        return Err(LibraryError::UnverifiableLegacyRevision(
+            req.component_revision.into(),
+        ));
+    }
+    let pkg = crate::semantic::parse(&raw, &manifest_path)?;
+    package::validate_identity(&pkg)?;
+    if pkg.identity.id != req.component_id || pkg.identity.version != req.component_version {
+        return Err(LibraryError::InvalidIdentity(
+            "indexed package identity changed".into(),
+        ));
+    }
+    let document = match &pkg.source {
+        SourceSpec::Document { file, .. } => Some(read_document_bounded(
+            &library_root.join(&entry.path),
+            file,
+            remaining,
+        )?),
+        _ => None,
+    };
+    let actual = crate::semantic::revision(&pkg, document.as_deref())?;
+    if pkg.identity.revision != req.component_revision || actual != req.component_revision {
+        return Err(LibraryError::RevisionMismatch {
+            component_id: req.component_id.into(),
+            recorded: req.component_revision.into(),
+            current: actual,
+        });
+    }
+    let blob_limit =
+        remaining.saturating_sub(document.as_ref().map_or(0, |bytes| bytes.len() as u64));
+    let source: LibraryResult<ResolvedSource> = match pkg.source.clone() {
         SourceSpec::Generator {
             generator,
             generator_version,
@@ -124,6 +179,7 @@ pub fn resolve(
                 &blob,
                 &codec,
                 format,
+                blob_limit,
             )?,
         }),
         SourceSpec::Profile {
@@ -152,30 +208,19 @@ pub fn resolve(
                     &blob,
                     &codec,
                     format,
+                    blob_limit,
                 )?,
             })
         }
         SourceSpec::Document {
-            file,
+            file: _,
             geometry,
             geometry_codec,
             geometry_format,
         } => {
-            // The frozen document is hashed, not read: a placement resolves to the
-            // BAKED solid (see `SourceSpec::Document`). Reading it here proves the
-            // package still carries the document its geometry claims to come from,
-            // which is the whole value of recording the digest.
-            let document_path = library_root.join(&entry.path).join(&file);
-            let document_bytes =
-                std::fs::read(&document_path).map_err(|e| LibraryError::MalformedPackage {
-                    path: manifest_path.clone(),
-                    message: format!(
-                        "source.file `{file}` is not readable at {}: {e}",
-                        document_path.display()
-                    ),
-                })?;
+            let document_bytes = document.as_ref().expect("document captured above");
             Ok(ResolvedSource::Document {
-                document_sha256: crate::blob::sha256_hex(&document_bytes),
+                document_sha256: crate::blob::sha256_hex(document_bytes),
                 blob: read_blob(
                     library_root,
                     &manifest_path,
@@ -183,10 +228,63 @@ pub fn resolve(
                     &geometry,
                     &geometry_codec,
                     geometry_format,
+                    blob_limit,
                 )?,
             })
         }
+    };
+    Ok(ResolvedSnapshot {
+        package: pkg,
+        source: source?,
+        document,
+    })
+}
+
+fn read_manifest_bounded(path: &Path, limit: u64) -> LibraryResult<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(LibraryError::BlobTooLarge {
+            limit,
+            actual: bytes.len() as u64,
+        });
     }
+    String::from_utf8(bytes).map_err(|error| LibraryError::MalformedPackage {
+        path: path.into(),
+        message: error.to_string(),
+    })
+}
+
+pub(crate) fn read_document(package_dir: &Path, file: &str) -> LibraryResult<Vec<u8>> {
+    read_document_bounded(package_dir, file, crate::blob::MAX_BLOB_BYTES)
+}
+
+fn read_document_bounded(package_dir: &Path, file: &str, limit: u64) -> LibraryResult<Vec<u8>> {
+    use std::io::Read;
+    let path = Path::new(file);
+    if path.components().count() != 1
+        || !matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(LibraryError::InvalidIdentity(
+            "document source must be a package-local filename".into(),
+        ));
+    }
+    let file = std::fs::File::open(package_dir.join(path))?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(LibraryError::BlobTooLarge {
+            limit,
+            actual: bytes.len() as u64,
+        });
+    }
+    Ok(bytes)
 }
 
 /// Reads and validates one blob-store pointer from a manifest.
@@ -204,6 +302,7 @@ fn read_blob(
     key: &str,
     codec: &str,
     format: Option<u32>,
+    limit: u64,
 ) -> LibraryResult<ResolvedBlob> {
     let malformed = |message: String| LibraryError::MalformedPackage {
         path: manifest_path.to_path_buf(),
@@ -223,7 +322,7 @@ fn read_blob(
     // Spec §2.1 writes the pointer as `"sha256:<hex>"`; the blob store keys on the
     // bare digest. Accept both spellings rather than making an author guess.
     let sha256 = key.strip_prefix("sha256:").unwrap_or(key).to_string();
-    let bytes = crate::blob::BlobStore::new(library_root).get(&sha256)?;
+    let bytes = crate::blob::BlobStore::new(library_root).get_bounded(&sha256, limit)?;
     Ok(ResolvedBlob {
         sha256,
         codec: codec.to_string(),
@@ -263,21 +362,51 @@ generator_version = 1
         index
     }
 
+    fn seed_v2(root: &Path) -> (LibraryIndex, String) {
+        seed_package(root, '0');
+        let dir = root.join("onecad.std.iso4762");
+        let raw = std::fs::read_to_string(dir.join(COMPONENT_MANIFEST_FILE)).unwrap();
+        let pkg = package::parse(&raw, &dir).unwrap();
+        let revision = package::write_package(&dir, &pkg).unwrap();
+        (LibraryIndex::reindex(root).unwrap().0, revision)
+    }
+
     #[test]
-    fn resolve_matches_generator_source() {
+    fn stale_index_replacement_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let index = seed_package(dir.path(), '0');
+        let (index, revision) = seed_v2(dir.path());
+        let manifest = dir.path().join("onecad.std.iso4762/component.toml");
+        let original = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            original.replace("generator = \"iso4762\"", "generator = \"different\""),
+        )
+        .unwrap();
         let req = ResolveRequest {
             component_id: "onecad.std.iso4762",
             component_version: "1.0.0",
-            component_revision: &format!("sha256:{}", "0".repeat(64)),
+            component_revision: &revision,
         };
-        let resolved = resolve(dir.path(), &index, &req).unwrap();
+        assert!(matches!(
+            resolve(dir.path(), &index, &req),
+            Err(LibraryError::RevisionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_matches_generator_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (index, revision) = seed_v2(dir.path());
+        let req = ResolveRequest {
+            component_id: "onecad.std.iso4762",
+            component_version: "1.0.0",
+            component_revision: &revision,
+        };
         assert_eq!(
-            resolved,
+            resolve(dir.path(), &index, &req).unwrap(),
             ResolvedSource::Generator {
                 generator_id: "iso4762".to_string(),
-                generator_version: 1,
+                generator_version: 1
             }
         );
     }
