@@ -56,10 +56,19 @@ Run Cargo from the repository root. Stage the worker before release builds:
 ```sh
 ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
 ctest --test-dir worker/build --output-on-failure
+rustup target add wasm32-unknown-unknown
+scripts/build-addons.sh addons/bambu-studio
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-ONECAD_REQUIRE_WORKER=1 ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" cargo test --workspace
+ONECAD_REQUIRE_WORKER=1 ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
+  ONECAD_TEST_ADDON_COMPONENT="$PWD/packaging/binaries/addons/dev.onecad.bambu-studio/extension.wasm" \
+  cargo test --workspace
 ```
+
+The required workspace gate includes real Bambu addon execution. Building the
+worker alone does not supply that prerequisite; a missing addon must fail rather
+than silently skip. The addon tests use a controlled desktop launcher and do not
+prove physical Bambu Studio import or printing.
 
 The worker build directory can be overridden with `ONECAD_WORKER_BUILD_DIR`.
 Pinned OCCT installation: `scripts/build-pinned-occt.sh`; packaging:

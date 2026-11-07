@@ -15,9 +15,9 @@
 //!   `depth` declared free, place it, `setComponentParams depth = 20`, and the
 //!   PLACED body is 8000 mm³ — then save, delete the library, reopen on a fresh
 //!   worker, and it is still 8000 (the re-baked blob is cached in the document).
-//! * `a_missing_package_refuses_the_edit_and_leaves_the_geometry_standing` —
-//!   with the library gone the edit is a typed refusal and the instance keeps
-//!   rendering exactly what it had.
+//! * `a_missing_package_rebakes_from_the_exact_embedded_source` — the approved
+//!   embedded-source contract permits offline edits without reading the library.
+//!   Undo/Redo retain the exact prior and edited geometry.
 //! * `a_source_document_with_several_bodies_refuses_the_re_bake` — a re-bake
 //!   never silently fuses: the author's bake choice was made at save time.
 //!
@@ -533,11 +533,11 @@ async fn a_declared_parameter_re_bakes_the_placed_solid_and_survives_a_reopen() 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. A package that is gone refuses the EDIT, never the document
+// 2. Missing package uses the exact document-owned source
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_missing_package_refuses_the_edit_and_leaves_the_geometry_standing() {
+async fn a_missing_package_rebakes_from_the_exact_embedded_source() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
         return;
@@ -591,28 +591,39 @@ async fn a_missing_package_refuses_the_edit_and_leaves_the_geometry_standing() {
 
     let mut params = BTreeMap::new();
     params.insert("depth".to_string(), ComponentParamValue::Number(20.0));
-    let err = set_component_params_at(library_dir.path(), state, record_id, params)
+    set_component_params_at(library_dir.path(), state, record_id, params)
         .await
-        .expect_err("a re-bake needs the package it would replay");
-    assert!(
-        format!("{err:?}").contains("acme.plate"),
-        "the refusal names the component: {err:?}"
-    );
+        .expect("offline re-bake uses the exact embedded source, not a package path");
 
-    // …and the instance still renders its CACHED solid: the edit failed, the
-    // document did not.
+    // Package removal cannot redirect the source or turn a successful edit
+    // into a stale cached-body pass.
     let volume = {
         let mut guard = state.runtime.lock().await;
         let rt = guard.as_mut().unwrap();
         let report = regen_all(rt).await;
-        let snap = published(&report, "regen after the refused edit");
+        let snap = published(&report, "offline re-bake");
         assert_eq!(snap.bodies.len(), 1);
         exact_volume(&wm, snap.bodies[0].body).await
     };
     assert!(
-        (volume - 4_000.0).abs() < 1e-6,
-        "the cached blob is authoritative — geometry must be untouched; got {volume}"
+        (volume - 8_000.0).abs() < 1e-6,
+        "20×20×depth(20) = 8000 from the frozen source; got {volume}"
     );
+    {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        assert!(rt.library_archive_bytes() > 0);
+        assert!(rt.undo().is_some());
+        let restored = regen_all(rt).await;
+        let old = published(&restored, "undo offline re-bake");
+        assert_eq!(old.bodies.len(), 1);
+        assert!((exact_volume(&wm, old.bodies[0].body).await - 4_000.0).abs() < 1e-6);
+        assert!(rt.redo().unwrap().is_some());
+        let redone = regen_all(rt).await;
+        let edited = published(&redone, "redo offline re-bake");
+        assert_eq!(edited.bodies.len(), 1);
+        assert!((exact_volume(&wm, edited.bodies[0].body).await - 8_000.0).abs() < 1e-6);
+    }
 
     wm.shutdown().await;
     wm.retire();

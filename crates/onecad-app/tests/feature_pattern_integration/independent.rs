@@ -146,7 +146,7 @@ async fn independent_pattern_survives_edit_history_and_reopen() {
     let path = temp.path().join("feature-pattern.onecad");
     rt.save(&path, save_meta()).expect("save pattern");
     let json = document_json(&path);
-    let record = json["timeline"]["records"]
+    let record = json["rootDefinition"]["timeline"]["records"]
         .as_array()
         .unwrap()
         .iter()
