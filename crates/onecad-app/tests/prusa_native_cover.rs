@@ -7,8 +7,8 @@ use host::Harness;
 use onecad_app::{
     api,
     worker::{
-        SolverEngine,
         wire::{body_id_wire, sketch_wire},
+        SolverEngine,
     },
 };
 use onecad_core::io::container::ContainerReader;

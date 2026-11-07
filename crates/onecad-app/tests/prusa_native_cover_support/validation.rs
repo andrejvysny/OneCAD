@@ -118,21 +118,17 @@ pub(super) async fn save_native_capture(h: &Harness, root: &std::path::Path) -> 
     let saved = ContainerReader::open(&path).unwrap();
     assert!(saved.import_blobs().is_empty() && saved.library_archives().is_empty());
     assert_eq!(saved.document().timeline.records().len(), 32);
-    assert!(
-        saved
-            .document()
-            .timeline
-            .records()
-            .iter()
-            .all(|record| matches!(
-                record.op,
-                Operation::Known(
-                    KnownOperation::Sketch(_)
-                        | KnownOperation::Extrude(_)
-                        | KnownOperation::Revolve(_)
-                )
-            ))
-    );
+    assert!(saved
+        .document()
+        .timeline
+        .records()
+        .iter()
+        .all(|record| matches!(
+            record.op,
+            Operation::Known(
+                KnownOperation::Sketch(_) | KnownOperation::Extrude(_) | KnownOperation::Revolve(_)
+            )
+        )));
     if let Some(destination) = std::env::var_os("ONECAD_COVER_CAPTURE") {
         use std::io::Write;
         let bytes = std::fs::read(&path).unwrap();

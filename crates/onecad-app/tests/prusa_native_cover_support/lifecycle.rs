@@ -185,11 +185,9 @@ async fn probe_zero_distance(h: &Harness, before: f64) {
                 report.failed_steps[0].record_id,
                 RecordId(id(232)).to_string()
             );
-            assert!(
-                report.failed_steps[0]
-                    .message
-                    .contains("Extrude distance too small")
-            );
+            assert!(report.failed_steps[0]
+                .message
+                .contains("Extrude distance too small"));
             let undo = api::undo(&h.state, h.host.clone()).await.unwrap();
             h.settled(&undo).await;
             assert!((volume(h).await - before).abs() < 1e-6);
