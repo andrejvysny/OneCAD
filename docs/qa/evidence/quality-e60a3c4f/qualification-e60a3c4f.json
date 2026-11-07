@@ -1,0 +1,565 @@
+{
+  "sourceCommit": "e60a3c4f302ceef479064ef6b9c5e45910afee8a",
+  "sourceStatus": "",
+  "classification": "Required automated gates on available macOS26.6.2; not complete ONECAD-534/latest-stable/physical-device qualification",
+  "workspace": {
+    "source": "e60a3c4f302ceef479064ef6b9c5e45910afee8a",
+    "targets": 237,
+    "passed": 4035,
+    "failed": 0,
+    "ignored": 193,
+    "missingSummaries": [],
+    "nonOk": [],
+    "counting": "Last summary per top-level Running/Doc-tests section; child summaries not added"
+  },
+  "observedExitCodes": {
+    "workspace": 0,
+    "nativeHostGate": 0,
+    "ctest": 0,
+    "metal": 0,
+    "renderCaptureVerifier": 0
+  },
+  "native": {
+    "backendTestCount": 6,
+    "backendTests": [
+      "api::component_execution::tests::real_worker_replays_shared_definition_and_fresh_reopen",
+      "api::component_execution::tests::real_worker_ten_definitions_twenty_occurrences_reopen_and_replay",
+      "api::replacement::tests::real_worker_blocked_close_preserves_replacement_owner",
+      "api::save_transaction_tests::real_worker_in_flight_promotion_survives_save_and_reopen",
+      "assembly_export::barrier_tests::stale_and_canceled_exports_preserve_target_and_drain_worker",
+      "joint_execution::tests::cancelled_before_publication_cannot_commit"
+    ],
+    "classification": "automated native-host lifecycle with production OCCT worker and Metal; no physical input or AppKit teardown qualification",
+    "executedExactlyOnce": true,
+    "inventoryVerified": true,
+    "missingWorkerRejected": true,
+    "serviceAdapterEvidence": "service tests require no adapter record; required Metal provenance comes from the lifecycle selection",
+    "serviceTestCount": 7,
+    "serviceTests": [
+      "document_services::tests::document_io_tests::native_assembly_controls_author_solve_undo_save_reopen",
+      "document_services::tests::document_io_tests::repeated_occurrence_repair::repeated_occurrence_source_repair_rejects_sibling_and_reopens",
+      "document_services::tests::document_io_tests::native_assembly_capture_save_close_reopen_keeps_occurrences",
+      "document_services::tests::home_lifecycle_tests::startup_and_cancelled_failed_file_actions_leave_no_document",
+      "document_services::tests::home_lifecycle_tests::explicit_new_establishes_one_empty_unsaved_session_and_failure_preserves_it",
+      "document_services::tests::home_lifecycle_tests::discarding_last_recovery_offer_without_startup_path_leaves_home_empty",
+      "bridge::tests::production_actor_preserves_no_document_start_and_captures_explicit_new_documents"
+    ],
+    "source": "e60a3c4f302ceef479064ef6b9c5e45910afee8a",
+    "testCount": 147,
+    "tests": [
+      "app_logic_tests::capture_failure_delivery_tests::accepted_scene_failure_exposes_error_and_blocks_stale_picks",
+      "app_logic_tests::capture_failure_delivery_tests::capture_refusal_remains_visible_until_replacement",
+      "app_logic_tests::extension_refresh_delivery_tests::catalog_refresh_keeps_immediate_modeling_input_available",
+      "app_logic_tests::extension_refresh_delivery_tests::management_waits_for_refresh_then_keeps_document_serialization",
+      "app_logic_tests::item_delivery_tests::sidebar_viewport_selection_and_delete_share_authority_and_history",
+      "app_logic_tests::occluded_app_logic_delivers_new_and_protects_close_without_ui",
+      "app_logic_tests::document_lifecycle_tests::recovered_document_remains_saveable_and_protected_after_capture_refusal",
+      "app_logic_tests::document_lifecycle_tests::late_clean_display_cannot_replace_authoritative_dirty_lifecycle",
+      "app_logic_tests::document_lifecycle_tests::discard_quit_cleans_recovery_while_normal_stop_retains_dirty_recovery",
+      "app_logic_tests::overlay_routing_tests::overlays_preserve_sketch_draft_selection_and_history_through_raw_replay",
+      "app_logic_tests::diagnostic_delivery_tests::file_failure_callbacks_remain_visible_until_retry_or_document_replacement",
+      "app_logic_tests::diagnostic_delivery_tests::rejected_sketch_mutation_and_worker_failure_reach_editor_diagnostics",
+      "app_logic_tests::diagnostic_delivery_tests::stale_same_runtime_model_terminal_does_not_replace_current_diagnostic",
+      "app_logic_tests::autosave_delivery_tests::actual_autosave_sink_and_host_poll_report_failure_success_and_fence_replacement",
+      "app_logic_tests::dimension_delivery_tests::circle_dimension_modal_edits_existing_id_and_real_solver_radius",
+      "app_logic_tests::plate_delivery_tests::from_new_plate_constraints_edit_repair_history_finish_and_extrude",
+      "app_logic_tests::numeric_delivery_tests::routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority",
+      "app_logic_tests::arc_slot_delivery_tests::numeric_center_and_three_point_arcs_preview_history_and_refusal",
+      "app_logic_tests::arc_slot_delivery_tests::numeric_slot_full_width_expression_construction_and_local_history",
+      "app_logic_tests::arc_slot_delivery_tests::tangent_arc_clockwise_counterclockwise_native_hv_snap_roles",
+      "app_logic_tests::arc_slot_delivery_tests::tangent_chain_keyboard_drag_seed_cancel_and_numeric_radius",
+      "app_logic_tests::arc_slot_delivery_tests::tangent_chain_drag_release_once_and_accepted_closure_profile",
+      "app_logic_tests::arc_slot_delivery_tests::tangent_chain_batched_drag_release",
+      "app_logic_tests::arc_slot_delivery_tests::tangent_chain_single_frame_drag_release",
+      "app_logic_tests::arc_slot_delivery_tests::tangent_chain_cancelled_drag_ownership",
+      "app_logic_tests::arc_slot_delivery_tests::tangent_chain_view_change_cancels_before_and_after_promotion",
+      "app_logic_tests::profile_delivery_tests::finish_with_invalid_profile_closes_sketch_and_reports_overlap",
+      "app_logic_tests::selection_delivery_tests::marquee_survives_redraw_and_cancels_when_camera_changes",
+      "app_logic_tests::point_center_delivery_tests::point_tab_before_pointer_signed_zero_and_repeated_construction_clicks",
+      "app_logic_tests::point_center_delivery_tests::rectangle_method_chooser_center_numeric_full_dimensions_and_history",
+      "app_logic_tests::point_center_delivery_tests::numeric_modal_refuses_enter_and_reopen_after_viewport_failure",
+      "app_logic_tests::sketch_primitive_drag_delivery_tests::pencil_rectangle_drag_commits_on_release_once_and_undo_redo",
+      "app_logic_tests::sketch_primitive_drag_delivery_tests::pencil_exact_tools_same_frame_release_ignores_later_hover_and_cancellation",
+      "app_logic_tests::sketch_primitive_drag_delivery_tests::pencil_primitive_cancellation_preserves_existing_tap_draft_and_authority",
+      "app_logic_tests::sketch_primitive_drag_delivery_tests::pencil_threshold_taps_and_desktop_tap_creation_keep_existing_semantics",
+      "app_logic_tests::sketch_primitive_drag_delivery_tests::pencil_same_frame_cancel_and_conflicting_presses_never_finish_a_pending_tap",
+      "app_logic_tests::gesture_delivery_tests::viewport_corner_drag_early_release_commits_one_edit_and_local_history",
+      "app_logic_tests::gesture_delivery_tests::viewport_radius_drag_and_escape_preserve_curve_identity_and_authority",
+      "app_logic_tests::gesture_delivery_tests::viewport_line_body_drag_and_camera_change_cancel_without_edit",
+      "app_logic_tests::gesture_delivery_tests::viewport_camera_change_before_drag_threshold_rejects_stale_start",
+      "app_logic_tests::gesture_delivery_tests::viewport_escape_before_drag_threshold_cancels_only_pointer_owner",
+      "app_logic_tests::gesture_delivery_tests::stationary_pointer_release_completes_on_service_repaint_wakes",
+      "app_logic_tests::arc_gesture_delivery_tests::prepared_arc_center_drag_translates_circle_and_preserves_local_history",
+      "app_logic_tests::arc_gesture_delivery_tests::prepared_arc_endpoint_drag_preserves_roles_and_cancel_keeps_authority",
+      "app_logic_tests::arc_gesture_delivery_tests::prepared_arc_accepted_end_capture_failure_preserves_history_and_blocks_stale_authoring",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_multiple_primary_cycles_do_not_start_drag",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_click_ignores_motion_before_press",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_batched_drag_uses_release_before_later_hover",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_corner_press_and_move_batched_release_next_frame_commits_once",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_drag_focus_loss_pointer_gone_escape_and_overlay_preserve_authority",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::stationary_batched_release_completes_on_service_repaint_wakes",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_corner_drag_batched_in_one_frame_commits_one_edit",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_release_over_chrome_refuses_even_after_pointer_returns",
+      "app_logic_tests::row_delivery_tests::unselected_rows_single_select_double_click_and_explicit_edit_share_entry",
+      "app_logic_tests::sketch_entry_delivery_tests::world_planes_and_face_entry_preserve_native_frame_and_discard",
+      "app_logic_tests::home_without_document_and_empty_new_share_back_and_escape_predicate",
+      "app_logic_tests::capability_delivery_tests::restored_controls_use_real_context_and_do_not_enable_mock_actions",
+      "app_logic_tests::sketch_plane_choice_tests::viewport_world_patches_hover_cancel_and_click_without_stray_sketches",
+      "app_logic_tests::gesture_delivery_tests::batch_delivery::ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit",
+      "app_logic_tests::document_tabs_tests::new_while_a_document_is_open_opens_a_second_live_tab",
+      "app_logic_tests::document_tabs_tests::switching_back_re_prepares_the_same_scene_without_a_new_capture",
+      "app_logic_tests::document_tabs_tests::closing_a_tab_stops_only_its_host_and_activates_a_neighbour",
+      "app_logic_tests::document_tabs_tests::each_restored_crash_document_gets_its_own_tab",
+      "app_logic_tests::document_tabs_tests::quit_asks_about_every_document_with_unsaved_work",
+      "app_logic_tests::document_tabs_tests::a_close_decided_in_the_background_waits_for_its_tab",
+      "app_logic_tests::document_tabs_tests::tabs_keep_opening_order_and_cycle_through_it",
+      "app_logic_tests::document_tabs_tests::an_unpreparable_switch_falls_back_instead_of_blanking_forever",
+      "app_logic_tests::document_tabs_tests::ctrl_tab_walks_most_recent_first_and_switches_on_release",
+      "app_logic_tests::document_tabs_tests::new_tab_shows_home_and_the_close_prompt_asks_what_changed",
+      "app_logic_tests::sketch_entry_delivery_tests::face_entry_cancel_before_admission_leaves_document_unchanged",
+      "app_logic_tests::sketch_entry_delivery_tests::face_entry_admission_wins_over_late_cancel_and_opens_once",
+      "app_logic_tests::sketch_entry_delivery_tests::face_entry_context_replacement_cancels_and_releases_after_delivery",
+      "app_logic_tests::sketch_entry_delivery_tests::face_entry_submit_failure_releases_ownership_without_sketch",
+      "app_logic_tests::sketch_entry_delivery_tests::face_entry_ownership_stays_with_its_tab_when_another_document_opens",
+      "app_logic_tests::document_tab_delivery_tests::a_draft_left_mid_preview_republishes_on_return_and_confirms_once",
+      "app_logic_tests::document_tab_delivery_tests::ctrl_release_commits_at_its_position_and_a_later_ctrl_tab_reopens",
+      "app_logic_tests::document_tab_delivery_tests::same_frame_shortcuts_reach_the_document_active_at_their_position",
+      "app_logic_tests::document_tab_delivery_tests::save_all_saves_titled_in_place_and_continues_through_every_untitled",
+      "app_logic_tests::document_tab_delivery_tests::save_all_stops_at_a_cancelled_dialog_reports_failures_and_busy_documents",
+      "app_logic_tests::document_tab_delivery_tests::a_provisional_tab_answered_in_the_background_closes_its_host",
+      "app_logic_tests::document_tab_delivery_tests::save_all_moves_on_after_a_saved_dialog_even_when_that_document_closes",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_click_and_sub_threshold_keep_authored_expression",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_batched_drag_uses_release_before_later_hover",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_press_move_then_move_release_next_frame_keeps_final_value",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_release_at_authored_value_restores_expression_and_precision",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_pointer_gone_focus_loss_and_escape_restore_without_history",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_second_press_in_batch_drags_from_the_first_release",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_cancelled_second_press_keeps_the_first_drag",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_three_drags_then_confirm_add_one_history_entry",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_release_over_chrome_ends_drag_at_last_motion",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_redrag_after_equal_value_release_keeps_expression",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_press_after_pointer_loss_hits_the_restored_tip_only",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_tab_switch_mid_drag_restores_authored_value",
+      "app_logic_tests::parameter_delivery_tests::gizmo_pointer_loss_escape_and_tab_switch_restore_placement",
+      "app_logic_tests::parameter_delivery_tests::gizmo_drags_then_one_apply_add_one_history_entry",
+      "app_logic_tests::parameter_delivery_tests::reedit_two_fields_is_one_apply_and_one_undo_and_unchanged_apply_is_none",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_release_then_escape_in_one_batch_reaches_the_tool",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_camera_change_mid_drag_restores_authored_value",
+      "app_logic_tests::extrude_handle_delivery_tests::handle_drag_begun_while_file_action_runs_still_restores_on_escape",
+      "app_logic_tests::extrude_handle_delivery_tests::reopened_consumed_extrude_profile_has_a_real_handle_and_draft_preview",
+      "app_logic_tests::parameter_delivery_tests::gizmo_release_then_pointer_loss_in_one_batch_survives_a_tab_switch",
+      "app_logic_tests::parameter_delivery_tests::gizmo_camera_change_mid_drag_restores_placement",
+      "app_logic_tests::model_selection_delivery_tests::modifier_clicks_build_face_and_edge_sets_and_escape_clears",
+      "app_logic_tests::model_selection_delivery_tests::explorer_rows_and_viewport_share_one_selection",
+      "app_logic_tests::model_selection_delivery_tests::tab_switch_keeps_each_documents_selection",
+      "app_logic_tests::sketch_selection_delivery_tests::arc_roles_line_ends_symmetric_axis_marquee_and_undo_prune",
+      "app_logic_tests::sketch_selection_delivery_tests::tabs::selection_does_not_cross_sketch_visits_or_document_tabs",
+      "app_logic_tests::sketch_finish_delivery_tests::refused_finish_reenters_for_chooser_repair_and_model_history_restores_region",
+      "app_logic_tests::sketch_finish_delivery_tests::no_op_finish_discards_and_partial_undo_keep_model_history_and_region",
+      "app_logic_tests::sketch_finish_delivery_tests::reopen::finished_sketch_saves_in_place_and_reopens_with_same_region_and_identities",
+      "app_logic_tests::edit_preview_delivery_tests::existing_extrude_numeric_preview_cancel_apply_undo_preserve_history",
+      "app_logic_tests::model_handle_delivery_tests::native_hole_scalar_click_drag_release_and_losses_preserve_draft_history_and_ownership",
+      "app_logic_tests::model_handle_delivery_tests::native_pattern_angle_and_mirror_plane_drag_route_real_pointer_events",
+      "app_logic_tests::model_handle_delivery_tests::native_boolean_viewport_controls_own_click_and_only_author_options",
+      "app_logic_tests::model_handle_delivery_tests::history_regressions::reopened_shell_resolves_its_consumed_opening_handle",
+      "app_logic_tests::model_handle_delivery_tests::history_regressions::cylinder_diameter_handle_uses_the_worker_sample_and_radial_scale",
+      "app_logic_tests::display_budget_delivery_tests::a_sub_native_scene_image_keeps_picks_and_highlights_aligned",
+      "app_logic_tests::display_budget_delivery_tests::capture_pressure_tests::three_documents_repeat_unchanged_geometry_sketch_captures_and_undo",
+      "app_logic_tests::display_budget_delivery_tests::capture_pressure_tests::nonpressure_cache_reuse_failure_and_final_prepared_gpu_guard_owners",
+      "app_logic_tests::display_budget_delivery_tests::released_targets_and_memory_pressure_keep_scene_and_document_state",
+      "app_logic_tests::display_budget_delivery_tests::the_mobile_route_shows_xray_lazily_recreates_targets_and_idles",
+      "app_logic_tests::display_budget_delivery_tests::three_documents_and_a_rotation_stay_within_the_display_aggregate",
+      "app_logic_tests::model_operation_delivery_tests::double_tapped_body_moves_and_turns_by_typed_values",
+      "app_logic_tests::model_operation_delivery_tests::selection_change_while_staging_refuses_the_start",
+      "app_logic_tests::model_operation_delivery_tests::sketch_chooser_planes_and_strip_actions_are_named",
+      "app_logic_tests::model_operation_delivery_tests::input_repair_delivery_tests::repair_using_selection_stages_cancel_applies_undo_and_redo",
+      "app_logic_tests::model_operation_delivery_tests::loft_history_delivery_tests::reopened_loft_history_edits_choices_and_preserves_downstream_hole",
+      "app_logic_tests::model_operation_delivery_tests::sweep_delivery_tests::circular_sweep_ui_preview_commit_undo_reopen",
+      "app_logic_tests::model_operation_delivery_tests::sweep_delivery_tests::viewport_pointer_selects_current_sweep_section",
+      "app_logic_tests::model_operation_delivery_tests::sweep_delivery_tests::sweep_rejects_suppressed_paths_in_real_capture",
+      "app_logic_tests::pen_stroke_delivery_tests::a_stroke_whose_release_the_canvas_missed_is_dropped",
+      "app_logic_tests::pen_stroke_delivery_tests::accessory_previous_tool_and_adaptive_palette",
+      "app_logic_tests::pen_stroke_delivery_tests::drag_authoring_follows_sketch_tools_and_canvas_handles",
+      "app_logic_tests::pen_stroke_delivery_tests::strokes_commit_override_undo_and_refuse_without_history",
+      "app_logic_tests::library_delivery_tests::start_page_lists_the_seeded_library_from_the_real_service",
+      "app_logic_tests::plate_delivery_tests::instances::instances_list_edit_reset_detach_and_upgrade_each_in_one_undo_step",
+      "app_logic_tests::plate_delivery_tests::placement::component_placement_arming_and_lookup_guards",
+      "app_logic_tests::plate_delivery_tests::placement::component_placement_copy_cancel_and_repeat",
+      "app_logic_tests::plate_delivery_tests::placement::component_placement_edit_moves_an_instance_to_another_hole_with_one_undo",
+      "app_logic_tests::plate_delivery_tests::placement::component_placement_returns_preview_budget_across_sequential_placements",
+      "app_logic_tests::plate_delivery_tests::placement::component_placement_snaps_to_a_hole_places_once_and_undoes",
+      "app_logic_tests::plate_delivery_tests::placement::control_second_feature_commit_budget",
+      "app_logic_tests::plate_delivery_tests::wizard::create_component_saves_a_parametric_package_refuses_a_duplicate_and_saves_static",
+      "app_logic_tests::viewport_navigation_tests::orbit_skips_hover_picks_retains_selected_targets_and_refreshes_after_release",
+      "app_logic_tests::assembly_delivery_tests::replacement_fences_queued_assembly_success_failure_and_prior_report",
+      "app_logic_tests::display_budget_delivery_tests::capture_pressure_tests::denied_prepare_preserves_viewport_and_retries_after_release",
+      "app_logic_tests::display_budget_delivery_tests::capture_pressure_tests::ten_definitions_twenty_occurrences_reach_metal_and_release"
+    ],
+    "workerSha256": "4272493274b789539a0e731afe0d45084e344ccf646f46bec35af6561a3fcfb0"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 4.136,
+      "log": "/private/tmp/onecad-resume-evidence/fmt-e60a3c4f.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 79.295,
+      "log": "/private/tmp/onecad-resume-evidence/clippy-e60a3c4f.log"
+    },
+    {
+      "name": "layers",
+      "command": [
+        "cargo",
+        "xtask",
+        "check-rust-layers"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.801,
+      "log": "/private/tmp/onecad-resume-evidence/layers-e60a3c4f.log"
+    },
+    {
+      "name": "modeling-coverage",
+      "command": [
+        "cargo",
+        "xtask",
+        "verify-modeling-coverage"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 18.57,
+      "log": "/private/tmp/onecad-resume-evidence/modeling-coverage-e60a3c4f.log"
+    },
+    {
+      "name": "modeling-contracts",
+      "command": [
+        "cargo",
+        "xtask",
+        "verify-modeling-contracts"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.434,
+      "log": "/private/tmp/onecad-resume-evidence/modeling-contracts-e60a3c4f.log"
+    },
+    {
+      "name": "reference-inputs",
+      "command": [
+        "cargo",
+        "xtask",
+        "verify-reference-inputs"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.484,
+      "log": "/private/tmp/onecad-resume-evidence/reference-inputs-e60a3c4f.log"
+    },
+    {
+      "name": "fuzz",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "onecad-core",
+        "-p",
+        "onecad-protocol",
+        "--test",
+        "bounded_admission_fuzz",
+        "--test",
+        "bounded_mesh_fuzz",
+        "--",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 10.536,
+      "log": "/private/tmp/onecad-resume-evidence/fuzz-e60a3c4f.log"
+    }
+  ],
+  "workerSha256": "4272493274b789539a0e731afe0d45084e344ccf646f46bec35af6561a3fcfb0",
+  "addonSha256": "14b192aa01f212cf72ec05d395257befc25e151ba46ff8c017a5eeb6cd126cab",
+  "ctest": {
+    "passed": 247,
+    "failed": 0,
+    "seconds": 199.05
+  },
+  "metal": {
+    "passed": 16,
+    "failed": 0,
+    "seconds": 104.78,
+    "verifiedCaptures": 309
+  },
+  "internalOpen": [
+    "Framework source equivalence, native final geometry and cold lifecycle",
+    "Reference transfer and independently justified precision uncertainty",
+    "Permanent source deletion and different-face repair",
+    "Controlled release 10-definition/20-occurrence performance distributions",
+    "Current native public-workload GUI lifecycle and physical fit/motion acceptance"
+  ],
+  "externalOpen": [
+    "Latest stable macOS27.2 build26B123 environment",
+    "iPadOS27.2 physical device; ONECAD-535 follows accepted534",
+    "Computer Use native pipe startup failure; rebuilt QA app launch approval pending"
+  ],
+  "files": [
+    {
+      "name": "evidence/clippy-e60a3c4f.log",
+      "bytes": 1249,
+      "sha256": "55e282045317f1f63a2a90f9972654764e7dbd2e7c6527d9b004b6f4d07205b0"
+    },
+    {
+      "name": "evidence/ctest-e60a3c4f.log",
+      "bytes": 34117,
+      "sha256": "2141756c07b79ee0e072d75f227062461e81a5410aaec619cec4bb095b9b54c1"
+    },
+    {
+      "name": "evidence/fmt-e60a3c4f.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "evidence/fuzz-e60a3c4f.log",
+      "bytes": 1473,
+      "sha256": "f104c0db8f3a6a307df967c60f2f0dfb7627e6d882995c7ce3a2365ceff62780"
+    },
+    {
+      "name": "evidence/gui-build-e60a3c4f.log",
+      "bytes": 657,
+      "sha256": "4d693df0c589b9759d7dc55791fa2719a4365b7c4d0b32056315a12b183b391b"
+    },
+    {
+      "name": "evidence/layers-e60a3c4f.log",
+      "bytes": 50,
+      "sha256": "1b8c6382e25879f7e9a1c9765b911c6f247c46d075051ea9d70ed136ed28e4dc"
+    },
+    {
+      "name": "evidence/metal-captures-e60a3c4f.log",
+      "bytes": 108804,
+      "sha256": "c3a075a1cd6638261828ea9a19a69d7f7fc2e3c84cbe5ef428c7d491f9a50010"
+    },
+    {
+      "name": "evidence/metal-e60a3c4f.log",
+      "bytes": 47132,
+      "sha256": "44b6a065df9ed29d80207fc32dcef95a510c9a2970cb80082f8af4288aab9f96"
+    },
+    {
+      "name": "evidence/modeling-contracts-e60a3c4f.log",
+      "bytes": 71,
+      "sha256": "594733c4842fbb497f668aabf5ff348b46b434c2d7fb5d74c6a02373b9628bdb"
+    },
+    {
+      "name": "evidence/modeling-coverage-e60a3c4f.log",
+      "bytes": 79,
+      "sha256": "23029832cbfbcd75641d5a823c9a77fa9ca7d334858037f9e7f985fd60d9cb1d"
+    },
+    {
+      "name": "evidence/native-e60a3c4f.log",
+      "bytes": 175263,
+      "sha256": "d0e132bc4376eed515f3b257cb5ddc3b429d89021a66a8e83ff38bb933b9fb45"
+    },
+    {
+      "name": "evidence/reference-inputs-e60a3c4f.log",
+      "bytes": 83,
+      "sha256": "0d0a85833f0024e3e799f5f1b176acfa623a31f9e11a4ba837b16562eff0db2f"
+    },
+    {
+      "name": "evidence/workspace-e60a3c4f.log",
+      "bytes": 563436,
+      "sha256": "9e4d11a8e90fda1c6bf6b1e111f9ec8c4e9cd40e760f619d149b934e0d9e7dda"
+    },
+    {
+      "name": "evidence/capture-gui-e60a3c4f-build.json",
+      "bytes": 688,
+      "sha256": "1737b50e473e5a375ddbc7465db4fb88ddc8b571555045afa855cdde0207bc2b"
+    },
+    {
+      "name": "evidence/checks-e60a3c4f.json",
+      "bytes": 1921,
+      "sha256": "f796efc4edab127fbe1a5fbb600549de6a759226c88c900b1cfe116409cfc65d"
+    },
+    {
+      "name": "evidence/workspace-e60a3c4f-summary.json",
+      "bytes": 52504,
+      "sha256": "22f2ae2ed7a1ff42138b700fd579e008cb468709df9d6ed38de77d98d65435b7"
+    },
+    {
+      "name": "native/acceptance.json",
+      "bytes": 19134,
+      "sha256": "db132b625d591887979245c4dfeeef6966a4700619bbd5125d8b2449ea83a49d"
+    },
+    {
+      "name": "native/backend-inventory.command.json",
+      "bytes": 519,
+      "sha256": "42c656c59594ce28d8ad10bc9e3cc1810e5556601092aa4d696ae61d9d0785ec"
+    },
+    {
+      "name": "native/backend-inventory.log",
+      "bytes": 826,
+      "sha256": "177a8f2cb68f9170e265a1c90c355ae8977bcb02250ed084ed6e0f43c5514be0"
+    },
+    {
+      "name": "native/backend-lifecycle.command.json",
+      "bytes": 548,
+      "sha256": "c34e6be8994d1a8701f2ebd51b963bab901d33cd7728a13aed56e6581c9a64fe"
+    },
+    {
+      "name": "native/backend-lifecycle.log",
+      "bytes": 922,
+      "sha256": "2f89240f535679c42d8ebe9f94f376efff218735e7c7d661c9c32b06398eeb02"
+    },
+    {
+      "name": "native/cargo.command.json",
+      "bytes": 419,
+      "sha256": "712a6eb7b069a7ae5f17d6da822d682df4415eeb6b20f4b9974e495765f319a0"
+    },
+    {
+      "name": "native/cargo.log",
+      "bytes": 36,
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "name": "native/inventory.command.json",
+      "bytes": 543,
+      "sha256": "51c36cb988997b7f154a32cab9074c9e2828600b8d5e671346be1752a2650ce7"
+    },
+    {
+      "name": "native/inventory.log",
+      "bytes": 17283,
+      "sha256": "89dfdc5cb2f5022fe481c46e555db2ff9448483c17c8350459c7306fcfffb9f7"
+    },
+    {
+      "name": "native/lifecycle.command.json",
+      "bytes": 572,
+      "sha256": "3ec93a46db1c621275cf267fb65678e6dc70dea4397664fea76fab70a010a995"
+    },
+    {
+      "name": "native/lifecycle.log",
+      "bytes": 147169,
+      "sha256": "1ad66a67a89c811f644218f5607ef836fc22c7ca9ae7f8542349eed6e92e0a74"
+    },
+    {
+      "name": "native/missing-worker.command.json",
+      "bytes": 659,
+      "sha256": "e52d6022fefc3b1f1ff6047d8dbb1bc9bbab537beed0a471863743794bfbc659"
+    },
+    {
+      "name": "native/missing-worker.log",
+      "bytes": 880,
+      "sha256": "07f5b4651f26f6a76d651b3cc698a469c8e0b62fc24612638714f287e3dab3db"
+    },
+    {
+      "name": "native/platform.command.json",
+      "bytes": 409,
+      "sha256": "e386bce90d7cfa569e25f7a4f8db106b6909f81367bff24f2a395054b42b60fa"
+    },
+    {
+      "name": "native/platform.log",
+      "bytes": 65,
+      "sha256": "cd5d6399b3785b04ceaae75045a9ca9f80f0bbc3526eff9d0c36b170ed1ec348"
+    },
+    {
+      "name": "native/service-inventory.command.json",
+      "bytes": 897,
+      "sha256": "7536cf11b0e8b01c6c46d5cf80857a3069cbcb57d2c307c31e271d5f9bf67d2b"
+    },
+    {
+      "name": "native/service-inventory.log",
+      "bytes": 1075,
+      "sha256": "bd057829efa816883bb0ac1fc09447f6d7e0ff08066ccf51baa3abb4ad6a406a"
+    },
+    {
+      "name": "native/service-lifecycle.command.json",
+      "bytes": 926,
+      "sha256": "91896c9905d2a135c67f5b72f3444084550521a72f3545d9e84b624d9025aaed"
+    },
+    {
+      "name": "native/service-lifecycle.log",
+      "bytes": 6562,
+      "sha256": "6a8435768c48ffe3fba5fe5a8edd1d54486ace2f4f17f18f07e774d55223f76a"
+    },
+    {
+      "name": "native/source-status.command.json",
+      "bytes": 443,
+      "sha256": "0e076f6048caf7f0a3e407245b6d098e3f36476e0235a2c16a27a88b180cb005"
+    },
+    {
+      "name": "native/source-status.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "native/source.command.json",
+      "bytes": 436,
+      "sha256": "91b77034d75e73629cc9f83861fe46984502e8d993b9f88f80b63f0cb5769ef8"
+    },
+    {
+      "name": "native/source.log",
+      "bytes": 41,
+      "sha256": "0fbb922d13db5c72a2f9ffa98edfbfb26f8978d9b3304804a429702f0bf9db4b"
+    },
+    {
+      "name": "native/toolchain.command.json",
+      "bytes": 420,
+      "sha256": "0f2071d96b674f017bed7fce0d479574ed31b99070558bd19d3b65df1a3f9bf4"
+    },
+    {
+      "name": "native/toolchain.log",
+      "bytes": 192,
+      "sha256": "352d6857968e80a6357a926ac685b9b07f77c479aaafde33e73a53945e802909"
+    },
+    {
+      "name": "native/worker-manifest.json",
+      "bytes": 299,
+      "sha256": "b0ed576d86edfe8f99435c57e215bacfaa3245aab985d00677adbbdb7159b617"
+    },
+    {
+      "name": "native/worker-selftest.command.json",
+      "bytes": 483,
+      "sha256": "44ec4b7184dbc5e85d209c59d313d637975e0526ac130fb035a60d3ff7bfb299"
+    },
+    {
+      "name": "native/worker-selftest.log",
+      "bytes": 212,
+      "sha256": "039f1666d98df8e2a7c214a9714b09332c1ef17b6db1882d34ac7277d2e8cf4f"
+    },
+    {
+      "name": "evidence/solver-transient-clamp-before.log",
+      "bytes": 1026,
+      "sha256": "061b864bb34e7e85fe4295f78d672c398b99fc59d598b0224ae08119ea42506b"
+    },
+    {
+      "name": "evidence/solver-transient-clamp-expanded.log",
+      "bytes": 5045,
+      "sha256": "8ac294f9fa322a0bc213a90bcf7f90cc3eacacb4c8543c6667725e98145081ce"
+    },
+    {
+      "name": "evidence/solver-transient-clamp-clippy.log",
+      "bytes": 298,
+      "sha256": "01903a8ed998693cc5e6bdadfb718281cf6584e0685bfcf0712533fd0686b180"
+    },
+    {
+      "name": "evidence/prusa-native-joints-solver-integrated.log",
+      "bytes": 16916,
+      "sha256": "448e8d911144066a6e266c612409789aaf6feb53a4a00c7a44bbba26cf5cb78e"
+    },
+    {
+      "name": "evidence/prusa-native-joints-integrated-clippy.log",
+      "bytes": 146,
+      "sha256": "24be5fe159228db9c44b1b6cf4f824d1dea8978d79e7aaa1c41fa3f10e394dfc"
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "scope": "private OCP x86_64 same-kernel diagnostic; no publication or source equivalence claim",
+  "inputHashes": [
+    "f215fd6dc72943da29fbfbdfdc3136bc7d95306d264b7284c11967d888bd34bf",
+    "137820d1a285b08c9e8a9ddaccc895be56acf494b0f76ed7189ebe5875279c61"
+  ],
+  "config": {
+    "nonDestructive": true,
+    "parallel": false,
+    "useOBB": false,
+    "fuzzyMm": 1e-07
+  },
+  "target": {
+    "valid": true,
+    "solidCount": 1,
+    "volumeMm3": 0.3646663766385426,
+    "areaMm2": 4.644009043222759,
+    "boundsMm": [
+      [
+        -13.5000001,
+        30.299988476479992,
+        0.6499999000000002
+      ],
+      [
+        -13.1999999,
+        31.009167408690004,
+        2.8000115235159995
+      ]
+    ]
+  },
+  "tool": {
+    "valid": true,
+    "solidCount": 1,
+    "volumeMm3": 0.20051556256724107,
+    "areaMm2": 1.9022570947611728,
+    "boundsMm": [
+      [
+        -13.7999999999999,
+        30.29998857648,
+        2.5000114235161
+      ],
+      [
+        -13.2000000000001,
+        31.00916730869,
+        3.1000114235159
+      ]
+    ]
+  },
+  "result": {
+    "valid": true,
+    "solidCount": 1,
+    "volumeMm3": 0.33161482572209755,
+    "areaMm2": 4.4890390045024535,
+    "boundsMm": [
+      [
+        -13.500001780614022,
+        30.29998826442346,
+        0.6499999000000002
+      ],
+      [
+        -13.1999999,
+        31.00916800869,
+        2.8000115235159995
+      ]
+    ]
+  },
+  "rawOutputSha256": "68b3d590317b7fc06446ddbe6df7f91b9f5bc9cdf78f9b23425e6e64132fb842",
+  "nonmanifold": [
+    {
+      "edgeIndex": 32,
+      "curve": "GeomAbs_CurveType.GeomAbs_BSplineCurve",
+      "toleranceMm": 5e-06,
+      "endpointsMm": [
+        [
+          -13.497382045673248,
+          30.409155886853892,
+          2.5000228465416705
+        ],
+        [
+          -13.497382050590131,
+          30.599977153509215,
+          2.500022846498762
+        ]
+      ],
+      "uses": [
+        {
+          "faceIndex": 9,
+          "faceOrientation": "TopAbs_Orientation.TopAbs_FORWARD",
+          "edgeOrientation": "TopAbs_Orientation.TopAbs_REVERSED",
+          "surface": "GeomAbs_SurfaceType.GeomAbs_BSplineSurface",
+          "faceAreaMm2": 0.0004995972549463494,
+          "lineage": [
+            {
+              "input": 0,
+              "faceIndex": 9,
+              "relation": "modified",
+              "type": "GeomAbs_SurfaceType.GeomAbs_BSplineSurface"
+            }
+          ]
+        },
+        {
+          "faceIndex": 11,
+          "faceOrientation": "TopAbs_Orientation.TopAbs_FORWARD",
+          "edgeOrientation": "TopAbs_Orientation.TopAbs_INTERNAL",
+          "surface": "GeomAbs_SurfaceType.GeomAbs_Cylinder",
+          "faceAreaMm2": 0.26928757625707944,
+          "lineage": [
+            {
+              "input": 1,
+              "faceIndex": 1,
+              "relation": "modified",
+              "type": "GeomAbs_SurfaceType.GeomAbs_Cylinder"
+            }
+          ]
+        },
+        {
+          "faceIndex": 20,
+          "faceOrientation": "TopAbs_Orientation.TopAbs_FORWARD",
+          "edgeOrientation": "TopAbs_Orientation.TopAbs_FORWARD",
+          "surface": "GeomAbs_SurfaceType.GeomAbs_BSplineSurface",
+          "faceAreaMm2": 0.052611739548009614,
+          "lineage": [
+            {
+              "input": 0,
+              "faceIndex": 9,
+              "relation": "modified",
+              "type": "GeomAbs_SurfaceType.GeomAbs_BSplineSurface"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "inputHashesUnchanged": true
+}

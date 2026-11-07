@@ -1,0 +1,56 @@
+[
+  {
+    "worktree": "/private/tmp/onecad-framework-resume",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-framework-resume-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-diagnostics",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-diagnostics-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-prusa-revolute",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-prusa-revolute-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-public-assembly",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-public-assembly-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-stress-capture",
+    "formatExit": 1,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-stress-capture-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-nist-source-trace",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-nist-source-trace-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-prusa-mixed-current",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-prusa-mixed-current-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-recovery-process",
+    "formatExit": 1,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-recovery-process-archive-checks.log"
+  },
+  {
+    "worktree": "/private/tmp/onecad-resource-current",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-resource-current-archive-checks.log"
+  }
+]

@@ -1,0 +1,215 @@
+{
+  "boundaryUseMultisetSame": true,
+  "boundaryUses": 6,
+  "convertedAudit": {
+    "code": "",
+    "disposition": "publishable",
+    "evidence": {
+      "brepValid": true,
+      "degenerateEdgeCount": 0,
+      "manifoldChecked": true,
+      "microEdgeCount": 0,
+      "microTopologyChecked": true,
+      "minimumEdgeLength": 0.002618060337361392,
+      "minimumEdgeRatio": 0.00028713609366214066,
+      "minimumFaceRatio": 9.447507438779362e-06,
+      "minimumFaceWidth": 0.002595410483964215,
+      "nonManifoldEdgeCount": 0,
+      "nullShape": false,
+      "openEdgeCount": 0,
+      "scaleDiagonal": 9.117837830732414,
+      "selfInterferenceChecked": true,
+      "selfInterferenceCount": 0,
+      "sliverFaceCount": 0,
+      "solidCount": 1,
+      "strayTopologyCount": 0,
+      "structureChecked": true,
+      "tolerances": {
+        "edge": 0.00010000001187672183,
+        "face": 1e-07,
+        "max": 0.000100100001,
+        "vertex": 0.000100100001
+      },
+      "tolerancesChecked": true,
+      "topLevelShape": "compound",
+      "volume": 0.36466637494122944,
+      "volumeChecked": true
+    },
+    "message": "",
+    "reasonCode": "",
+    "timings": {
+      "buildMs": 0.0,
+      "validatorMs": 121.151125
+    }
+  },
+  "copyBeforeAudit": {
+    "code": "",
+    "disposition": "publishable",
+    "evidence": {
+      "brepValid": true,
+      "degenerateEdgeCount": 0,
+      "manifoldChecked": true,
+      "microEdgeCount": 0,
+      "microTopologyChecked": true,
+      "minimumEdgeLength": 0.002618060337361392,
+      "minimumEdgeRatio": 0.00028713609366214066,
+      "minimumFaceRatio": 9.447507438779362e-06,
+      "minimumFaceWidth": 0.002595410483964215,
+      "nonManifoldEdgeCount": 0,
+      "nullShape": false,
+      "openEdgeCount": 0,
+      "scaleDiagonal": 9.117837830732414,
+      "selfInterferenceChecked": true,
+      "selfInterferenceCount": 0,
+      "sliverFaceCount": 0,
+      "solidCount": 1,
+      "strayTopologyCount": 0,
+      "structureChecked": true,
+      "tolerances": {
+        "edge": 0.00010000001187672183,
+        "face": 1e-07,
+        "max": 0.000100100001,
+        "vertex": 0.000100100001
+      },
+      "tolerancesChecked": true,
+      "topLevelShape": "compound",
+      "volume": 0.3646663766385433,
+      "volumeChecked": true
+    },
+    "message": "",
+    "reasonCode": "",
+    "timings": {
+      "buildMs": 0.0,
+      "validatorMs": 179.472625
+    }
+  },
+  "cutCeilingMm": 0.001,
+  "inputAudit": {
+    "code": "",
+    "disposition": "publishable",
+    "evidence": {
+      "brepValid": true,
+      "degenerateEdgeCount": 0,
+      "manifoldChecked": true,
+      "microEdgeCount": 0,
+      "microTopologyChecked": true,
+      "minimumEdgeLength": 0.002618060337361392,
+      "minimumEdgeRatio": 0.00028713609366214066,
+      "minimumFaceRatio": 9.447507438779362e-06,
+      "minimumFaceWidth": 0.002595410483964215,
+      "nonManifoldEdgeCount": 0,
+      "nullShape": false,
+      "openEdgeCount": 0,
+      "scaleDiagonal": 9.117837830732414,
+      "selfInterferenceChecked": true,
+      "selfInterferenceCount": 0,
+      "sliverFaceCount": 0,
+      "solidCount": 1,
+      "strayTopologyCount": 0,
+      "structureChecked": true,
+      "tolerances": {
+        "edge": 0.00010000001187672183,
+        "face": 1e-07,
+        "max": 0.000100100001,
+        "vertex": 0.000100100001
+      },
+      "tolerancesChecked": true,
+      "topLevelShape": "compound",
+      "volume": 0.3646663766385433,
+      "volumeChecked": true
+    },
+    "message": "",
+    "reasonCode": "",
+    "timings": {
+      "buildMs": 0.0,
+      "validatorMs": 249.848333
+    }
+  },
+  "newFaceOrientation": 0,
+  "normalized": true,
+  "normalizedAudit": {
+    "code": "GEOMETRY_INVALID",
+    "disposition": "refused",
+    "evidence": {
+      "brepValid": true,
+      "degenerateEdgeCount": 0,
+      "manifoldChecked": true,
+      "microEdgeCount": 0,
+      "microTopologyChecked": true,
+      "minimumEdgeLength": 1.142351572225017e-05,
+      "minimumEdgeRatio": 1.2528755099971489e-06,
+      "minimumFaceRatio": 1.199187739050194e-10,
+      "minimumFaceWidth": 3.7953985737351157e-06,
+      "nonManifoldEdgeCount": 1,
+      "nullShape": false,
+      "openEdgeCount": 0,
+      "scaleDiagonal": 9.117837830732414,
+      "selfInterferenceChecked": true,
+      "selfInterferenceCount": 0,
+      "sliverFaceCount": 2,
+      "solidCount": 1,
+      "strayTopologyCount": 0,
+      "structureChecked": true,
+      "tolerances": {
+        "edge": 0.00010000001187672183,
+        "face": 1e-07,
+        "max": 0.000100100001,
+        "vertex": 0.000100100001
+      },
+      "tolerancesChecked": true,
+      "topLevelShape": "compound",
+      "volume": 0.3316148228679323,
+      "volumeChecked": true
+    },
+    "message": "Boolean failed closed-manifold validation",
+    "reasonCode": "PUBLICATION_OPEN_MANIFOLD",
+    "timings": {
+      "buildMs": 0.0,
+      "validatorMs": 347.330666
+    }
+  },
+  "oldFaceOrientation": 0,
+  "poleProof": "degree 1x1 nonrational; opposite poles have bit-identical x,z; span along y",
+  "rawAudit": {
+    "code": "GEOMETRY_INVALID",
+    "disposition": "refused",
+    "evidence": {
+      "brepValid": true,
+      "degenerateEdgeCount": 0,
+      "manifoldChecked": true,
+      "microEdgeCount": 0,
+      "microTopologyChecked": true,
+      "minimumEdgeLength": 1.142351572225017e-05,
+      "minimumEdgeRatio": 1.2528755099971489e-06,
+      "minimumFaceRatio": 1.199187739050194e-10,
+      "minimumFaceWidth": 3.7953985737351157e-06,
+      "nonManifoldEdgeCount": 1,
+      "nullShape": false,
+      "openEdgeCount": 0,
+      "scaleDiagonal": 9.117837830732414,
+      "selfInterferenceChecked": true,
+      "selfInterferenceCount": 0,
+      "sliverFaceCount": 2,
+      "solidCount": 1,
+      "strayTopologyCount": 0,
+      "structureChecked": true,
+      "tolerances": {
+        "edge": 0.00010000001187672183,
+        "face": 1e-07,
+        "max": 0.000100100001,
+        "vertex": 0.000100100001
+      },
+      "tolerancesChecked": true,
+      "topLevelShape": "compound",
+      "volume": 0.3316148228679323,
+      "volumeChecked": true
+    },
+    "message": "Boolean failed closed-manifold validation",
+    "reasonCode": "PUBLICATION_OPEN_MANIFOLD",
+    "timings": {
+      "buildMs": 0.0,
+      "validatorMs": 637.060875
+    }
+  },
+  "threeDimensionalCurvesRangesLocationsTolerancesSame": true
+}

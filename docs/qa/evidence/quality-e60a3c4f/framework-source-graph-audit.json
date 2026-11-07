@@ -1,0 +1,345 @@
+{
+  "source": "/private/tmp/onecad-native-public-assembly/fixtures/public-cad/framework/ExpansionCard_ThreadedInsert.stp",
+  "sourceSha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+  "reader": "OCP 8.0.1.1 STEPCAFControl_Reader",
+  "scope": "source occurrence graph before OneCAD import/heal; same-kernel diagnostic, not independent mass oracle",
+  "sourceEntityLinks": {
+    "pcba": [
+      1692,
+      1693,
+      1694,
+      1685,
+      1672
+    ],
+    "frame": [
+      8155,
+      8156,
+      8157,
+      8150,
+      8137
+    ],
+    "nut": [
+      8442,
+      8443,
+      8444,
+      8438,
+      8425
+    ],
+    "screw": [
+      9502,
+      9503,
+      9504,
+      9498,
+      9485
+    ],
+    "nutOccurrences": [
+      8445,
+      8458
+    ],
+    "screwOccurrences": [
+      9505,
+      9518
+    ]
+  },
+  "occurrenceCount": 6,
+  "occurrences": [
+    {
+      "path": [
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM"
+        },
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_2",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_2_ASM"
+        },
+        {
+          "occurrence": "FW_EXP_MCU_ASM_1",
+          "definition": "FW_EXP_MCU_ASM_1_ASM_2_ASM"
+        },
+        {
+          "occurrence": "MICROCONTROLLER-PCBA",
+          "definition": "MICROCONTROLLER-PCBA_ASM_4_ASM__ASM"
+        },
+        {
+          "occurrence": "OPEN_CASCADE_STEP_TRANSLATOR_6_",
+          "definition": "OPEN_CASCADE_STEP_TRANSLATOR_6__ASM"
+        },
+        {
+          "occurrence": "COMPOUND",
+          "definition": "COMPOUND_3"
+        }
+      ],
+      "worldMatrix": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -140.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          3.1
+        ],
+        [
+          0.0,
+          -1.0,
+          0.0,
+          -157.0
+        ]
+      ],
+      "volumeMm3SameKernel": 596.3823437732209,
+      "valid": true,
+      "invalidSubshapes": []
+    },
+    {
+      "path": [
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM"
+        },
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_2",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_2_ASM"
+        },
+        {
+          "occurrence": "REF_C",
+          "definition": "REF_C_ASM_2_ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+          "definition": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY__ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY",
+          "definition": "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY_ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_FRAME_CLIP_BC",
+          "definition": "FW_EXP_1USBC_FRAME_CLIP_BC_229_"
+        }
+      ],
+      "worldMatrix": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "volumeMm3SameKernel": 2002.3764093392274,
+      "valid": true,
+      "invalidSubshapes": []
+    },
+    {
+      "path": [
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM"
+        },
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_2",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_2_ASM"
+        },
+        {
+          "occurrence": "REF_C",
+          "definition": "REF_C_ASM_2_ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+          "definition": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY__ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY",
+          "definition": "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY_ASM"
+        },
+        {
+          "occurrence": "NUT_M1-6X1-5L",
+          "definition": "NUT_M2X1-6L_2"
+        }
+      ],
+      "worldMatrix": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -11.3
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          2.85
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          -10.5
+        ]
+      ],
+      "volumeMm3SameKernel": 10.421710029508288,
+      "valid": true,
+      "invalidSubshapes": []
+    },
+    {
+      "path": [
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM"
+        },
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_2",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_2_ASM"
+        },
+        {
+          "occurrence": "REF_C",
+          "definition": "REF_C_ASM_2_ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+          "definition": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY__ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY",
+          "definition": "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY_ASM"
+        },
+        {
+          "occurrence": "NUT_M2X1-6L",
+          "definition": "NUT_M2X1-6L_2"
+        }
+      ],
+      "worldMatrix": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          11.3
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          2.85
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          -10.5
+        ]
+      ],
+      "volumeMm3SameKernel": 10.421710029508288,
+      "valid": true,
+      "invalidSubshapes": []
+    },
+    {
+      "path": [
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM"
+        },
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_2",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_2_ASM"
+        },
+        {
+          "occurrence": "REF_C",
+          "definition": "REF_C_ASM_2_ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+          "definition": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY__ASM"
+        },
+        {
+          "occurrence": "STAR_SCREW_M1-6X3L",
+          "definition": "STAR_SCREW_M2X3L_298_2"
+        }
+      ],
+      "worldMatrix": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -11.3
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          3.95
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          -10.5
+        ]
+      ],
+      "volumeMm3SameKernel": 16.71324541622446,
+      "valid": true,
+      "invalidSubshapes": []
+    },
+    {
+      "path": [
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM"
+        },
+        {
+          "occurrence": "FW_EXC_3PARTY_WO_LID_ASM_2",
+          "definition": "FW_EXC_3PARTY_WO_LID_ASM_2_ASM"
+        },
+        {
+          "occurrence": "REF_C",
+          "definition": "REF_C_ASM_2_ASM"
+        },
+        {
+          "occurrence": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+          "definition": "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY__ASM"
+        },
+        {
+          "occurrence": "STAR_SCREW_M2X3L_298",
+          "definition": "STAR_SCREW_M2X3L_298_2"
+        }
+      ],
+      "worldMatrix": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          11.3
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          3.95
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          -10.5
+        ]
+      ],
+      "volumeMm3SameKernel": 16.71324541622446,
+      "valid": true,
+      "invalidSubshapes": []
+    }
+  ]
+}

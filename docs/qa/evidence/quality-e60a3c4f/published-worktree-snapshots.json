@@ -1,0 +1,83 @@
+[
+  {
+    "worktree": "/private/tmp/onecad-framework-resume",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-framework-resume-archive-checks.log",
+    "before": "fd45a6c8b7e1d88ae4e9c50cf2d05414de709e64",
+    "commit": "0fd7e4611631d6646ef9490f041c46c654d17aaf",
+    "originalStatus": " M crates/onecad-core/src/regen/checkpoint.rs\n?? crates/onecad-app/tests/framework_capture_saved_operands.rs\n?? crates/onecad-app/tests/framework_material_restore_probe.rs\n?? crates/onecad-app/tests/framework_native_clip_cutter.rs\n?? crates/onecad-app/tests/framework_native_clip_support/geometry.rs\n?? crates/onecad-app/tests/framework_native_clip_support/mod.rs\n?? crates/onecad-app/tests/framework_native_clip_support/negative.rs\n?? crates/onecad-app/tests/framework_native_clip_support/negative_extract.py\n?? crates/onecad-app/tests/framework_native_clip_support/negative_pipes.json\n?? crates/onecad-app/tests/framework_native_clip_support/pipes.rs\n?? crates/onecad-app/tests/framework_native_clip_support/solids.rs\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-diagnostics",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-diagnostics-archive-checks.log",
+    "before": "fd45a6c8b7e1d88ae4e9c50cf2d05414de709e64",
+    "commit": "311c6a16aca18f70c09a553cd629148fbd90828e",
+    "originalStatus": " M crates/onecad-app/src/document_runtime/tests.rs\n M crates/onecad-ui/src/arc_slot_delivery_tests.rs\n M crates/onecad-ui/src/arc_slot_delivery_tests/support.rs\n M docs/persistence-transactions.md\n M xtask/src/evidence/host_names.rs\n M xtask/src/evidence/tests.rs\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-prusa-revolute",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-prusa-revolute-archive-checks.log",
+    "before": "c62cb0f3c61306d0fffbf3723530934915c90ce0",
+    "commit": "efc1715fe119ed44eba913d92fe20862ede2a781",
+    "originalStatus": "?? crates/onecad-app/tests/prusa_native_joint_support/README.md\n?? crates/onecad-app/tests/prusa_native_joint_support/document.rs\n?? crates/onecad-app/tests/prusa_native_joint_support/joints.rs\n?? crates/onecad-app/tests/prusa_native_joints.rs\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-public-assembly",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-public-assembly-archive-checks.log",
+    "before": "909b526d05fe3d365e5fe634b02f8eb160809bd5",
+    "commit": "49fbbe80dcdf6f7049f7d1bc621c955e02033284",
+    "originalStatus": " M crates/onecad-core/src/regen/checkpoint.rs\n?? crates/onecad-app/tests/public_mixed_stress.rs\n?? crates/onecad-app/tests/public_mixed_stress_support/README.md\n?? crates/onecad-app/tests/public_mixed_stress_support/checks.rs\n?? crates/onecad-app/tests/public_mixed_stress_support/fixture.rs\n?? crates/onecad-ui/src/document_io_tests/repeated_occurrence_repair.rs\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-native-stress-capture",
+    "formatExit": 1,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-native-stress-capture-archive-checks.log",
+    "before": "322e2885d4effe42bd42187bcfd4c83e239a9fbd",
+    "commit": "bd089ae18afb945b119d4e7b810467aa6ab4b3bc",
+    "originalStatus": " M crates/onecad-ui/src/app.rs\n M crates/onecad-ui/src/app_logic_tests.rs\n M crates/onecad-ui/src/bridge.rs\n M crates/onecad-ui/src/capture.rs\n M crates/onecad-ui/src/document_editor.rs\n M crates/onecad-ui/src/document_io_tests.rs\n M crates/onecad-ui/src/document_state.rs\n M crates/onecad-ui/src/documents.rs\n M crates/onecad-ui/src/explorer.rs\n?? crates/onecad-ui/src/capture_failure_delivery_tests.rs\n?? crates/onecad-ui/src/document_io_tests/native_public_capture_diagnostic.rs\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-nist-source-trace",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-nist-source-trace-archive-checks.log",
+    "before": "4a9bdc386ccf9c8bbbd98b4a1ed2019376abdfe7",
+    "commit": "f083b2b2ff78d896a0e691f07c1e0cbcedbeb8f7",
+    "originalStatus": "?? fixtures/reference-oracles/nist-ftc09-direct/README.md\n?? fixtures/reference-oracles/nist-ftc09-direct/test_trace.py\n?? fixtures/reference-oracles/nist-ftc09-direct/trace.json\n?? fixtures/reference-oracles/nist-ftc09-direct/trace.py\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-prusa-mixed-current",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-prusa-mixed-current-archive-checks.log",
+    "before": "0a05df7f612ed27ba192ea2c1a441c32537627ea",
+    "commit": "dcd8c815bcbb4f70868ebd80dfa3b546aac00ce7",
+    "originalStatus": " M crates/onecad-app/src/document_runtime.rs\n M crates/onecad-app/src/document_runtime/component_execution.rs\n M crates/onecad-app/src/worker/wire.rs\n M crates/onecad-app/tests/prusa_native_cover.rs\n M crates/onecad-app/tests/prusa_native_cover_support/mesh_topology.rs\n M crates/onecad-app/tests/prusa_native_lever.rs\n M crates/onecad-core/src/edit/session.rs\n M crates/onecad-core/src/edit/undo.rs\n?? crates/onecad-app/tests/prusa_mixed_assembly.rs\n?? crates/onecad-app/tests/prusa_mixed_support/document.rs\n?? crates/onecad-app/tests/prusa_mixed_support/mesh_compare.rs\n?? crates/onecad-app/tests/prusa_mixed_support/source_checks.rs\n?? crates/onecad-app/tests/prusa_native_cover_support/mod.rs\n?? crates/onecad-app/tests/prusa_native_lever_support/mod.rs\n?? crates/onecad-core/src/edit/session/component_history.rs\n?? crates/onecad-core/src/edit/session/component_history_tests.rs\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-recovery-process",
+    "formatExit": 1,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-recovery-process-archive-checks.log",
+    "before": "fd45a6c8b7e1d88ae4e9c50cf2d05414de709e64",
+    "commit": "fe2b390525b218b869ac93b24434b26da295eaa0",
+    "originalStatus": " M crates/onecad-app/src/api/save_transaction_tests.rs\n M crates/onecad-ui/src/lib.rs\n?? crates/onecad-app/tests/prusa_mixed_assembly.rs\n?? crates/onecad-app/tests/prusa_mixed_support/cover.rs\n?? crates/onecad-app/tests/prusa_mixed_support/document.rs\n?? crates/onecad-app/tests/prusa_mixed_support/lever.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_cover_support/construction.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_cover_support/features.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_cover_support/lifecycle.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_cover_support/mesh_topology.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_cover_support/validation.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_lever_support/construction.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_lever_support/lifecycle.rs\n?? crates/onecad-app/tests/prusa_mixed_support/prusa_native_lever_support/mesh_topology.rs\n?? crates/onecad-app/tests/prusa_mixed_support/source_checks.rs\n?? crates/onecad-app/tests/prusa_native_box.rs\n?? crates/onecad-app/tests/prusa_native_lever.rs\n?? crates/onecad-app/tests/prusa_native_lever_support/construction.rs\n?? crates/onecad-app/tests/prusa_native_lever_support/lifecycle.rs\n?? crates/onecad-app/tests/recovery_process.rs\n?? docs/qa/macos-performance.md\n?? fixtures/public-cad/prusa/MINI-fsenzor-cover.stl\n?? fixtures/public-cad/prusa/MINI-fsenzor-lever.stl\n?? fixtures/reference-derivatives/prusa/box-native/README.md\n?? fixtures/reference-derivatives/prusa/box-native/bottom-stock-recipe.json\n?? fixtures/reference-derivatives/prusa/box-native/enclosing-stock-recipe.json\n?? fixtures/reference-derivatives/prusa/box-native/extract.py\n?? fixtures/reference-derivatives/prusa/box-native/surface-inventory.json\n?? fixtures/reference-derivatives/prusa/cover-native/geometry-extraction.json\n?? fixtures/reference-derivatives/prusa/cover-native/lower-stock-recipe.json\n?? fixtures/reference-derivatives/prusa/cover-native/recess-recipe.json\n?? fixtures/reference-derivatives/prusa/cover-native/stock-recipe.json\n?? fixtures/reference-derivatives/prusa/lever-native/README.md\n?? fixtures/reference-derivatives/prusa/lever-native/recipe.json\n?? fixtures/reference-oracles/prusa-cover-stl.json\n?? fixtures/reference-oracles/prusa-lever-stl.json\n"
+  },
+  {
+    "worktree": "/private/tmp/onecad-resource-current",
+    "formatExit": 0,
+    "diffCheckExit": 0,
+    "log": "/private/tmp/onecad-resume-evidence/onecad-resource-current-archive-checks.log",
+    "before": "93508b34169cfce78d48c4b87837bb785d5edcf0",
+    "commit": "f455814412f25c8467348979842039fbb33cb860",
+    "originalStatus": " M crates/onecad-ui/src/capture_pressure_tests.rs\n?? crates/onecad-ui/src/capture_pressure_tests/cancellation.rs\n"
+  }
+]

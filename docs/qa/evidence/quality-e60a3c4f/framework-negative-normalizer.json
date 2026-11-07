@@ -1,0 +1,370 @@
+{
+  "afterAudit": {
+    "code": "GEOMETRY_INVALID",
+    "disposition": "refused",
+    "evidence": {
+      "brepValid": true,
+      "degenerateEdgeCount": 0,
+      "manifoldChecked": true,
+      "microEdgeCount": 0,
+      "microTopologyChecked": true,
+      "minimumEdgeLength": 1.142351572225017e-05,
+      "minimumEdgeRatio": 1.2528755099971489e-06,
+      "minimumFaceRatio": 1.199187739050194e-10,
+      "minimumFaceWidth": 3.7953985737351157e-06,
+      "nonManifoldEdgeCount": 1,
+      "nullShape": false,
+      "openEdgeCount": 0,
+      "scaleDiagonal": 9.117837830732414,
+      "selfInterferenceChecked": true,
+      "selfInterferenceCount": 0,
+      "sliverFaceCount": 2,
+      "solidCount": 1,
+      "strayTopologyCount": 0,
+      "structureChecked": true,
+      "tolerances": {
+        "edge": 0.00010000001187672183,
+        "face": 1e-07,
+        "max": 0.000100100001,
+        "vertex": 0.000100100001
+      },
+      "tolerancesChecked": true,
+      "topLevelShape": "compound",
+      "volume": 0.33161482570731987,
+      "volumeChecked": true
+    },
+    "message": "Boolean failed closed-manifold validation",
+    "reasonCode": "PUBLICATION_OPEN_MANIFOLD",
+    "timings": {
+      "buildMs": 0.0,
+      "validatorMs": 218.923917
+    }
+  },
+  "afterProperties": {
+    "areaMm2": 4.4890390041198724,
+    "volumeMm3": 0.33161482570731987
+  },
+  "beforeAudit": {
+    "code": "GEOMETRY_INVALID",
+    "disposition": "refused",
+    "evidence": {
+      "brepValid": true,
+      "degenerateEdgeCount": 0,
+      "manifoldChecked": true,
+      "microEdgeCount": 0,
+      "microTopologyChecked": true,
+      "minimumEdgeLength": 1.142351572225017e-05,
+      "minimumEdgeRatio": 1.2528755099971489e-06,
+      "minimumFaceRatio": 1.199187739050194e-10,
+      "minimumFaceWidth": 3.7953985737351157e-06,
+      "nonManifoldEdgeCount": 1,
+      "nullShape": false,
+      "openEdgeCount": 0,
+      "scaleDiagonal": 9.117837830732414,
+      "selfInterferenceChecked": true,
+      "selfInterferenceCount": 0,
+      "sliverFaceCount": 2,
+      "solidCount": 1,
+      "strayTopologyCount": 0,
+      "structureChecked": true,
+      "tolerances": {
+        "edge": 0.00010000001187672183,
+        "face": 1e-07,
+        "max": 0.000100100001,
+        "vertex": 0.000100100001
+      },
+      "tolerancesChecked": true,
+      "topLevelShape": "compound",
+      "volume": 0.33161482570731987,
+      "volumeChecked": true
+    },
+    "message": "Boolean failed closed-manifold validation",
+    "reasonCode": "PUBLICATION_OPEN_MANIFOLD",
+    "timings": {
+      "buildMs": 0.0,
+      "validatorMs": 214.032125
+    }
+  },
+  "beforeProperties": {
+    "areaMm2": 4.4890390041198724,
+    "volumeMm3": 0.33161482570731987
+  },
+  "ceilingMm": 0.001,
+  "normalized": true,
+  "sameHistoryPointer": false,
+  "sameResultIdentity": false,
+  "targetAfterLineage": [
+    {
+      "deleted": false,
+      "face": 1,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 2,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 3,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 4,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 5,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 6,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 7,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 8,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 9,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 10,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": true,
+      "face": 11,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 12,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 13,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 14,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 15,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 16,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    }
+  ],
+  "targetBeforeLineage": [
+    {
+      "deleted": false,
+      "face": 1,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": true
+    },
+    {
+      "deleted": false,
+      "face": 2,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": true
+    },
+    {
+      "deleted": false,
+      "face": 3,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 4,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 5,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 6,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": true
+    },
+    {
+      "deleted": false,
+      "face": 7,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": true
+    },
+    {
+      "deleted": false,
+      "face": 8,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 9,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 10,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": true,
+      "face": 11,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 12,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 13,
+      "generatedFinal": 0,
+      "modifiedFinal": 2,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 14,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 15,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": false,
+      "face": 16,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    }
+  ],
+  "toolAfterLineage": [
+    {
+      "deleted": false,
+      "face": 1,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": true,
+      "face": 2,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": false
+    },
+    {
+      "deleted": true,
+      "face": 3,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": false
+    }
+  ],
+  "toolBeforeLineage": [
+    {
+      "deleted": false,
+      "face": 1,
+      "generatedFinal": 0,
+      "modifiedFinal": 1,
+      "unchanged": false
+    },
+    {
+      "deleted": true,
+      "face": 2,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": false
+    },
+    {
+      "deleted": true,
+      "face": 3,
+      "generatedFinal": 0,
+      "modifiedFinal": 0,
+      "unchanged": false
+    }
+  ]
+}

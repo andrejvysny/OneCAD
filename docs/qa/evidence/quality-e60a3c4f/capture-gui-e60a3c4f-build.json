@@ -1,0 +1,11 @@
+{
+  "sourceCommit": "e60a3c4f302ceef479064ef6b9c5e45910afee8a",
+  "app": "/private/tmp/OneCAD Capture QA.app",
+  "qaRoot": "/private/tmp/onecad-capture-gui-qa-e60a3c4f",
+  "hostSha256": "9437bf2f46f7a34e75569414e9ce56494d17c2c877229f83d606b969900a43a9",
+  "launcherSha256": "4440f0993404089bdd0ef26e61db4cd06219092fd8d6893b1baae530427ead44",
+  "workerSha256": "4272493274b789539a0e731afe0d45084e344ccf646f46bec35af6561a3fcfb0",
+  "inputSha256": "7c39c64fa89618fcb7cf40dcb2a230b0f3f68acd2d09f4fd7c8af58be006ae9d",
+  "profile": "dev debug=0 incremental=0 jobs=2",
+  "classification": "Built; not launched or GUI-qualified. Internal timing enabled; not release performance qualification."
+}
