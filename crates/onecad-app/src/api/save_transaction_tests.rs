@@ -493,3 +493,6 @@ async fn save_as_missing_parent_refuses_before_io_and_keeps_old_state() {
         .claim_path(999, &old)
         .is_err());
 }
+
+#[path = "save_transaction_interleaving_tests.rs"]
+mod interleavings;

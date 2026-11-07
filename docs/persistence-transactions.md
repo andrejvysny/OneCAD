@@ -25,6 +25,17 @@ opened document. A save that overlaps such a publication stays dirty until a
 later save. Generation exhaustion refuses mutation or publication rather than
 reusing a generation.
 
+Opaque module slices use the same transaction boundary: accepted
+`set_module_state`/`SetModuleState` writes or removals, including Undo/Redo,
+advance the persisted generation without interpreting the module's schema or
+payload. Explicit writes may advance it conservatively even for equal payloads.
+Save capture clones the complete authoritative document, including unknown
+operations, module slices and extension fields allowed by its compatibility
+policy. Untouched opaque content is carried forward; saving it does not create
+a separate mutation. Unsupported migrations refuse rather than dropping or
+reinterpreting that content. No direct mutable module/document reference is
+exposed by `DocumentRuntime` to bypass these transactions.
+
 A recovery marker may contain the producing runtime session and persisted
 generation. A successful save removes a recovery pair only when its marker
 positively identifies the same document and session, and its generation is no

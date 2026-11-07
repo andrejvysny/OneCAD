@@ -6739,6 +6739,38 @@ fn persisted_generation_advances_only_for_accepted_edits_and_history() {
     assert_eq!(rt.persisted_generation(), initial + 3);
 }
 
+#[test]
+fn opaque_module_mutation_fences_save_and_survives_history_and_reopen() {
+    use onecad_core::document::modules::{ModuleId, ModuleState};
+    use onecad_core::io::container::ContainerReader;
+
+    let area = tempfile::tempdir().unwrap();
+    let path = area.path().join("opaque.onecad");
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let module = ModuleId::parse("com.example.future").unwrap();
+    let state = ModuleState::new(
+        73,
+        serde_json::json!({"unknown": [null, {"future": "kept"}]}),
+    );
+    let generation = rt.persisted_generation();
+    let old = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    rt.set_module_state(module.clone(), Some(state.clone()))
+        .unwrap();
+    assert_eq!(rt.persisted_generation(), generation + 1);
+    DocumentRuntime::write_payload(&path, &old).unwrap();
+    assert!(!rt.mark_saved(&path, generation));
+    assert!(rt.is_dirty());
+    rt.undo().unwrap();
+    assert_eq!(rt.module_state(&module), None);
+    rt.redo().unwrap().unwrap();
+    assert_eq!(rt.persisted_generation(), generation + 3);
+    assert_eq!(rt.module_state(&module), Some(state.clone()));
+    rt.save(&path, test_save_meta()).unwrap();
+    assert!(!rt.is_dirty());
+    let saved = ContainerReader::open(&path).unwrap();
+    assert_eq!(saved.document().modules.get(&module), Some(&state));
+}
+
 #[tokio::test]
 async fn published_regen_fences_overlapping_save_without_dirtying_clean_document() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
