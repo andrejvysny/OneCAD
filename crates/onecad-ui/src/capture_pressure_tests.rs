@@ -1,5 +1,8 @@
 //! Public host captures must reclaim disposable preparation before waiting on themselves.
 use super::*;
+#[path = "capture_pressure_tests/cancellation.rs"]
+mod cancellation;
+use cancellation::{close_while_prepare_waits, repeat_cancelled_preparation};
 use onecad_core::sketch::WorldPlane;
 use onecad_interaction::sketch::{SketchAction, SketchPhase};
 
@@ -138,11 +141,13 @@ async fn denied_prepare_preserves_viewport_and_retries_after_release() {
     host.app
         .doc
         .bridge
-        .submit(crate::bridge::Command::Prepare(source))
+        .submit(crate::bridge::Command::Prepare(source.clone()))
         .unwrap();
     host.app.doc.prepare_in_flight = Some(identity);
     wait_prepare(&mut host, |app| app.doc.prepare_in_flight.is_none()).await;
     assert_eq!(host.app.renderer.scene_identity(), Some(identity));
+    drop(source);
+    repeat_cancelled_preparation(&mut host).await;
     host.stop().await;
     assert_eq!(budget.snapshot().used, 0);
 }
@@ -290,6 +295,9 @@ async fn three_documents_repeat_unchanged_geometry_sketch_captures_and_undo() {
         );
     }
     let budget = host.app.doc.bridge.shared.host_budget.clone();
+    close_while_prepare_waits(&mut host, &budget).await;
+    let next_budget = host.app.doc.bridge.shared.host_budget.clone();
+    close_while_prepare_waits(&mut host, &next_budget).await;
     host.stop().await;
     let after = budget.snapshot();
     eprintln!("handoff after close: {after:?}");
