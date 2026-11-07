@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "path": "fixtures/public-cad/framework/ExpansionCard_ThreadedInsert.stp",
+    "sha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+    "license": "CC-BY-4.0",
+    "copyright": "Framework Computer Inc."
+  },
+  "observation": {
+    "dateUtc": "2026-11-07",
+    "reader": "Shapr3D",
+    "version": "26.202.0",
+    "build": "12281",
+    "kernelFamily": "Siemens Parasolid",
+    "os": "macOS 26.6.2 (25G83)",
+    "machine": "Mac16,8 Apple M4 Pro",
+    "input": "OS-injected native Computer Use; not physical input",
+    "importPreset": "Quality (default); no custom import settings applied",
+    "selectionPath": [
+      "ExpansionCard_ThreadedInsert.stp",
+      "FW_EXC_3PARTY_WO_LID_ASM_2",
+      "REF_C",
+      "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+      "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY",
+      "FW_EXP_1USBC_FRAME_CLIP_BC",
+      "Imported 05"
+    ],
+    "mode": "Measure / Object Measurements",
+    "volumeMm3": 2002.3754,
+    "surfaceAreaMm2": 3197.8774,
+    "displayDecimalPlaces": 4,
+    "displayHalfStep": 5e-05,
+    "recordedBy": "Native accessibility values corroborated by visible screenshot in execution transcript"
+  },
+  "limits": [
+    "Display half-step describes rounding only, not geometric accuracy.",
+    "Import conversion, healing and Parasolid version-specific uncertainty were not measured.",
+    "This is an independent kernel measurement of the pinned public STEP, not native OneCAD feature history.",
+    "No existing oracle, trial tolerance or golden was replaced or widened.",
+    "The source product name is retained by the parent hierarchy; Shapr3D names its selected solid Imported 05."
+  ],
+  "references": {
+    "kernel": "https://www.shapr3d.com/product/cad-file-types",
+    "measure": "https://support.shapr3d.com/hc/en-us/articles/7874465678236-Measure"
+  }
+}

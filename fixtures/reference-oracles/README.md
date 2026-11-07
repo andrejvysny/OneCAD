@@ -29,3 +29,11 @@ admitting it. Never recapture an existing failing fixture to obtain green tests.
 
 The Framework PDF under `public-cad` describes a PCB plate. It must not be used
 as a whole-enclosure dimension or mass oracle for the larger STEP assembly.
+
+`framework-parasolid-measurement.json` records an independent Shapr3D/Parasolid
+measurement of the pinned STEP's enclosure solid, selected through its imported
+product hierarchy. Native accessibility values and the visible Measure panel
+agreed on 2002.3754 mm³ and 3197.8774 mm². The four displayed decimal places bound
+rounding only; import conversion and healing uncertainty remain unmeasured.
+This observation does not replace an existing oracle or justify widening a
+tolerance. It does not establish native OneCAD history or source equivalence.
