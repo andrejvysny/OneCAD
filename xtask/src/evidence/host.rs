@@ -33,6 +33,7 @@ pub(super) const SERVICES: Selection = Selection {
         "bridge::tests::",
         "document_services::tests::document_io_tests::native_assembly_controls_author_solve_undo_save_reopen",
         "document_services::tests::document_io_tests::native_assembly_capture_save_close_reopen_keeps_occurrences",
+        "document_services::tests::document_io_tests::repeated_occurrence_repair::",
     ],
     tests: SERVICE_TESTS,
     metal_evidence: false,

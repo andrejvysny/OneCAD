@@ -1405,3 +1405,6 @@ async fn native_assembly_controls_author_solve_undo_save_reopen() {
         .unwrap();
     backend.state.retire_all();
 }
+
+#[path = "document_io_tests/repeated_occurrence_repair.rs"]
+mod repeated_occurrence_repair;

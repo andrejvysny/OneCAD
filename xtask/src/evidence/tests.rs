@@ -99,7 +99,7 @@ fn host_separate_stderr_and_extra_adapter_setup_valid() {
 }
 #[test]
 fn host_service_selection_requires_its_own_exact_inventory_and_count() {
-    assert_eq!(SERVICE_TESTS.len(), 6);
+    assert_eq!(SERVICE_TESTS.len(), 7);
     let services = &host::SERVICES;
     let inventory = SERVICE_TESTS
         .iter()

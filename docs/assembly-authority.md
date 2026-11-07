@@ -63,6 +63,16 @@ read-only documents refuse new identity promotion. Edge TopoKeys remain transien
 and cannot be queried after worker retirement. Native selection retains source
 body and occurrence path separately from its collision-checked display identity.
 Occurrence section views and root modeling operands are refused explicitly.
+
+A source edit marks affected joint bindings `NeedsRepair` without changing their
+occurrence paths or accepted poses. If strict component replay cannot rebind the
+edited topology, the native service invalidates its displayed scene and reports
+the capture failure; stale picks cannot authorize another edit. The source
+restoration regression suppresses the bound native Extrude, restores it, rejects
+a fresh sibling-occurrence pick, and explicitly repicks the intended occurrence
+before Save As and reopen. It does not qualify permanent source deletion followed
+by repair to a different replacement face.
+
 Root geometry publication evicts embedded mesh caches before accepting a new scene;
 components must replay again before display. Assembly recovery uses an explicit
 assembly-aware API; the default part recovery continues to refuse assemblies.
