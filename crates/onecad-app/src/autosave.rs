@@ -580,12 +580,32 @@ async fn run_driver<F>(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     app_data: PathBuf,
     lane: Arc<Mutex<()>>,
-    mut tick: watch::Receiver<u64>,
-    (debounce, max_age, retry_delay): (Duration, Duration, Duration),
+    tick: watch::Receiver<u64>,
+    timing: (Duration, Duration, Duration),
     stop: impl std::future::Future<Output = ()>,
     emit: F,
 ) where
     F: Fn(AutosaveEvent),
+{
+    run_attempt_loop(tick, timing, stop, emit, |session: Option<String>| {
+        let runtime = &runtime;
+        let app_data = &app_data;
+        let lane = &lane;
+        async move { attempt(runtime, app_data, lane, session.as_deref()).await }
+    })
+    .await;
+}
+
+async fn run_attempt_loop<F, A, T>(
+    mut tick: watch::Receiver<u64>,
+    (debounce, max_age, retry_delay): (Duration, Duration, Duration),
+    stop: impl std::future::Future<Output = ()>,
+    emit: F,
+    mut attempt: A,
+) where
+    F: Fn(AutosaveEvent),
+    A: FnMut(Option<String>) -> T,
+    T: std::future::Future<Output = AutosaveAttempt>,
 {
     let mut stop = std::pin::pin!(stop);
     let mut retry: Option<(tokio::time::Instant, String)> = None;
@@ -598,11 +618,12 @@ async fn run_driver<F>(
     .await
     {
         let session = retry.take().map(|(_, session)| session);
-        let mut outcome = attempt(&runtime, &app_data, &lane, session.as_deref()).await;
-        if session.is_some() && matches!(outcome, AutosaveAttempt::Skipped) {
+        let retrying = session.is_some();
+        let mut outcome = attempt(session).await;
+        if retrying && matches!(outcome, AutosaveAttempt::Skipped) {
             // A replacement's mutation may already have been consumed while the
             // old retry waited. Snapshot current dirty work without deferring it again.
-            outcome = attempt(&runtime, &app_data, &lane, None).await;
+            outcome = attempt(None).await;
         }
         match outcome {
             AutosaveAttempt::Failed(event) => {
