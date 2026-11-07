@@ -100,7 +100,12 @@ conservative two-step numerical estimate; no general rank proof is claimed.
 Final residual and limit validation still precedes publication.
 
 A zero-width limit is an equality target even when the current value already
-satisfies it. A one-sided endpoint retains inward motion. Driven revolute scalar
+satisfies it. A one-sided endpoint retains inward motion, including when reached
+by a temporary limit clamp. Final feasibility checks retain that clamp, while
+the DOF and redundancy report uses the authored equalities at the final poses.
+This equality-rank report does not certify a feasible tangent cone for arbitrary
+coupled inequalities. Explicit drives and zero-width limits remain equalities.
+Driven revolute scalar
 finite differences use circular differences across the wrapped-error seam;
 residuals, tolerances and iteration caps are unchanged. Captured source-grounded
 solver inputs and symbolic DOF expectations live under

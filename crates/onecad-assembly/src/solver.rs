@@ -210,11 +210,12 @@ fn solve_inner(req: &SolveRequest) -> Result<SolveOutcome, SolverError> {
     };
     if !clamped {
         let iterations = first.iterations;
-        return Ok(finish(req, &problem, first, iterations));
+        return Ok(finish(req, &problem, first, iterations, &cons));
     }
     let second = run_lm(&first.poses, &problem);
     let iterations = first.iterations + second.iterations;
-    Ok(finish(req, &problem, second, iterations))
+    let authored_cons = build_constraints(req)?;
+    Ok(finish(req, &problem, second, iterations, &authored_cons))
 }
 
 fn check_bodies(bodies: &[SolverBody]) -> Result<(), SolverError> {
@@ -352,7 +353,13 @@ fn pose_pairs(
         .collect()
 }
 
-fn finish(req: &SolveRequest, problem: &Problem, fin: LmOutcome, iterations: u32) -> SolveOutcome {
+fn finish(
+    req: &SolveRequest,
+    problem: &Problem,
+    fin: LmOutcome,
+    iterations: u32,
+    authored_cons: &[Constraint],
+) -> SolveOutcome {
     match fin.status {
         LmStatus::Converged => {
             let residual = max_abs(&residuals(&fin.poses, problem.cons));
@@ -367,7 +374,12 @@ fn finish(req: &SolveRequest, problem: &Problem, fin: LmOutcome, iterations: u32
                     iterations,
                 };
             }
-            let Some((remaining_dof, redundant_constraints)) = dof_report(&fin.poses, problem)
+            // A temporary limit projection must not become a permanent mobility constraint.
+            let reporting = Problem {
+                cons: authored_cons,
+                ..*problem
+            };
+            let Some((remaining_dof, redundant_constraints)) = dof_report(&fin.poses, &reporting)
             else {
                 return SolveOutcome::NumericallyUncertain { max_residual };
             };

@@ -102,6 +102,108 @@ fn one_sided_limit_endpoint_retains_inward_motion_dof() {
     );
 }
 
+#[test]
+fn temporary_limit_clamp_retains_inward_motion_dof() {
+    for start in [-1.0, 2.0] {
+        let mut request = bounded_slider(1.0);
+        request.bodies[1].pose.translation.z = start;
+        let outcome = solve(&request);
+        let SolveOutcome::Converged {
+            poses,
+            remaining_dof,
+            ..
+        } = outcome
+        else {
+            panic!("{outcome:?}");
+        };
+        let endpoint = if start < 0.0 { 0.0 } else { 1.0 };
+        assert!((poses[1].1.translation.z - endpoint).abs() <= request.tolerance);
+        assert_eq!(remaining_dof, 1, "temporary clamp at {endpoint}");
+        request.bodies[1].pose = copy_pose(&poses[1].1);
+        assert!(matches!(
+            solve(&request),
+            SolveOutcome::Converged {
+                remaining_dof: 1,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn translated_slider_and_revolute_clamps_preserve_authored_mobility() {
+    for kind in [JointKind::Slider, JointKind::Revolute] {
+        for start in [-1.0, 2.0] {
+            let mut request = bounded_slider(1.0);
+            request.joints[0].kind = kind;
+            for body in &mut request.bodies {
+                body.pose.translation = Vec3d::new(20_000.0, -20_000.0, 20_000.0);
+            }
+            if kind == JointKind::Slider {
+                request.bodies[1].pose.translation.z += start;
+            } else {
+                request.bodies[1].pose.rotation = Quat::from_axis_angle(Vec3d::Z, start).unwrap();
+            }
+            let outcome = solve(&request);
+            let SolveOutcome::Converged {
+                poses,
+                remaining_dof,
+                ..
+            } = outcome
+            else {
+                panic!("{kind:?} at {start}: {outcome:?}");
+            };
+            assert_eq!(remaining_dof, 1, "{kind:?} at {start}");
+            request.bodies[1].pose = copy_pose(&poses[1].1);
+            assert!(matches!(
+                solve(&request),
+                SolveOutcome::Converged {
+                    remaining_dof: 1,
+                    ..
+                }
+            ));
+            request.drive.push((request.joints[0].id, 0.5));
+            assert!(matches!(
+                solve(&request),
+                SolveOutcome::Converged {
+                    remaining_dof: 0,
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+#[test]
+fn equality_limits_still_remove_dof_after_motion() {
+    for kind in [JointKind::Slider, JointKind::Revolute] {
+        let mut request = bounded_slider(0.0);
+        request.joints[0].kind = kind;
+        request.bodies[1].pose = if kind == JointKind::Slider {
+            RigidTransform {
+                translation: Vec3d::Z,
+                ..RigidTransform::IDENTITY
+            }
+        } else {
+            RigidTransform {
+                rotation: Quat::from_axis_angle(Vec3d::Z, 1.0).unwrap(),
+                ..RigidTransform::IDENTITY
+            }
+        };
+        let outcome = solve(&request);
+        assert!(
+            matches!(
+                outcome,
+                SolveOutcome::Converged {
+                    remaining_dof: 0,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+    }
+}
+
 fn structural_report(request: &SolveRequest) -> Option<(usize, usize)> {
     let cons = build_constraints(request).unwrap();
     let layout = build_layout(&request.bodies);
