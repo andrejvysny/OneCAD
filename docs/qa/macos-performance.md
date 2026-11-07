@@ -89,3 +89,24 @@ physical presentation. `PreviewDisplayed` means renderer acceptance, and
 `PreviewDrawSubmitted` means a draw was queued. None measures input-to-visible
 latency. Use separately recorded presentation or external observation evidence
 for visible outcomes; do not derive it from these events.
+
+## Admitted CPU ownership regressions
+
+The native-host inventory includes `denied_prepare_preserves_viewport_and_retries_after_release`
+and `three_documents_repeat_unchanged_geometry_sketch_captures_and_undo` under
+`app_logic_tests::display_budget_delivery_tests::capture_pressure_tests`. Run
+them with the required production worker and Metal prerequisites. Retain their
+per-cycle ledger output with the exact source and worker hashes.
+
+These tests saturate the unchanged aggregate ledger, cancel queued preparation
+by invalidating its generation, deliver the actual terminal message through the
+production editor handler, and retry preparation. Repeated unchanged cycles
+must return to exactly the same retained byte count. Separate tab closures
+replace the active document while preparation waits; an explicitly retained
+source must keep its closing owner alive until its final drop. Normal lifecycle
+polling must then release that owner, and stopping all documents must return the
+ledger to zero.
+
+This is admitted allocation accounting and injected cancellation while admission
+waits. It does not measure process RSS, driver memory, physical input, or
+cancellation inside already-running CPU preparation.
