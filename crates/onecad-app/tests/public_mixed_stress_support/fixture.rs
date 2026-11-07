@@ -171,7 +171,7 @@ pub(super) fn write(path: &Path, cover: &Path, lever: &Path, plate: &Path, const
                 parent: None,
                 local: RigidTransform::new(
                     Quat::IDENTITY,
-                    Vec3d::new((i % 5) as f64 * 1000.0, (i / 5) as f64 * 1000.0, 0.0),
+                    Vec3d::new((i % 5) as f64 * 200.0, (i / 5) as f64 * 200.0, 0.0),
                 ),
                 grounded: i == 0,
                 name: format!("Authored source occurrence {i}"),

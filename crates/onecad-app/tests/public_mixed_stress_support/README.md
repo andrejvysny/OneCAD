@@ -1,7 +1,7 @@
 # Public mixed-source assembly stress
 
 `public_mixed_stress.rs` prepares ten distinct definitions with two authored,
-nonoverlapping occurrences each. The grounded first occurrence is the Prusa box.
+nonoverlapping occurrences each on an authored 200 mm grid. The grounded first occurrence is the Prusa box.
 The imported sources are the Prusa box, four Robonine analytic XBF leaves, and
 NIST FTC09 STEP. The native definitions are the
 source-derived Prusa cover and lever, the existing plate with hole, and the fully
@@ -18,6 +18,11 @@ refuse ambiguous rebinding. The failed first prototype and source audit are reta
 as separate negative evidence; they do not qualify a Framework assembly.
 Prusa comparisons use existing source-derived diagnostic tolerances, not proof of
 whole-shape equivalence.
+
+The earlier 1000 mm grid was refused by the unchanged renderer 1/1024 mm
+occurrence-precision guard. The compact layout is a new authored test placement;
+it does not change source geometry, the precision threshold or frozen oracles.
+Native scene admission must run separately from these service checks.
 
 The test counts visible occurrence triangles and edge segments and unique MESH1
 payload bytes against existing limits. It does not construct a `SceneSnapshot`,
