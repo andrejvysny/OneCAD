@@ -1,0 +1,126 @@
+{
+  "sourceSha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+  "sourceProduct": "FW_EXP_1USBC_FRAME_CLIP_BC_229_",
+  "coordinateFrame": "right-handed Z-up, millimeters",
+  "scope": "Source-derived numeric inputs; not a source-equivalence qualification.",
+  "pipes": [
+    {
+      "sourcePatchFace": 110,
+      "sourceCylinderFace": 109,
+      "sourcePlaneFace": 111,
+      "centerMm": [
+        13.5,
+        30.10916730868338,
+        3.920976627276
+      ],
+      "majorUnit": [
+        -0.5547001962276984,
+        0.8320502943361976,
+        -0.0
+      ],
+      "minorUnit": [
+        -0.0,
+        0.0,
+        1.0000000000000002
+      ],
+      "normalUnit": [
+        0.8320502943361976,
+        0.5547001962276984,
+        0.0
+      ],
+      "semiaxesMm": [
+        1.0816653826343816,
+        0.6
+      ],
+      "pathRangeRadians": [
+        2.156580469758751e-12,
+        0.14936698838903525
+      ],
+      "profile": {
+        "centerMm": [
+          12.9,
+          31.00916730867759,
+          3.920976627277294
+        ],
+        "normalUnit": [
+          2.1565804697587505e-12,
+          -3.2348707046173253e-12,
+          1.0
+        ],
+        "xAxisUnit": [
+          0.8320502943361976,
+          0.5547001962276984,
+          0.0
+        ],
+        "yAxisUnit": [
+          -0.5547001962276984,
+          0.8320502943361976,
+          3.887830731672389e-12
+        ],
+        "radiusMm": 0.3
+      },
+      "analyticArcLengthMm": 0.09036116704641982,
+      "analyticVolumeMm3": 0.025549018070654936,
+      "volumeAssertionToleranceMm3": 1e-06
+    },
+    {
+      "sourcePatchFace": 112,
+      "sourceCylinderFace": 103,
+      "sourcePlaneFace": 111,
+      "centerMm": [
+        13.5,
+        30.10916730868338,
+        2.800011423516
+      ],
+      "majorUnit": [
+        -0.5547001962276984,
+        0.8320502943361976,
+        -0.0
+      ],
+      "minorUnit": [
+        -0.0,
+        0.0,
+        1.0000000000000002
+      ],
+      "normalUnit": [
+        0.8320502943361976,
+        0.5547001962276984,
+        0.0
+      ],
+      "semiaxesMm": [
+        1.0816653826343816,
+        0.6
+      ],
+      "pathRangeRadians": [
+        -0.15494271314769836,
+        2.1560531138236046e-12
+      ],
+      "profile": {
+        "centerMm": [
+          12.907187776138223,
+          30.998385644470325,
+          2.7074173241356694
+        ],
+        "normalUnit": [
+          -0.1503478373358844,
+          0.2255217560023765,
+          0.962567122531217
+        ],
+        "xAxisUnit": [
+          0.8320502943361976,
+          0.5547001962276984,
+          0.0
+        ],
+        "yAxisUnit": [
+          -0.5339361717503971,
+          0.8009042576204459,
+          -0.27104341833361867
+        ],
+        "radiusMm": 0.3
+      },
+      "analyticArcLengthMm": 0.09379198268909243,
+      "analyticVolumeMm3": 0.026519058340350645,
+      "volumeAssertionToleranceMm3": 1e-06
+    }
+  ]
+}
