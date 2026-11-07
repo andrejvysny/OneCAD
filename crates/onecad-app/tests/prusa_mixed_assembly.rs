@@ -6,6 +6,8 @@ mod admission;
 mod cover;
 #[path = "prusa_mixed_support/document.rs"]
 mod document;
+#[path = "prusa_mixed_support/history.rs"]
+mod history;
 #[allow(dead_code)]
 #[path = "native_plate_support/host.rs"]
 mod host;
@@ -480,6 +482,7 @@ async fn exercise_shared_edit(
     )
     .await;
     admission::budgeted_translation(h, session, probe, independent.as_slice()).await;
+    history::translation_undo_redo(h, session, independent.as_slice()).await;
     mesh_compare::different(
         "original after independent copy",
         independent.as_slice(),
