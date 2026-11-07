@@ -236,3 +236,30 @@ python fixtures/reference-histories/inspect_framework_surfaces.py \
   fixtures/reference-histories/framework-blend-adjacency.json \
   fixtures/reference-histories/framework-surface-fits.json
 ```
+
+## Framework numeric open-arc inputs
+
+`framework-open-arc-pipes.json` retains source-derived analytic ellipse frames,
+short parameter intervals, circular section frames and analytic tube volumes for
+patches 110 and 112 of the same pinned, named enclosure. The source face indices
+are extraction provenance tied to that exact STEP hash, not runtime topology
+references. The extractor uses only the pinned source and the named-product
+reader; it does not measure OneCAD output.
+
+Reproduce into a separate artifact with the pinned OCP environment above, then
+compare it with the frozen input. Do not overwrite a failing oracle:
+
+```sh
+python fixtures/reference-histories/extract_framework_open_arcs.py \
+  > /private/tmp/framework-open-arc-reproduced.json
+```
+
+The `framework_open_arc_pipes` shared-service test authors numeric
+Sketch/Sketch/Sweep records, edits section radius and interval, exercises
+Undo/Redo, saves, reopens in a separate process and edits again. It checks
+analytic arc length times section area, the curved-tube centroid correction,
+checked Fine mesh bounds, persisted intervals and absence of imported blobs.
+Volume and centroid bounds remain 1e-6 mm³ and 1e-6 mm; the existing Fine mesh
+bound remains 0.05 mm. These checks establish numeric operation-history behavior,
+not interactive sketch authoring, source-patch equivalence, complete enclosure
+reconstruction or physical native-input acceptance.
