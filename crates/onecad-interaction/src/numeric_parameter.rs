@@ -2,7 +2,9 @@
 //! no record is lowered through JSON and no absent optional field is manufactured.
 use onecad_core::{
     document::{
-        record::{ExtrudeMode, HoleType, KnownOperation, OffsetDistanceType, Operation},
+        record::{
+            BooleanMode, ExtrudeMode, HoleType, KnownOperation, OffsetDistanceType, Operation,
+        },
         variables::Scalar,
     },
     expr::Dimension,
@@ -336,6 +338,22 @@ pub(crate) fn validate_operation(operation: &Operation) -> Result<(), String> {
         Operation::Known(KnownOperation::Extrude(p)) => p.validate(),
         Operation::Known(KnownOperation::Revolve(p)) => p.validate(),
         Operation::Known(KnownOperation::Loft(p)) => p.validate(),
+        Operation::Known(KnownOperation::Sweep(p)) => {
+            let profile = p.profile.as_ref().ok_or("Sweep requires a profile")?;
+            let path = p.path_sketch.ok_or("Choose a Sweep path sketch")?;
+            if p.path_edge.is_some()
+                || p.boolean_mode != BooleanMode::NewBody
+                || !p.extra.is_empty()
+                || path == profile.sketch
+                || !matches!(profile.region_identity_version, Some(2 | 3))
+                || profile.region.as_str().is_empty()
+            {
+                return Err(
+                    "Sweep requires a separate sketch path and a current circular region".into(),
+                );
+            }
+            Ok(())
+        }
         Operation::Known(KnownOperation::Gear(p)) => p.validate(),
         Operation::Known(KnownOperation::Chamfer(p)) => p.validate(),
         Operation::Known(KnownOperation::Shell(p)) => p.validate(),

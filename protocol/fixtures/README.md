@@ -139,3 +139,5 @@ named test. (Both lanes used to carry hardcoded lists, which is how
 Planned (per plan M0/M1 co-sign gate): `capabilities`, `cancellation`,
 `malformed_frame`, `chunked_mesh`, `crash_restart`, `execute_plan_prefix_atomic`,
 `needs_repair_symmetric`.
+
+The bounded `sweep_basic.ndjson` fixture uses a V3 circular profile on a closed circular sketch path, with explicit production-shaped XY basis vectors. `sweep_refusal.ndjson` preserves legacy-V1 refusal without implicit first-region selection. These fixtures share the standard prepared/accept head fences.

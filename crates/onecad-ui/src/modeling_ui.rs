@@ -19,6 +19,7 @@ pub(crate) fn editable(op: &Operation) -> bool {
                 KnownOperation::Boolean(_)
                     | KnownOperation::MirrorBody(_)
                     | KnownOperation::Loft(_)
+                    | KnownOperation::Sweep(_)
             )
         )
 }
@@ -102,6 +103,7 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
     };
     let options = match op {
         KnownOperation::Loft(p) => crate::loft_ui::rows(app, rows, tool, p),
+        KnownOperation::Sweep(p) => crate::sweep_ui::rows(app, rows, tool, p),
         KnownOperation::Extrude(p) => extent(rows, p),
         KnownOperation::OffsetFace(p) => face_offset(rows, p),
         KnownOperation::Revolve(p) => {

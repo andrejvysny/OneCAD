@@ -25,6 +25,21 @@ pub fn loft(
     Ok(record(id, step, "Loft", KnownOperation::Loft(params)))
 }
 
+pub fn sweep(profile: SketchRegionRef, id: RecordId, step: u32) -> OperationRecord {
+    record(
+        id,
+        step,
+        "Sweep",
+        KnownOperation::Sweep(SweepParams {
+            profile: Some(profile),
+            path_sketch: None,
+            path_edge: None,
+            boolean_mode: BooleanMode::NewBody,
+            extra: Default::default(),
+        }),
+    )
+}
+
 pub fn shell(refs: Vec<ElementRef>, id: RecordId, step: u32) -> Result<OperationRecord, String> {
     let body = refs
         .first()
@@ -231,4 +246,38 @@ pub fn boolean(bodies: &[BodyId], id: RecordId, step: u32) -> Result<OperationRe
 
 fn record(id: RecordId, step: u32, name: &str, op: KnownOperation) -> OperationRecord {
     OperationRecord::new(id, step, name, Operation::Known(op))
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+    use onecad_core::ids::{RegionId, SketchId};
+
+    #[test]
+    fn sweep_requires_explicit_separate_path_before_preview() {
+        let profile = SketchRegionRef {
+            sketch: SketchId::new(),
+            region: RegionId::new("region"),
+            region_identity_version: Some(3),
+            region_anchor: Some([0.0, 0.0]),
+            extra: Default::default(),
+        };
+        let mut record = sweep(profile.clone(), RecordId::new(), 0);
+        assert!(crate::numeric_parameter::validate_operation(&record.op).is_err());
+        let Operation::Known(KnownOperation::Sweep(params)) = &mut record.op else {
+            panic!("Sweep")
+        };
+        params.path_sketch = Some(profile.sketch);
+        assert!(crate::numeric_parameter::validate_operation(&record.op).is_err());
+        let Operation::Known(KnownOperation::Sweep(params)) = &mut record.op else {
+            panic!("Sweep")
+        };
+        params.path_sketch = Some(SketchId::new());
+        assert!(crate::numeric_parameter::validate_operation(&record.op).is_ok());
+        let Operation::Known(KnownOperation::Sweep(params)) = &mut record.op else {
+            panic!("Sweep")
+        };
+        params.boolean_mode = BooleanMode::Cut;
+        assert!(crate::numeric_parameter::validate_operation(&record.op).is_err());
+    }
 }

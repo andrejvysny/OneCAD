@@ -28,6 +28,7 @@ const TIERS: &[(&str, &str)] = &[
     ("Extrude", "ExtrudeOp.cpp"),
     ("Revolve", "RevolveOp.cpp"),
     ("Loft", "LoftOp.cpp"),
+    ("Sweep", "SweepOp.cpp"),
     ("Fillet", "FilletChamferOp.cpp"),
     ("Chamfer", "FilletChamferOp.cpp"),
     ("Shell", "ShellOp.cpp"),
@@ -164,7 +165,7 @@ fn check_tiers(root: &Path, rows: &[Value], errors: &mut Vec<String>) -> Result<
     Ok(())
 }
 
-fn check_dispatch(root: &Path, rows: &[Value], errors: &mut Vec<String>) -> Result<()> {
+pub(super) fn check_dispatch(root: &Path, rows: &[Value], errors: &mut Vec<String>) -> Result<()> {
     let record = root.join("crates/onecad-core/src/document/record.rs");
     let known = if record.exists() {
         enum_variants(&std::fs::read_to_string(record)?, "KnownOperation", r"\(")?

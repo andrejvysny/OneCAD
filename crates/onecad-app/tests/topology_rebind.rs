@@ -3549,7 +3549,7 @@ async fn plate_top_edge_fillet_survives_commit_and_reopen() {
     const T: f64 = 5.0;
     const R: f64 = 1.0;
 
-    let (body, vol) = {
+    let (body, vol, coarse_volume) = {
         let wm = spawn_worker(bin.clone()).await;
         let mut rt = runtime_over(&wm);
         add_op(&mut rt, sketch_record(&single_rect(sid, 0.0, 0.0, W, D)));
@@ -3594,15 +3594,26 @@ async fn plate_top_edge_fillet_survives_commit_and_reopen() {
             fview.face_count
         );
         // Removed volume of a quarter-round along a 100 mm edge: (1 − π/4)·R²·L.
-        let vol = mesh_volume(&fview, &fmesh);
+        let coarse_volume = mesh_volume(&fview, &fmesh);
+        let fine = rt.get_mesh(body, Lod::Fine, None).await.expect("fine mesh");
+        let fine_view = validate_mesh_blob(&fine).expect("fine filleted MESH1 validates");
+        let vol = mesh_volume(&fine_view, &fine);
+        let exact = exact_mass(&wm, body).await.0;
         let want = W * D * T - (1.0 - std::f64::consts::FRAC_PI_4) * R * R * W;
+        eprintln!(
+            "fillet volume diagnostic: coarse={coarse_volume} fine={vol} brep={exact} expected={want}"
+        );
+        assert!(
+            (exact - want).abs() < 1e-7,
+            "BRep volume must match the analytic fillet"
+        );
         assert!(
             (vol - want).abs() < 0.5,
             "the fillet removed the quarter-round remnant: want ~{want:.3}, got {vol:.3}"
         );
         rt.save(&path, save_meta()).expect("save");
         wm.shutdown().await;
-        (body, vol)
+        (body, vol, coarse_volume)
     };
 
     let wm = spawn_worker(bin).await;
@@ -3617,8 +3628,22 @@ async fn plate_top_edge_fillet_survives_commit_and_reopen() {
     let view = validate_mesh_blob(&mesh).expect("reopened MESH1 validates");
     assert!(view.face_count >= 7, "the fillet is present after reopen");
     assert!(
-        (mesh_volume(&view, &mesh) - vol).abs() < 1e-6,
-        "identical volume after reopen"
+        (mesh_volume(&view, &mesh) - coarse_volume).abs() < 1e-6,
+        "identical coarse-mesh volume after reopen"
+    );
+    let fine = reopened
+        .get_mesh(body, Lod::Fine, None)
+        .await
+        .expect("reopened fine mesh");
+    let fine_view = validate_mesh_blob(&fine).expect("reopened fine MESH1 validates");
+    assert!(
+        (mesh_volume(&fine_view, &fine) - vol).abs() < 1e-6,
+        "identical fine-mesh volume after reopen"
+    );
+    let want = W * D * T - (1.0 - std::f64::consts::FRAC_PI_4) * R * R * W;
+    assert!(
+        (exact_mass(&wm, body).await.0 - want).abs() < 1e-7,
+        "reopened BRep volume must match the analytic fillet"
     );
     wm.shutdown().await;
 }

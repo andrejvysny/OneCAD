@@ -216,6 +216,33 @@ async fn fresh_anchored_hole_survives_plate_width_60_to_70() {
                 && feature.status == onecad_app::dto::FeatureStatus::Ok));
     }
     let expected = 70.0 * 40.0 * 4.0 - std::f64::consts::PI * 9.0 * 4.0;
-    assert!((mesh_volume(&body_mesh(&state).await) - expected).abs() < 1.0);
+    let coarse = body_mesh(&state).await;
+    let fine = state
+        .runtime
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .get_mesh(body_a(), Lod::Fine, None)
+        .await
+        .unwrap();
+    let exact = wm
+        .query_mass_properties(body_a(), "diagnostic".into())
+        .await
+        .unwrap()
+        .volume;
+    eprintln!(
+        "hole volume diagnostic: coarse={} fine={} brep={} expected={expected}",
+        mesh_volume(&coarse),
+        mesh_volume(&fine),
+        exact
+    );
+    let coarse_view = validate_mesh_blob(&coarse).expect("coarse hole MESH1 validates");
+    assert!(coarse_view.triangle_count > 0);
+    assert!(
+        (exact - expected).abs() < 1e-7,
+        "BRep volume must match the analytic hole"
+    );
+    assert!((mesh_volume(&fine) - expected).abs() < 1.0);
     wm.shutdown().await;
 }

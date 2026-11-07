@@ -36,6 +36,7 @@
 #include "ops/PatternOp.h"
 #include "ops/RevolveOp.h"
 #include "ops/LoftOp.h"
+#include "ops/SweepOp.h"
 #include "ops/ShellOp.h"
 #include "protocol/Limits.h"
 #include "session/ClassifyElement.h"
@@ -583,6 +584,7 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     if (op_type == "Boolean") return ops::execute_boolean(octx, op, op_id);
     if (op_type == "Revolve") return ops::execute_revolve(octx, op, op_id);
     if (op_type == "Loft") return ops::execute_loft(octx, op, op_id);
+    if (op_type == "Sweep") return ops::execute_sweep(octx, op, op_id);
     if (op_type == "Fillet") return ops::execute_fillet(octx, op, op_id);
     if (op_type == "Chamfer") return ops::execute_chamfer(octx, op, op_id);
     if (op_type == "Shell") return ops::execute_shell(octx, op, op_id);
@@ -602,8 +604,7 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     }
 
     // SetComponentParams / ReplaceComponent (P2/P3 — in-place edits of
-    // PlaceComponentParams at the Rust layer, no distinct wire op) and
-    // Sweep remains UNSUPPORTED (SCHEMA §8) — Rust freezes the node.
+    // PlaceComponentParams at the Rust layer, no distinct wire op).
     return ops::OpOutcome::unsupported("unsupported opType: " + op_type);
 }
 

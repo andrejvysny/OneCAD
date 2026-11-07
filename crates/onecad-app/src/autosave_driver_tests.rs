@@ -103,16 +103,87 @@ async fn replacement_mutation_consumed_during_retry_is_checkpointed_without_anot
     *driver.runtime.lock().await = Some(replacement);
     driver.tick.send(2).unwrap();
     std::fs::remove_file(blocker).unwrap();
-    let current = tokio::time::timeout(Duration::from_millis(300), driver.events.recv())
-        .await
-        .expect("replacement checkpoint must not restart the maximum-age clock after retry")
-        .unwrap();
+    // Durable file I/O has a separate completion bound. The exact retry and
+    // replacement handoff deadlines are checked below under virtual time.
+    let current = event(&mut driver).await;
     assert!(current.error.is_none());
     assert_ne!(current.document_id, previous.document_id);
     assert_eq!(current.runtime_session, session);
     assert!(current.attempt_id > previous.attempt_id);
     assert!(!Path::new(&previous.path).exists());
     stop(driver).await;
+}
+
+fn failed_event() -> AutosaveEvent {
+    AutosaveEvent {
+        document_id: "old-document".into(),
+        runtime_session: "old-session".into(),
+        document_revision: 1,
+        attempt_id: 1,
+        path: "old-recovery".into(),
+        at_ms: 0,
+        error: Some("injected write failure".into()),
+    }
+}
+
+async fn remains_pending(mut future: std::pin::Pin<&mut impl Future<Output = ()>>) {
+    let outcome = std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await;
+    assert_eq!(outcome, Poll::Pending);
+}
+
+fn simulated_retry_loop(
+    changed: watch::Receiver<u64>,
+    entered: mpsc::UnboundedSender<(u32, Option<String>, tokio::time::Instant)>,
+) -> impl Future<Output = ()> {
+    let mut calls = 0;
+    run_attempt_loop(
+        changed,
+        (
+            Duration::from_secs(1),
+            Duration::from_millis(400),
+            Duration::from_millis(100),
+        ),
+        std::future::pending(),
+        |_| {},
+        move |session| {
+            calls += 1;
+            entered
+                .send((calls, session, tokio::time::Instant::now()))
+                .unwrap();
+            std::future::ready(if calls == 1 {
+                AutosaveAttempt::Failed(failed_event())
+            } else {
+                AutosaveAttempt::Skipped
+            })
+        },
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacement_handoff_starts_at_original_retry_deadline_without_another_tick() {
+    let (tick, changed) = watch::channel(0);
+    let (entered, mut entries) = mpsc::unbounded_channel();
+    let mut running = std::pin::pin!(simulated_retry_loop(changed, entered));
+    tick.send(1).unwrap();
+    remains_pending(running.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(400)).await;
+    remains_pending(running.as_mut()).await;
+    let (_, _, failed_at) = entries.try_recv().unwrap();
+    tick.send(2).unwrap();
+    remains_pending(running.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(99)).await;
+    remains_pending(running.as_mut()).await;
+    assert!(entries.try_recv().is_err());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    remains_pending(running.as_mut()).await;
+    let (second, old_session, retried_at) = entries.try_recv().unwrap();
+    let (third, current_session, current_at) = entries.try_recv().unwrap();
+    assert_eq!((second, old_session.as_deref()), (2, Some("old-session")));
+    assert_eq!((third, current_session), (3, None));
+    assert_eq!(retried_at - failed_at, Duration::from_millis(100));
+    assert_eq!(current_at, retried_at);
+    assert!(current_at - failed_at < Duration::from_millis(300));
+    assert!(entries.try_recv().is_err());
 }
 
 #[tokio::test]

@@ -330,3 +330,6 @@ mod input_repair_delivery_tests;
 
 #[path = "loft_history_delivery_tests.rs"]
 mod loft_history_delivery_tests;
+
+#[path = "sweep_delivery_tests.rs"]
+mod sweep_delivery_tests;

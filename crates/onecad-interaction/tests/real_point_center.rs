@@ -153,14 +153,27 @@ async fn centered(root: &Path) {
     gesture_contracts(&harness).await;
     eprintln!("center: gesture contracts passed");
     close_visit(&harness).await;
-    let finished = api::finish_sketch(
+    let completion = api::finish_sketch_with_completion(
         &harness.state,
         harness.host.clone(),
         sketch_id().to_string(),
     )
     .await
     .unwrap();
+    let regen_expected = completion.regen_expected;
+    let finished = completion.result.unwrap();
     assert_eq!(finished.regions.len(), 1);
+    if regen_expected {
+        harness.settled(&completion.projection).await;
+    }
+    let generation_before = harness
+        .state
+        .runtime
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .persisted_generation();
     let saved = api::save_document(
         &harness.state,
         harness.host.clone(),
@@ -169,7 +182,17 @@ async fn centered(root: &Path) {
     )
     .await
     .unwrap();
-    assert!(saved.clean);
+    let generation_after = harness
+        .state
+        .runtime
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .persisted_generation();
+    eprintln!("center save: regen_expected={regen_expected}, generation={generation_before}->{generation_after}, outcome={saved:?}");
+    assert_eq!(generation_before, generation_after);
+    assert!(saved.clean, "{saved:?}");
     assert!(!harness.projection().await.dirty);
     harness.close().await;
 }

@@ -1318,7 +1318,7 @@ async fn saved_threaded_hole_round_trips_the_block() {
     // The raw container bytes carry the `thread` block verbatim.
     let json = document_json(&doc);
     let parsed: serde_json::Value = serde_json::from_slice(&json).expect("document.json parses");
-    let hole_op = parsed["timeline"]["records"]
+    let hole_op = parsed["rootDefinition"]["timeline"]["records"]
         .as_array()
         .expect("records array")
         .iter()

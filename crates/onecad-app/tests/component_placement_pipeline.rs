@@ -486,7 +486,7 @@ async fn a_mated_preview_equals_its_commit() {
         flipped: false,
         anchor_world_point: anchor,
     });
-    let draft = prepare_component_draft_at(library.path(), &state, req)
+    let draft = prepare_component_draft_at(library.path(), &state, req.clone())
         .await
         .expect("arm the draft");
     let record = place_record(draft.clone());
@@ -537,6 +537,20 @@ async fn a_mated_preview_equals_its_commit() {
     assert_eq!(regen(&state).await.bodies.len(), 1, "plate only");
     let cmds = copy_placement_commands(place_record(draft.clone()), Some(resolved))
         .expect("copy commands at the resolved placement");
+    let before_stale = api::get_projection(&state).await.unwrap();
+    assert!(matches!(
+        api::apply_operation(&state, host(), cmds, None).await,
+        Err(ApiError::StalePreview(_))
+    ));
+    assert_eq!(api::get_projection(&state).await.unwrap(), before_stale);
+    // The prior admission was consumed by the linked commit. A new capture
+    // authorizes the copy; Undo does not revive a consumed source receipt.
+    let fresh = prepare_component_draft_at(library.path(), &state, req)
+        .await
+        .expect("capture current copy source");
+    assert_eq!(fresh.source, draft.source);
+    let cmds = copy_placement_commands(place_record(fresh), previewed.mate_placement)
+        .expect("fresh copy commands at the same resolved placement");
     api::apply_operation(&state, host(), cmds, None)
         .await
         .expect("commit copy");
@@ -852,8 +866,14 @@ async fn a_cancelled_draft_leaves_history_and_the_saved_file_untouched() {
     let sha = draft.source.blob_ref().expect("baked").sha256.to_string();
     {
         let guard = state.runtime.lock().await;
-        assert!(guard.as_ref().unwrap().import_blob_shas().contains(&sha));
+        assert!(!guard.as_ref().unwrap().import_blob_shas().contains(&sha));
     }
+    assert!(onecad_app::library::captured_component_draft_bytes(&state) > 0);
+    onecad_app::library::clear_component_draft_capture(&state);
+    assert_eq!(
+        onecad_app::library::captured_component_draft_bytes(&state),
+        0
+    );
     let after = api::get_projection(&state).await.unwrap();
     assert_eq!(after.revision, before.revision);
     assert_eq!(after.undo_depth, before.undo_depth);

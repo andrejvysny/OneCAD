@@ -8,6 +8,7 @@ use onecad_core::{
 
 #[derive(Clone, Debug)]
 pub enum ModelingOptions {
+    SweepPath(Option<onecad_core::ids::SketchId>),
     Loft {
         profiles: Vec<onecad_core::document::refs::SketchRegionRef>,
         is_ruled: bool,
@@ -138,6 +139,7 @@ fn apply(operation: &mut Operation, options: ModelingOptions) -> Result<(), Stri
         return Err("Unknown operation".into());
     };
     match (op, options) {
+        (KnownOperation::Sweep(p), ModelingOptions::SweepPath(path)) => p.path_sketch = path,
         (KnownOperation::Loft(p), ModelingOptions::Loft { profiles, is_ruled }) => {
             p.profiles = profiles;
             p.is_ruled = is_ruled;
