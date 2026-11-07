@@ -168,6 +168,19 @@ bool seed_profile_sketch(Session& session, const Envelope& req, const json& op,
     params["sketchId"] = *sketch_id;
     job.sketches.emplace_back(*sketch_id, std::move(params));
     last_sketch_id = *sketch_id;
+    if (op.value("opType", std::string{}) != "Sweep" || !op.contains("params") ||
+        !op["params"].contains("pathSketchId") || !op["params"]["pathSketchId"].is_string())
+        return true;
+    const std::string path_id = op["params"]["pathSketchId"].get<std::string>();
+    if (path_id.empty() || path_id == *sketch_id) return true;
+    const auto path = session.sketches().snapshot(path_id);
+    if (!path) {
+        error = err(req, "REF_UNRESOLVED", "PreviewOp: path sketch not found: " + path_id);
+        return false;
+    }
+    json path_params = path->wire_args;
+    path_params["sketchId"] = path_id;
+    job.sketches.emplace_back(path_id, std::move(path_params));
     return true;
 }
 

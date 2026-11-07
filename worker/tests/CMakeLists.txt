@@ -733,6 +733,12 @@ add_test(NAME canonical_loft_basic COMMAND worker_harness
 add_test(NAME canonical_loft_refusal COMMAND worker_harness
     --worker $<TARGET_FILE:onecad-worker>
     --fixture ${PROTOCOL_FIXTURES}/loft_refusal.ndjson)
+add_test(NAME canonical_sweep_basic COMMAND worker_harness
+    --worker $<TARGET_FILE:onecad-worker>
+    --fixture ${PROTOCOL_FIXTURES}/sweep_basic.ndjson)
+add_test(NAME canonical_sweep_refusal COMMAND worker_harness
+    --worker $<TARGET_FILE:onecad-worker>
+    --fixture ${PROTOCOL_FIXTURES}/sweep_refusal.ndjson)
 add_test(
     NAME canonical_hello
     COMMAND worker_harness
@@ -1389,3 +1395,7 @@ add_test(NAME source_ledger COMMAND test_source_ledger)
 add_executable(test_source_budget_scale test_source_budget_scale.cpp)
 target_link_libraries(test_source_budget_scale PRIVATE worker_core)
 add_test(NAME source_budget_scale COMMAND test_source_budget_scale)
+
+add_executable(test_sweep test_sweep.cpp)
+target_link_libraries(test_sweep PRIVATE worker_core)
+add_test(NAME sweep COMMAND test_sweep)

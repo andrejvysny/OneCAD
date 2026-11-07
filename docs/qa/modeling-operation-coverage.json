@@ -428,17 +428,17 @@
     },
     {
       "operation": "Sweep",
-      "mode": "all",
-      "supportStatus": "unsupported",
-      "cppTest": "",
-      "rustRealWorkerTest": "",
+      "mode": "circular section on one closed analytic sketch path",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_sweep.cpp",
+      "rustRealWorkerTest": "crates/onecad-app/tests/sweep_ops.rs",
       "frontendTest": "",
       "playwrightTest": "",
       "corpusCase": "",
       "kernelbenchSuite": "",
-      "ciJob": "",
-      "notes": "Out of roadmap scope.",
-      "uiExposure": "unsupported"
+      "ciJob": "worker-8-0-1; rust-8-0-1",
+      "notes": "Bounded kernel subset: analytic independent volume/support points, named/custom planes, refusal and preview/prepared fencing; canonical_sweep_basic/refusal fixtures and typed lifecycle. Native GUI and general Sweep acceptance remain separate gates.",
+      "uiExposure": "hidden"
     },
     {
       "operation": "PlaceComponent",

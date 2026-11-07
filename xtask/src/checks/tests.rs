@@ -30,6 +30,41 @@ fn coverage_failure(mut manifest: Value, mutate: impl FnOnce(&mut Value), expect
     );
 }
 
+fn supported_operation_without_dispatch_is_rejected() {
+    // Keep the missing-dispatch negative control even when all production
+    // operations have dispatch arms; a real operation must not stay unsupported
+    // merely to serve as the validator's fixture.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let record = root.join("crates/onecad-core/src/document/record.rs");
+    let plan = root.join("worker/src/session/PlanExecutor.cpp");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+    std::fs::write(
+        record,
+        "pub enum KnownOperation {\n    Sweep(()),\n    Sketch(()),\n}\n",
+    )
+    .unwrap();
+    std::fs::write(plan, "if (op_type == \"Sketch\") {}").unwrap();
+    let rows = [json!({"operation":"Sweep", "mode":"bounded", "supportStatus":"supported"})];
+    let mut errors = Vec::new();
+    contracts::check_dispatch(root, &rows, &mut errors).unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("worker has no Sweep dispatch arm")),
+        "{errors:?}"
+    );
+    std::fs::write(
+        root.join("worker/src/session/PlanExecutor.cpp"),
+        "if (op_type == \"Sketch\") {} else if (op_type == \"Sweep\") {}",
+    )
+    .unwrap();
+    errors.clear();
+    contracts::check_dispatch(root, &rows, &mut errors).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 fn contract_failure(mutate: impl FnOnce(&mut Value), expected: &str) {
     let mut manifest = contracts_manifest();
     let coverage = coverage_manifest();
@@ -256,19 +291,7 @@ fn modeling_contracts_negative_controls() {
             expected,
         );
     }
-    contract_failure(
-        |m| {
-            let row = m["rows"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|r| r["operation"] == "Sweep")
-                .unwrap();
-            row["supportStatus"] = json!("supported");
-            row["uiExposure"] = json!("exposed");
-        },
-        "worker has no Sweep dispatch arm",
-    );
+    supported_operation_without_dispatch_is_rejected();
     contract_failure(
         |m| {
             m["rows"][0]["authoritativeHistory"] = json!("Deferred");

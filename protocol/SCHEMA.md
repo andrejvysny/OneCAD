@@ -1158,12 +1158,12 @@ Each op in `ExecutePlan.ops` is:
 `opType` ∈ `Sketch` | `Extrude` | `Revolve` | `Fillet` | `Chamfer` | `Boolean`
 | `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` | `ImportStep`
 | `TransformBody` | `Hole` | `OffsetFace` | `PlaceComponent` | `DetachComponent`
-| `Gear` | `Loft`
+| `Gear` | `Loft` | `Sweep`
 (the M6a breadth ops, the 2026-08-02 `ImportStep`/`TransformBody`, the
 Component Library ops, and the 2026-08-14 `Gear` generator extend the original
 vertical slice — see the [Changelog](#14-changelog)).
-`Loft` supports the bounded solid NewBody contract below; `Sweep` remains
-**`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values
+`Loft` and `Sweep` support only their bounded solid NewBody contracts below;
+unsupported modes refuse with **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values
 keep OneCAD-CPP `operationTypeName` spelling (PascalCase). Spec §3.2/§3.3's
 `SetComponentParams`/`ReplaceComponent` are NOT `opType` values at all — both
 are in-place edits of `PlaceComponent`'s own params at the Rust layer (see
@@ -1890,6 +1890,65 @@ together. This is additive; old readers may continue to use the legacy pair.
   Touching the axis (an edge or vertex on it) is legal — it makes the degenerate
   pole edges of a shaft or a sphere. Pinned by
   `worker/tests/test_commit_tier_validation.cpp`.
+
+**Sweep** (`op.sweep`) — bounded circular section on one closed analytic sketch path.
+
+```json
+// inputs: [] — sketch-region references are not semantic body references
+{
+  "sketchId": "section",
+  "regionId": "r_0123456789abcdef",
+  "regionIdentityVersion": 3,
+  "regionAnchor": [0.0, 0.0],
+  "pathSketchId": "path",
+  "booleanMode": "NewBody"
+}
+```
+
+- The section requires an explicit nonempty sketch and region identifier, with
+  `regionIdentityVersion` 2 or 3. The shared exact-region/optional-anchor binding
+  rules apply. Missing or legacy V1 region identity refuses with `OP_FAILED`;
+  persisted records are not silently upgraded or rebound to the first region.
+  Rust flattens the typed `SweepParams.profile` into these wire keys.
+- The selected section must be one closed circular edge without holes. The path
+  sketch must contain exactly one non-construction Circle or Ellipse, plus
+  optional points. It must produce one closed analytic edge. Open paths, chains,
+  body-edge paths, splines, holes, extra parameters, nonempty semantic `inputs`,
+  Boolean modes other than NewBody, and authored twist/scale/orientation options
+  are unsupported. No inferred conversion or approximation substitutes for them.
+- Both sketches use finite rigid right-handed frames. Custom frames require
+  origin, xAxis, yAxis and normal, with unit and orthogonality drift at most 1e-8.
+  Named XY/XZ/YZ planes accept either the legacy absent basis or all four vectors
+  matching their exact shared preset; partial or inconsistent bases refuse
+  rather than being ignored. For a circular path, the authored section center
+  chooses the radial seam: the worker re-expresses the same exact circle with
+  that radial axis and an untrimmed full edge. The center must lie on that circle
+  within shared authoring resolution. This avoids OCCT's arbitrary circle-axis
+  default changing the meaning under a rigid transform. An ellipse currently
+  requires its positive-major-axis start; arbitrary ellipse seams are unsupported.
+  The section normal must be parallel or antiparallel to the tangent at the
+  admitted seam within `Precision::Angular()`.
+- With path major/minor radii a >= b and section radius r, all radii must be
+  finite and exceed authoring resolution. Require r + resolution < b*b/a to
+  exclude the path's local curvature singularity. This is a bounded geometric
+  admission rule, not general self-intersection or contact simulation.
+- Construction uses the fixed Frenet mode of `BRepOffsetAPI_MakePipeShell`,
+  with circular section and no user twist/scale. Its approximation controls are
+  1e-7 mm positional/boundary and 1e-2 radians angular; these do not relax shared
+  authoring or publication precision. Failure to close a valid single outward
+  solid refuses. Shared Tier B commit/Tier A interactive-preview publication,
+  checked MESH1, existing resource caps and cancellation remain mandatory.
+- Missing finalized sketches refuse with `REF_UNRESOLVED`. Malformed/nonfinite
+  data, mismatched frames, curvature violations and failed construction refuse
+  with `OP_FAILED`. Unsupported modes refuse with `UNSUPPORTED`. An empty legacy
+  Sweep payload remains unsupported. No refused operation publishes body events
+  or topology claims. ExecutePlan prepares privately; AcceptPrepared and preview
+  retain the existing session/epoch/base/snapshot fences.
+- NewBody creates deterministic `body_<opId>` with certified births only. No
+  profile/path-to-output face correspondence is inferred. Missing downstream
+  identity proof follows the existing repair contract; editable sketch inputs
+  do not establish arbitrary surface lineage. General Sweep and spline/native
+  authoring remain separate ONECAD-386/427 acceptance work.
 
 **Loft** (`op.loft`) — bounded solid NewBody through ordered sketch regions.
 
@@ -5857,7 +5916,7 @@ requires connection teardown; changing the input is required before retrying.
 | Recoverable op failure | `OP_FAILED` | scratch only — **session intact** | Rust discards scratch; user edits and retries |
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
-| Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped op `opType:"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
+| Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust reports the unsupported mode explicitly; supported bounded operation contracts are listed in [§7.3](#73-op-payload-schemas-vertical-slice) |
 | Stale snapshot on a fenced read (`PreviewOp`, `PreviewPlan` — snapshot or epoch, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ProjectToSketchPlane`, `ExtractPrismProfile`; and, when the OPTIONAL `snapshotId` is sent, `Tessellate`, `ExportGeometry`, `ExportStep`, `ExportStl`, `ExportObj`) | `STALE_PREVIEW` | none — head untouched, nothing written | caller re-picks / re-previews / re-reads the head once and re-issues against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |

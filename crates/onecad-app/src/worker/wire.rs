@@ -529,9 +529,9 @@ fn strip_chamfer_reference_face_refs(operation: &Operation, params: &mut Value) 
 /// are untouched.
 ///
 /// **Sweep note:** this also fires on a `Sweep` op's `profile` (it has the same
-/// `SketchRegionRef` shape). Sweep has no worker handler yet; when one lands it MUST
-/// read the lifted top-level `params.sketchId`/`params.regionId` (as Extrude/Revolve
-/// do), NOT a nested `params.profile`, which this lift removes.
+/// `SketchRegionRef` shape). Its bounded worker handler reads the lifted
+/// `params.sketchId`/`params.regionId`, requires identity version 2 or 3, and
+/// refuses legacy first-region lookup. It never consumes nested `params.profile`.
 fn lift_profile_to_params(params: &mut Value) {
     let Some(map) = params.as_object_mut() else {
         return;
@@ -7567,7 +7567,7 @@ mod body_wire_tests {
     use super::*;
     use onecad_core::document::record::{
         BooleanMode, BooleanOp, BooleanParams, DeterminismSettings, ExtrudeParams, FilletParams,
-        OperationInputs, RevolveParams,
+        OperationInputs, RevolveParams, SweepParams,
     };
     use onecad_core::document::refs::{AxisRef, ElementKind, ElementRef, Extra, PrimaryRef};
     use onecad_core::document::variables::Scalar;
@@ -8039,6 +8039,45 @@ mod body_wire_tests {
             err.contains("distance2") && err.contains("angleDeg"),
             "the refusal names BOTH fields: {err}"
         );
+    }
+
+    #[test]
+    fn sweep_commit_and_preview_preserve_explicit_profile_path_and_legacy_version() {
+        use onecad_core::document::refs::SketchRegionRef;
+        use onecad_core::ids::{RegionId, SketchId};
+
+        for version in [None, Some(2), Some(3)] {
+            let sketch = SketchId(Uuid::from_u128(0x5c));
+            let path = SketchId(Uuid::from_u128(0x5d));
+            let operation = Operation::Known(KnownOperation::Sweep(SweepParams {
+                profile: Some(SketchRegionRef {
+                    sketch,
+                    region: RegionId::new("r_0123456789abcdef"),
+                    region_identity_version: version,
+                    region_anchor: Some([0.25, -0.5]),
+                    extra: Default::default(),
+                }),
+                path_sketch: Some(path),
+                path_edge: None,
+                boolean_mode: BooleanMode::NewBody,
+                extra: Default::default(),
+            }));
+            let planned = planned(operation.clone(), operation.derive_inputs());
+            let commit = wire_op(&planned);
+            let preview = preview_wire_op(&operation, commit["opId"].as_str().unwrap());
+            assert_eq!(commit["params"], preview["params"]);
+            assert_eq!(commit["inputs"], json!([]));
+            assert_eq!(commit["params"]["sketchId"], sketch.to_string());
+            assert_eq!(commit["params"]["pathSketchId"], path.to_string());
+            assert_eq!(commit["params"]["regionId"], "r_0123456789abcdef");
+            assert_eq!(commit["params"]["regionAnchor"], json!([0.25, -0.5]));
+            assert!(commit["params"].get("profile").is_none());
+            assert!(commit["params"].get("pathEdgeId").is_none());
+            assert_eq!(
+                commit["params"].get("regionIdentityVersion"),
+                version.map(|v| json!(v)).as_ref()
+            );
+        }
     }
 
     #[test]
