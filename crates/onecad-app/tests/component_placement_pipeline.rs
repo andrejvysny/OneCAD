@@ -55,6 +55,9 @@ use onecad_library::tables::Iso4762Table;
 
 const SCREW: &str = "onecad.std.iso4762";
 
+#[path = "component_placement_pipeline/snapshot.rs"]
+mod snapshot_transactions;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Harness
 // ─────────────────────────────────────────────────────────────────────────────
