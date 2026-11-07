@@ -91,6 +91,11 @@ public:
     // starts; `final_shape` is the body they must land on when it ends.
     ComposedHistory(const TopoDS_Shape& predecessor, const TopoDS_Shape& final_shape);
 
+    // Multiple declared inputs share one query domain. This includes Boolean
+    // tools used by participation checks, never intermediate algorithm outputs.
+    ComposedHistory(const std::vector<TopoDS_Shape>& predecessors,
+                    const TopoDS_Shape& final_shape);
+
     // Append one stage. Order is the execution order of the chain.
     void add_stage(const occ::handle<BRepTools_History>& stage);
 

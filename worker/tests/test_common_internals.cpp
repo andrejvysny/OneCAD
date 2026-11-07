@@ -34,7 +34,7 @@
 #include "kernel/validation/ShapeAudit.h"
 #include "nlohmann/json.hpp"
 #include "ops/BooleanOp.h"
-#include "ops/CommonInternals.h"
+#include "ops/BooleanInternals.h"
 #include "ops/OpCommon.h"
 #include "session/BodyStore.h"
 #include "session/ShapeMetrics.h"
@@ -153,7 +153,7 @@ void test_cancelled_normalization() {
     const auto history = common.history;
     onecad::CancelToken cancel;
     cancel.cancel();
-    check(!ops::normalize_common_internals(common.target, common.result.shape, common.history, &cancel),
+    check(!ops::normalize_boolean_internals(common.target, common.result.shape, common.history, &cancel),
           "cancelled normalization refused");
     check(serialize(common.result.shape) == before && common.history == history,
           "cancelled normalization retains shape and history");
@@ -169,7 +169,7 @@ void test_raw_normalization() {
     check(!initial.publishable() && initial.evidence.open_edge_count == 3 &&
               initial.evidence.self_interference_count == 0, "raw Common has three open edges and no self interference");
     const double volume = onecad::session::shape_volume(raw);
-    check(ops::normalize_common_internals(common.target, common.result.shape, common.history), "normalize Common");
+    check(ops::normalize_boolean_internals(common.target, common.result.shape, common.history), "normalize Common");
     const auto final = strict(common, common.result.shape);
     check(final.publishable() && final.evidence.solid_count == 1 && final.evidence.open_edge_count == 0 &&
               final.evidence.self_interference_count == 0, "normalized Common passes unchanged strict policy");
@@ -188,8 +188,8 @@ void test_raw_normalization() {
 void test_repeatable() {
     Common a;
     Common b;
-    check(ops::normalize_common_internals(a.target, a.result.shape, a.history), "first normalization");
-    check(ops::normalize_common_internals(b.target, b.result.shape, b.history), "second normalization");
+    check(ops::normalize_boolean_internals(a.target, a.result.shape, a.history), "first normalization");
+    check(ops::normalize_boolean_internals(b.target, b.result.shape, b.history), "second normalization");
     check(serialize(a.result.shape) == serialize(b.result.shape), "deterministic final BRep");
     const double volume = onecad::session::shape_volume(a.result.shape);
     check(std::abs(volume - 0.025549018062697226) < 1e-9, "captured Common material regression");
@@ -210,7 +210,7 @@ void test_located_and_reversed() {
         const double volume = onecad::session::shape_volume(transformed);
         TopoDS_Shape retained = transformed;
         auto history = common.history;
-        check(ops::normalize_common_internals(common.target, transformed, history),
+        check(ops::normalize_boolean_internals(common.target, transformed, history),
               "located or reversed raw result normalizes");
         check(serialize(retained) == before, "located or reversed predecessor remains unchanged");
         check(std::abs(onecad::session::shape_volume(transformed) - volume) < 1e-9,
@@ -223,7 +223,7 @@ void test_refusals() {
     TopoDS_Shape box = history->Shape();
     const auto original_history = history;
     const std::string original = serialize(box);
-    check(!ops::normalize_common_internals(box, box, history), "no internals unchanged");
+    check(!ops::normalize_boolean_internals(box, box, history), "no internals unchanged");
     check(serialize(box) == original && history == original_history, "no-op retains shape and history");
     for (const auto orientation : {TopAbs_INTERNAL, TopAbs_EXTERNAL}) {
         BRep_Builder builder;
@@ -238,7 +238,7 @@ void test_refusals() {
         const std::string before = serialize(result);
         auto candidate_history = box_history();
         const auto saved_history = candidate_history;
-        check(!ops::normalize_common_internals(box, result, candidate_history), "unsupported orientation refused");
+        check(!ops::normalize_boolean_internals(box, result, candidate_history), "unsupported orientation refused");
         check(serialize(result) == before && candidate_history == saved_history, "refusal retains shape and history");
     }
 }
@@ -260,7 +260,7 @@ void test_shared_edge_occurrences() {
     TopoDS_Shape result = compound;
     TopTools_IndexedMapOfShape before, after;
     TopExp::MapShapes(box, TopAbs_EDGE, before);
-    check(ops::normalize_common_internals(box, result, history), "remove duplicate internal use");
+    check(ops::normalize_boolean_internals(box, result, history), "remove duplicate internal use");
     TopExp::MapShapes(result, TopAbs_EDGE, after);
     check(before.Extent() == after.Extent(), "external edge use survives");
     check(std::abs(onecad::session::shape_volume(result) - 1.0) < 1e-9, "external boundary survives");
@@ -358,7 +358,7 @@ void verify_tracked(const Tracked& tracked, const Fixture& fixture, const ops::O
 
 void test_tracked_execute(Common& reference, bool normalize) {
     auto raw_history = reference.history;
-    const bool changed = ops::normalize_common_internals(reference.target, reference.result.shape, reference.history);
+    const bool changed = ops::normalize_boolean_internals(reference.target, reference.result.shape, reference.history);
     check(changed == normalize, "expected normalization policy");
     Fixture fixture;
     fixture.bodies.create("target", "seed_target", reference.target);

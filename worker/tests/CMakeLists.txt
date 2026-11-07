@@ -1407,3 +1407,7 @@ add_test(NAME source_budget_scale COMMAND test_source_budget_scale)
 add_executable(test_sweep test_sweep.cpp)
 target_link_libraries(test_sweep PRIVATE worker_core)
 add_test(NAME sweep COMMAND test_sweep)
+
+add_executable(test_union_internals test_union_internals.cpp)
+target_link_libraries(test_union_internals PRIVATE worker_core)
+add_test(NAME union_internals COMMAND test_union_internals)

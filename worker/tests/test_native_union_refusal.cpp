@@ -144,18 +144,16 @@ void test_execute(bool keep) {
     }
     const auto outcome = fixture.run(keep);
     const auto diagnostics = json(outcome.diagnostics);
-    check(outcome.status == ops::OpOutcome::Status::Failed && outcome.error_code == "GEOMETRY_INVALID",
+    check(outcome.status == ops::OpOutcome::Status::Failed && outcome.error_code == "OP_FAILED",
           "array Union is refused: " + diagnostics.dump());
     check(!outcome.diagnostics.empty(), "refusal carries diagnostics");
     if (!outcome.diagnostics.empty()) {
         const auto& item = outcome.diagnostics.back();
-        const auto evidence = item.value("evidence", json::object());
-        check(item.value("code", "") == "GEOMETRY_INVALID" &&
-                  item.value("reasonCode", "") == "PUBLICATION_OPEN_MANIFOLD" &&
-                  item.value("stage", "") == "publication" &&
-                  evidence.value("openEdgeCount", -1) == 6 &&
-                  evidence.value("selfInterferenceCount", -1) == 1,
-              "production refusal preserves raw publication evidence: " + diagnostics.dump());
+        const auto evidence = item.value("evidence", json::object()).value("boolean", json::object());
+        check(item.value("code", "") == "BOOLEAN_TOOL_NO_EFFECT" &&
+                  evidence.value("noEffectToolBodyId", "") == "tool-2" &&
+                  evidence.value("toolIndex", -1) == 1 && evidence.value("keepTools", !keep) == keep,
+              "normalized refusal preserves original participation evidence: " + diagnostics.dump());
     }
     check(outcome.body_events.empty() && outcome.delta.empty() && outcome.needs_repair.empty(),
           "refusal emits no lifecycle or partition changes");

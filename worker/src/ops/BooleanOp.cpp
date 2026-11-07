@@ -14,7 +14,7 @@
 #include "modeling/BooleanMode.h"
 #include "kernel/validation/GeometryPrecision.h"
 #include "ops/BooleanParticipation.h"
-#include "ops/CommonInternals.h"
+#include "ops/BooleanInternals.h"
 #include "ops/OpCommon.h"
 
 namespace onecad::ops {
@@ -251,12 +251,25 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
     policy.allow_empty_lifecycle = true;
     kernel::validation::PublicationDecision decision =
         publication_decision(br.shape, policy, ctx.cancel);
-    if (*mode == app::BooleanMode::Intersect &&
+    if ((*mode == app::BooleanMode::Intersect || *mode == app::BooleanMode::Add) &&
         decision.reason_code == "PUBLICATION_OPEN_MANIFOLD" &&
         decision.evidence.manifold_checked && decision.evidence.open_edge_count > 0 &&
         decision.evidence.non_manifold_edge_count == 0 &&
-        normalize_common_internals(old_target, br.shape, builder, ctx.cancel)) {
+        normalize_boolean_internals(old_target, br.shape, builder, ctx.cancel,
+                                    *mode == app::BooleanMode::Add ? tool_shapes
+                                                                  : std::vector<TopoDS_Shape>{})) {
         decision = publication_decision(br.shape, policy, ctx.cancel);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+        if (*mode == app::BooleanMode::Add) {
+            auto refusal = tools.array_form
+                               ? union_disjoint_policy(*builder, old_target, br.shape, tool_shapes,
+                                                       tools, target_id)
+                               : boolean_result_policy(*mode, old_target, br.shape, "Boolean",
+                                                       target_id, "BOOLEAN_DISJOINT_RESULT",
+                                                       "BOOLEAN_EMPTY_RESULT", evidence_tools);
+            if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+            if (refusal) return *refusal;
+        }
     }
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable() && !decision.lifecycle_only()) {

@@ -7,8 +7,14 @@
 namespace onecad::elementmap {
 
 ComposedHistory::ComposedHistory(const TopoDS_Shape& predecessor,
+                                 const TopoDS_Shape& final_shape)
+    : ComposedHistory(std::vector<TopoDS_Shape>{predecessor}, final_shape) {}
+
+ComposedHistory::ComposedHistory(const std::vector<TopoDS_Shape>& predecessors,
                                  const TopoDS_Shape& final_shape) {
-    if (!predecessor.IsNull()) TopExp::MapShapes(predecessor, predecessor_subs_);
+    for (const TopoDS_Shape& predecessor : predecessors) {
+        if (!predecessor.IsNull()) TopExp::MapShapes(predecessor, predecessor_subs_);
+    }
     if (!final_shape.IsNull()) TopExp::MapShapes(final_shape, final_subs_);
     myShape = final_shape;
     Done();

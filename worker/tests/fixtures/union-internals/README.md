@@ -25,18 +25,26 @@ scope are documented in `fixtures/reference-oracles/framework-parasolid-measurem
 | input-8.brep | `040925891748f6ca8404220fa0832c4feaffb091bc968e209715e1590f2d802d` |
 | input-9.brep | `bc17c8ca3a2a7f06a176177e440c8b977b286db2769bebf81579d3ccf5ccc611` |
 
-## Refusal regression scope
+## Regression scope
 
 The raw nine-tool Union has six open edge uses and one self-interference. Its
 original Boolean history independently identifies tool 2 (index 1) as having no
-unique contribution. The production array operation refuses with
-`GEOMETRY_INVALID` / `PUBLICATION_OPEN_MANIFOLD` before checking tool effect, for
-both retained and consumed tools. The regression verifies all ten bodies and
-tracked references remain unchanged.
+unique contribution. Before Union auxiliary normalization, the production
+operation refused `PUBLICATION_OPEN_MANIFOLD`. After boundary-preserving cleanup
+and unchanged geometry validation, it refuses `BOOLEAN_TOOL_NO_EFFECT` for
+tool 2. Both retained and consumed cases preserve all ten bodies and tracked
+body/key/shape identities.
 
-Private topology cleanup removed open uses and self-interference, but the
-existing tool-effect guard then refused tool 2. That is not evidence that
-removing this tool preserves geometry. A separate single-solid diagnostic
-enabled a sliver-face limit absent from production Boolean policy. No
-normalization extension or tool-effect policy change is admitted by this test.
-These experiments do not qualify a full native enclosure.
+The positive test explicitly selects operands 1 and 3 through 9 as its eight
+tools. All eight have a unique contribution under the original Boolean history;
+their raw result has five open uses. Its normalized candidate must satisfy the
+unchanged production Boolean policy and preserve raw face participation exactly.
+Actual keep/consume, tracked source face/edge/vertex lineage, positive deletion
+evidence, cancellation, unaffected references and accepted raw-path parity are
+verified. This input selection does not prove operand 2 redundant, does not
+replace the authored nine-tool Framework recipe, and does not establish source
+equivalence.
+
+A separate private single-solid diagnostic enabled a sliver-face limit absent
+from production Boolean policy. No production tolerance, tool-effect guard,
+resource cap or oracle was changed to admit these diagnostic inputs.
