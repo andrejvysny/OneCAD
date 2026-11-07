@@ -9,6 +9,10 @@ add_executable(test_common_internals test_common_internals.cpp)
 target_link_libraries(test_common_internals PRIVATE worker_core)
 add_test(NAME common_internals COMMAND test_common_internals)
 
+add_executable(test_native_union_refusal test_native_union_refusal.cpp)
+target_link_libraries(test_native_union_refusal PRIVATE worker_core)
+add_test(NAME native_union_refusal COMMAND test_native_union_refusal)
+
 # --- W-WP3b: NORMATIVE region-id cross-check vs the Rust reference impl ---
 add_executable(test_region_id test_region_id.cpp)
 target_link_libraries(test_region_id PRIVATE worker_core)
