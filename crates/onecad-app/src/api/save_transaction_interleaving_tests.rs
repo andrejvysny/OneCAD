@@ -311,3 +311,104 @@ async fn cancelled_caller_cannot_adopt_or_clear_same_uuid_replacement() {
         .is_ok());
     drop(lane);
 }
+
+#[tokio::test]
+async fn older_payload_preserves_newer_autosave_until_latest_save() {
+    use std::{future::Future, task::Poll};
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, _, _) = pending_copy(area.path(), false).await;
+    let (payload, id, session, old_generation, new_generation) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_variable(rt, "old_payload", 17.0);
+        let id = rt.document_uuid();
+        let session = rt.runtime_session();
+        let old_generation = rt.persisted_generation();
+        let payload = rt.build_save_payload(save_meta(), SaveCaches::none());
+        add_variable(rt, "new_autosave", 42.0);
+        (
+            payload,
+            id,
+            session,
+            old_generation,
+            rt.persisted_generation(),
+        )
+    };
+    assert!(new_generation > old_generation);
+    let target = area.path().join("older-payload.onecad");
+    let lane = state.persistence.lock().await;
+    let mut autosave = Box::pin(crate::autosave::autosave_current(
+        &state.runtime,
+        area.path(),
+        &state.persistence,
+    ));
+    let mut old_save = Box::pin(crate::autosave::write_save_payload_claimed(
+        &state.persistence,
+        &target,
+        payload,
+        Some(area.path()),
+        id,
+        None,
+        Some((session.clone(), old_generation)),
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(matches!(autosave.as_mut().poll(cx), Poll::Pending));
+        assert!(matches!(old_save.as_mut().poll(cx), Poll::Pending));
+        Poll::Ready(())
+    })
+    .await;
+    drop(lane);
+    assert!(autosave.await.is_some());
+    let recovery = onecad_core::io::recovery::autosave_path(area.path(), id);
+    let marker_path = onecad_core::io::recovery::marker_path(area.path(), id);
+    let recovery_bytes = std::fs::read(&recovery).unwrap();
+    let marker_bytes = std::fs::read(&marker_path).unwrap();
+    let marker: SessionMarker = serde_json::from_slice(&marker_bytes).unwrap();
+    assert_eq!(marker.runtime_session.as_deref(), Some(session.as_str()));
+    assert_eq!(marker.persisted_generation, Some(new_generation));
+    assert!(old_save.await.unwrap().is_none());
+    assert_eq!(std::fs::read(&recovery).unwrap(), recovery_bytes);
+    assert_eq!(std::fs::read(&marker_path).unwrap(), marker_bytes);
+    let old = ContainerReader::open(&target).unwrap();
+    let old_names: Vec<_> = old
+        .document()
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), v.value.value))
+        .collect();
+    assert_eq!(old_names, [("old_payload", 17.0)]);
+    let newer = ContainerReader::open(&recovery).unwrap();
+    let new_names: Vec<_> = newer
+        .document()
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), v.value.value))
+        .collect();
+    assert_eq!(new_names, [("old_payload", 17.0), ("new_autosave", 42.0)]);
+    assert!(state.runtime.lock().await.as_ref().unwrap().is_dirty());
+    assert!(
+        save_document(
+            &state,
+            host,
+            Some(target.to_string_lossy().into_owned()),
+            None
+        )
+        .await
+        .unwrap()
+        .clean
+    );
+    let latest = ContainerReader::open(&target).unwrap();
+    let latest_names: Vec<_> = latest
+        .document()
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), v.value.value))
+        .collect();
+    assert_eq!(
+        latest_names,
+        [("old_payload", 17.0), ("new_autosave", 42.0)]
+    );
+    assert!(!state.runtime.lock().await.as_ref().unwrap().is_dirty());
+    assert!(!recovery.exists());
+    assert!(!marker_path.exists());
+}
