@@ -377,6 +377,50 @@ generator_version = 1
     }
 
     #[test]
+    fn captured_generator_snapshot_survives_semantic_manifest_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_package(dir.path(), '0');
+        let path = dir.path().join("onecad.std.iso4762/component.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        let raw = format!("{original}\n[parameters]\nlength = {{ role = \"free\", value = 20 }}\n[attachments]\nseat = {{ on = \"face:seat\", accepts = [\"plane\"], frame = {{ origin = [0.0, 0.0, 0.0] }} }}\n");
+        let pkg = package::parse(&raw, &path).unwrap();
+        let revision = package::write_package(path.parent().unwrap(), &pkg).unwrap();
+        let index = LibraryIndex::reindex(dir.path()).unwrap().0;
+        let req = ResolveRequest {
+            component_id: "onecad.std.iso4762",
+            component_version: "1.0.0",
+            component_revision: &revision,
+        };
+        let snapshot = resolve_snapshot(dir.path(), &index, &req).unwrap();
+        let original_package = snapshot.package.clone();
+        let mut variants = vec![original_package.clone(); 3];
+        variants[0].parameters.get_mut("length").unwrap().value = Some(toml::Value::Integer(21));
+        variants[1]
+            .attachments
+            .get_mut("seat")
+            .unwrap()
+            .frame
+            .as_mut()
+            .unwrap()
+            .origin[0] = 1.0;
+        variants[2].source = package::SourceSpec::Generator {
+            generator: "different".into(),
+            generator_version: 2,
+        };
+        for changed in variants {
+            std::fs::write(&path, toml::to_string(&changed).unwrap()).unwrap();
+            assert!(matches!(
+                resolve_snapshot(dir.path(), &index, &req),
+                Err(LibraryError::RevisionMismatch { .. })
+            ));
+            assert_eq!(snapshot.package, original_package);
+            assert!(
+                matches!(snapshot.source, ResolvedSource::Generator { ref generator_id, generator_version: 1 } if generator_id == "iso4762")
+            );
+        }
+    }
+
+    #[test]
     fn resolve_matches_generator_source() {
         let dir = tempfile::tempdir().unwrap();
         let (index, revision) = seed_v2(dir.path());

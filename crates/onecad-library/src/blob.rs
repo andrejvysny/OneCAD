@@ -28,6 +28,27 @@ pub struct BlobStore {
     root: PathBuf,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) struct BlobWriteFailure;
+
+#[cfg(test)]
+impl Drop for BlobWriteFailure {
+    fn drop(&mut self) {
+        FAIL_NEXT_WRITE.with(|flag| flag.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_blob_write() -> BlobWriteFailure {
+    FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+    BlobWriteFailure
+}
+
 impl BlobStore {
     #[must_use]
     pub fn new(library_root: impl Into<PathBuf>) -> Self {
@@ -52,7 +73,14 @@ impl BlobStore {
     /// # Errors
     /// Too large, or an I/O failure.
     pub fn put(&self, bytes: &[u8]) -> LibraryResult<String> {
-        self.put_with_writer(bytes, |file, bytes| file.write_all(bytes))
+        self.put_with_writer(bytes, |file, bytes| {
+            #[cfg(test)]
+            if FAIL_NEXT_WRITE.with(|flag| flag.replace(false)) {
+                file.write_all(&bytes[..bytes.len() / 2])?;
+                return Err(std::io::Error::other("injected blob write failure"));
+            }
+            file.write_all(bytes)
+        })
     }
 
     fn put_with_writer(

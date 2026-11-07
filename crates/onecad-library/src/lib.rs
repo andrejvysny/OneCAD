@@ -597,6 +597,87 @@ generator_version = 1
     }
 
     #[test]
+    fn failed_blob_write_never_publishes_package_or_changes_existing_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let revision = lib
+            .save_component(new_component("acme.bracket", "1.0.0", b"original geometry"))
+            .unwrap();
+        let manifest = dir.path().join("acme.bracket@1.0.0/component.toml");
+        let original_manifest = std::fs::read(&manifest).unwrap();
+        let original_index = std::fs::read(dir.path().join("library.json")).unwrap();
+
+        for embedded in [false, true] {
+            let _failure = blob::fail_next_blob_write();
+            let result = if embedded {
+                lib.save_embedded_component(blob_request(
+                    "acme.failed-embedded",
+                    BlobComponentKind::Embedded,
+                    b"distinct partial embedded geometry",
+                    "brep",
+                ))
+                .map(|_| ())
+            } else {
+                lib.save_component(new_component(
+                    "acme.failed-document",
+                    "1.0.0",
+                    b"distinct partial document geometry",
+                ))
+                .map(|_| ())
+            };
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("injected blob write failure"));
+        }
+        assert_failed_publications_preserve_library(
+            dir.path(),
+            &revision,
+            &original_manifest,
+            &original_index,
+        );
+    }
+
+    fn assert_failed_publications_preserve_library(
+        root: &Path,
+        revision: &str,
+        original_manifest: &[u8],
+        original_index: &[u8],
+    ) {
+        assert!(leftovers(root).is_empty());
+        let manifest = root.join("acme.bracket@1.0.0/component.toml");
+        let blobs = root.join(blob::BLOBS_DIR);
+        for bytes in [
+            b"distinct partial embedded geometry".as_slice(),
+            b"distinct partial document geometry",
+        ] {
+            assert!(!blobs.join(blob::sha256_hex(bytes)).exists());
+        }
+        assert_eq!(std::fs::read_dir(blobs).unwrap().count(), 1);
+        assert!(!root.join("acme.failed-embedded@1.0.0").exists());
+        assert!(!root.join("acme.failed-document@1.0.0").exists());
+        assert_eq!(std::fs::read(&manifest).unwrap(), original_manifest);
+        assert_eq!(
+            std::fs::read(root.join("library.json")).unwrap(),
+            original_index
+        );
+        let mut reopened = Library::open(root).unwrap();
+        assert_eq!(reopened.reindex().unwrap().indexed, 1);
+        assert!(reopened.get("acme.failed-embedded", None).is_none());
+        assert!(reopened.get("acme.failed-document", None).is_none());
+        let snapshot = reopened
+            .resolve_snapshot(&ResolveRequest {
+                component_id: "acme.bracket",
+                component_version: "1.0.0",
+                component_revision: revision,
+            })
+            .unwrap();
+        assert!(
+            matches!(snapshot.source, ResolvedSource::Document { blob, .. } if blob.bytes == b"original geometry")
+        );
+    }
+
+    #[test]
     fn save_component_writes_a_document_package_that_resolves_back() {
         let dir = tempfile::tempdir().unwrap();
         let mut lib = Library::open(dir.path()).unwrap();
