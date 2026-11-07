@@ -141,7 +141,7 @@ fn host_service_selection_requires_its_own_exact_inventory_and_count() {
 }
 #[test]
 fn host_backend_selection_requires_exact_inventory_and_terminal_results() {
-    assert_eq!(BACKEND_TESTS.len(), 5);
+    assert_eq!(BACKEND_TESTS.len(), 6);
     let inventory = BACKEND_TESTS
         .iter()
         .map(|name| format!("{name}: test\n"))
@@ -151,7 +151,7 @@ fn host_backend_selection_requires_exact_inventory_and_terminal_results() {
         .iter()
         .map(|name| format!("test {name} ... ok\n"))
         .collect::<String>()
-        + "test result: ok. 5 passed; 0 failed; 0 ignored;\n";
+        + "test result: ok. 6 passed; 0 failed; 0 ignored;\n";
     host::verify(&passed, &host::BACKEND).unwrap();
     for bad in [
         inventory.replace(&format!("{}: test\n", BACKEND_TESTS[0]), ""),
@@ -163,8 +163,8 @@ fn host_backend_selection_requires_exact_inventory_and_terminal_results() {
     for bad in [
         passed.replacen("... ok\n", "... FAILED\n", 1),
         passed.replace(
-            "5 passed; 0 failed; 0 ignored;",
-            "4 passed; 0 failed; 1 ignored;",
+            "6 passed; 0 failed; 0 ignored;",
+            "5 passed; 0 failed; 1 ignored;",
         ),
         passed.replace(&format!("test {} ... ok\n", BACKEND_TESTS[0]), ""),
         "test result: ok. 0 passed; 0 failed; 0 ignored;\n".into(),

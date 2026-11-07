@@ -7,9 +7,12 @@ container I/O. A writer admitted to the lane retains ownership through its
 blocking I/O even if its caller is cancelled. Close and shutdown transfer cleanup
 and claims to owned tasks that finish after admitted writes drain.
 
-Explicit save claims its target before writing. It acquires the lane before
-building the payload, so a delayed save cannot overwrite a newer save with an
-older snapshot. Checkpoint adoption, payload capture, and save completion are
+Explicit save claims its target before writing. A claim covers the canonical
+parent-directory entry and any distinct existing referent, including a final
+symlink; all keys are acquired and released together. An unavailable parent is
+refused before writing. It acquires the lane before building the payload, so a
+delayed save cannot overwrite a newer save with an older snapshot.
+Checkpoint adoption, payload capture, and save completion are
 fenced by the unique runtime session, including when a file with the same document
 UUID is reopened. An admitted save completes and adopts its path and claim even
 when its original caller stops waiting, provided that session still owns the host.
@@ -37,7 +40,11 @@ The document save API carries the proof and performs supersession checks. Marker
 fields are optional for compatibility; older recovery pairs remain recoverable.
 
 Container writes use exclusive sibling temporary files, file synchronization,
-atomic replacement, and parent-directory synchronization. Tests of lane ownership
+atomic replacement, and parent-directory synchronization on Unix. If that final
+synchronization fails after rename, the target is already published but its
+durability is unconfirmed. The save returns an error, retains recovery, and does
+not adopt a new path or mark the document clean. Other platforms do not perform
+this directory synchronization. Tests of lane ownership
 and recovery fencing do not qualify the real OCCT worker, physical GPU rendering,
 or device-specific lifecycle behavior; those require their respective repository
 qualification gates.

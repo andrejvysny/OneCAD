@@ -2,6 +2,7 @@ pub(super) const BACKEND_TESTS: &[&str] = &[
     "api::component_execution::tests::real_worker_replays_shared_definition_and_fresh_reopen",
     "api::component_execution::tests::real_worker_ten_definitions_twenty_occurrences_reopen_and_replay",
     "api::replacement::tests::real_worker_blocked_close_preserves_replacement_owner",
+    "api::save_transaction_tests::real_worker_in_flight_promotion_survives_save_and_reopen",
     "assembly_export::barrier_tests::stale_and_canceled_exports_preserve_target_and_drain_worker",
     "joint_execution::tests::cancelled_before_publication_cannot_commit",
 ];

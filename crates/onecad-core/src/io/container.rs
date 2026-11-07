@@ -289,6 +289,27 @@ struct Section<'a> {
     bytes: std::borrow::Cow<'a, [u8]>,
 }
 
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveTestStage {
+    BeforeRename,
+    BeforeDirectorySync,
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveTestStage {
+    BeforeRename,
+    BeforeDirectorySync,
+}
+
+type SaveHook<'a> = Option<&'a mut dyn FnMut(SaveTestStage) -> std::io::Result<()>>;
+
+struct SaveOptions<'a> {
+    commit: bool,
+    hook: SaveHook<'a>,
+}
+
 /// Writes v2 `.onecad` containers atomically.
 #[derive(Debug, Default)]
 pub struct ContainerWriter;
@@ -297,8 +318,9 @@ impl ContainerWriter {
     /// Atomically writes `document` (+ optional `caches`) to `path`.
     ///
     /// # Errors
-    /// [`IoError`] on a serialization or filesystem failure. On any failure the
-    /// target file is left untouched and the temp file is removed.
+    /// [`IoError`] on a serialization or filesystem failure. Before rename,
+    /// failures leave the target untouched. A directory-sync failure after rename
+    /// means the target was published but durability is unconfirmed.
     pub fn save(
         path: &Path,
         document: &Document,
@@ -312,7 +334,10 @@ impl ContainerWriter {
             &ImportBlobs::new(),
             &super::library::LibraryArchives::new(),
             meta,
-            true,
+            SaveOptions {
+                commit: true,
+                hook: None,
+            },
         )
         .map(|_| ())
     }
@@ -329,8 +354,9 @@ impl ContainerWriter {
     /// # Errors
     /// [`IoError`] on a serialization or filesystem failure, on a malformed /
     /// mis-keyed blob key, or on a blob over
-    /// [`MAX_IMPORT_BLOB_BYTES`]. On any failure the target file is left
-    /// untouched and the temp file is removed.
+    /// [`MAX_IMPORT_BLOB_BYTES`]. Before rename, failures leave the target
+    /// untouched. A directory-sync failure after rename means the target was
+    /// published but durability is unconfirmed.
     pub fn save_with_imports(
         path: &Path,
         document: &Document,
@@ -345,7 +371,10 @@ impl ContainerWriter {
             imports,
             &super::library::LibraryArchives::new(),
             meta,
-            true,
+            SaveOptions {
+                commit: true,
+                hook: None,
+            },
         )
         .map(|_| ())
     }
@@ -360,7 +389,46 @@ impl ContainerWriter {
         archives: &super::library::LibraryArchives,
         meta: &SaveMeta,
     ) -> IoResult<()> {
-        Self::save_inner(path, document, caches, imports, archives, meta, true).map(|_| ())
+        Self::save_inner(
+            path,
+            document,
+            caches,
+            imports,
+            archives,
+            meta,
+            SaveOptions {
+                commit: true,
+                hook: None,
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Test-only per-write hook for deterministic filesystem transaction checks.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn save_with_test_hook(
+        path: &Path,
+        document: &Document,
+        caches: &ContainerCaches,
+        imports: &ImportBlobs,
+        archives: &super::library::LibraryArchives,
+        meta: &SaveMeta,
+        hook: &mut dyn FnMut(SaveTestStage) -> std::io::Result<()>,
+    ) -> IoResult<()> {
+        Self::save_inner(
+            path,
+            document,
+            caches,
+            imports,
+            archives,
+            meta,
+            SaveOptions {
+                commit: true,
+                hook: Some(hook),
+            },
+        )
+        .map(|_| ())
     }
 
     /// Crash-simulation hook: writes + fsyncs the temp file but **skips** the
@@ -383,7 +451,10 @@ impl ContainerWriter {
             &ImportBlobs::new(),
             &super::library::LibraryArchives::new(),
             meta,
-            false,
+            SaveOptions {
+                commit: false,
+                hook: None,
+            },
         )
     }
 
@@ -394,7 +465,7 @@ impl ContainerWriter {
         imports: &ImportBlobs,
         archives: &super::library::LibraryArchives,
         meta: &SaveMeta,
-        commit: bool,
+        mut options: SaveOptions<'_>,
     ) -> IoResult<PathBuf> {
         if document.schema_version != GLOBAL_SCHEMA_VERSION {
             return Err(IoError::UnsupportedDocumentSchema {
@@ -429,18 +500,26 @@ impl ContainerWriter {
             }
         }
 
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = super::parent_directory(path);
         std::fs::create_dir_all(parent)?;
         let (temporary, file) = super::OwnedTempFile::create(path)?;
         write_archive(file, &manifest_bytes, &sections)?;
 
-        if !commit {
+        if !options.commit {
             return Ok(temporary.keep());
         }
 
+        if let Some(hook) = options.hook.as_mut() {
+            hook(SaveTestStage::BeforeRename)?;
+        }
         temporary
-            .replace(path)
-            .map_err(|e| IoError::Io(format!("rename temp → target: {e}")))?;
+            .replace_with(path, || {
+                if let Some(hook) = options.hook.as_mut() {
+                    hook(SaveTestStage::BeforeDirectorySync)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| IoError::Io(format!("publish container: {e}")))?;
         Ok(path.to_path_buf())
     }
 }
@@ -1273,6 +1352,66 @@ mod tests {
             created: "2026-07-16T00:00:00Z".into(),
             modified: "2026-07-16T00:00:00Z".into(),
         }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn directory_sync_failure_is_reported_after_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let document = doc(1, 10.0);
+        ContainerWriter::save(&path, &doc(2, 3.0), &ContainerCaches::none(), &meta()).unwrap();
+        let mut hook = |stage| {
+            if stage == SaveTestStage::BeforeDirectorySync {
+                Err(std::io::Error::other("injected directory sync failure"))
+            } else {
+                Ok(())
+            }
+        };
+        let result = ContainerWriter::save_with_test_hook(
+            &path,
+            &document,
+            &ContainerCaches::none(),
+            &ImportBlobs::new(),
+            &super::super::library::LibraryArchives::new(),
+            &meta(),
+            &mut hook,
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "target published but parent directory sync failed; durability unconfirmed"
+            ),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        let loaded = ContainerReader::open(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(loaded.document()).unwrap(),
+            serde_json::to_value(&document).unwrap()
+        );
+    }
+
+    #[test]
+    fn relative_basename_save_succeeds() {
+        const CHILD: &str = "ONECAD_RELATIVE_SAVE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let path = Path::new("model.onecad");
+            ContainerWriter::save(path, &doc(1, 10.0), &ContainerCaches::none(), &meta()).unwrap();
+            ContainerReader::open(path).unwrap();
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .current_dir(tmp.path())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "io::container::tests::relative_basename_save_succeeds",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[test]

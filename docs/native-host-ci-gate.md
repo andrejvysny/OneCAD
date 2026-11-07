@@ -56,10 +56,12 @@ New capture, plus assembly capture/save/reopen and native assembly controls.
 These cases emit no required adapter record, so Metal provenance for the run
 comes from the lifecycle selection.
 
-The backend selection (`onecad-app --lib --ignored`, `BACKEND_TESTS`) has five
+The backend selection (`onecad-app --lib --ignored`, `BACKEND_TESTS`) has six
 production-worker cases: shared-definition replay and origin revalidation,
 10-definition/20-occurrence replay, replacement ownership during close, fenced
-STEP export cancellation, and canceled joint publication. All ignored app-library
+STEP export cancellation, canceled joint publication, and metadata promotion
+during an admitted save followed by a second save and fresh-worker reopen.
+All ignored app-library
 tests belong to this exact inventory; adding one requires an explicit update.
 These service tests establish no renderer or physical-input qualification.
 

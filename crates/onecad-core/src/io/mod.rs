@@ -199,6 +199,12 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex_lower(&hasher.finalize())
 }
 
+fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 /// Durably writes `bytes` to `path`: a same-directory temp file, `fsync`, an
 /// atomic `rename` over the target, then an `fsync` of the parent directory so the
 /// rename itself survives a crash (durability of `rename` on macOS/Linux). The
@@ -213,7 +219,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 /// # Errors
 /// [`IoError::Io`] on any filesystem failure.
 pub fn durable_write(path: &Path, bytes: &[u8]) -> IoResult<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = parent_directory(path);
     std::fs::create_dir_all(parent)?;
     let (temporary, file) = OwnedTempFile::create(path)?;
     write_and_sync(file, bytes)?;
@@ -276,11 +282,27 @@ impl OwnedTempFile {
         ))
     }
 
-    pub(super) fn replace(mut self, target: &Path) -> std::io::Result<()> {
+    pub(super) fn replace(self, target: &Path) -> std::io::Result<()> {
+        self.replace_with(target, || Ok(()))
+    }
+
+    pub(super) fn replace_with(
+        mut self,
+        target: &Path,
+        after_rename: impl FnOnce() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
         std::fs::rename(&self.path, target)?;
         self.remove_on_drop = false;
-        fsync_dir(target.parent().unwrap_or_else(|| Path::new(".")));
-        Ok(())
+        after_rename()
+            .and_then(|()| fsync_dir(parent_directory(target)))
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                "target published but parent directory sync failed; durability unconfirmed: {error}"
+            ),
+                )
+            })
     }
 
     pub(super) fn keep(mut self) -> PathBuf {
@@ -297,18 +319,16 @@ impl Drop for OwnedTempFile {
     }
 }
 
-/// fsyncs a directory so a rename inside it is durable (macOS/Unix). A no-op on
-/// other platforms (Windows renames are durable without this).
-fn fsync_dir(dir: &Path) {
+/// Syncs the containing directory on Unix. Other platforms do not perform this step.
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        if let Ok(f) = std::fs::File::open(dir) {
-            let _ = f.sync_all();
-        }
+        std::fs::File::open(dir)?.sync_all()
     }
     #[cfg(not(unix))]
     {
         let _ = dir;
+        Ok(())
     }
 }
 

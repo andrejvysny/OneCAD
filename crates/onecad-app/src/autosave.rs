@@ -415,9 +415,8 @@ impl AttemptIdentity {
 /// uses a fenced transaction that may clear a positively superseded checkpoint.
 ///
 /// # Errors
-/// [`IoError`] when the container write fails — the target is untouched, and the
-/// recovery state is deliberately NOT cleared (a failed save must not discard the
-/// crash snapshot that is now the only copy of the work).
+/// [`IoError`] when the write fails. A post-rename directory-sync failure may
+/// leave the new target published with durability unconfirmed. Recovery is retained.
 pub async fn write_save_payload(
     lane: &Arc<Mutex<()>>,
     path: &Path,
@@ -429,6 +428,10 @@ pub async fn write_save_payload(
         .await
         .map(|_| ())
 }
+
+#[cfg(test)]
+pub(crate) type SaveHook =
+    Box<dyn FnMut(onecad_core::io::container::SaveTestStage) -> std::io::Result<()> + Send>;
 
 pub(crate) async fn write_save_payload_claimed(
     lane: &Arc<Mutex<()>>,
@@ -448,6 +451,8 @@ pub(crate) async fn write_save_payload_claimed(
         document_id,
         claim,
         saved,
+        #[cfg(test)]
+        None,
     )
     .await
 }
@@ -460,11 +465,19 @@ pub(crate) async fn write_save_payload_admitted(
     document_id: DocumentId,
     claim: Option<crate::reservations::Claim>,
     saved: Option<(String, u64)>,
+    #[cfg(test)] mut hook: Option<SaveHook>,
 ) -> Result<Option<crate::reservations::Claim>, IoError> {
     let target = path.to_path_buf();
     let recovery_root = recovery_root.map(Path::to_path_buf);
     match tokio::task::spawn_blocking(move || {
         let _lane = lane;
+        #[cfg(test)]
+        if let Some(hook) = hook.as_mut() {
+            DocumentRuntime::write_payload_with_test_hook(&target, &payload, hook.as_mut())?;
+        } else {
+            DocumentRuntime::write_payload(&target, &payload)?;
+        }
+        #[cfg(not(test))]
         DocumentRuntime::write_payload(&target, &payload)?;
         if let (Some(root), Some((session, generation))) = (recovery_root, saved) {
             clear_superseded_recovery(&root, document_id, &session, generation);

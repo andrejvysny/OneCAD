@@ -768,6 +768,8 @@ pub async fn save_document(
     let runtime = state.runtime.clone();
     let claims = state.claims.clone();
     let lane = std::sync::Arc::new(lane);
+    #[cfg(test)]
+    let hook = state.save_io_hook.lock().unwrap().take();
     tokio::spawn(async move {
         let target_claim = autosave::write_save_payload_admitted(
             lane.clone(),
@@ -777,6 +779,8 @@ pub async fn save_document(
             document_id,
             target_claim,
             Some((session.clone(), generation)),
+            #[cfg(test)]
+            hook,
         )
         .await?;
 
@@ -5461,6 +5465,8 @@ mod export_scope_tests;
 mod operation_context_tests;
 #[cfg(test)]
 mod recovery_identity_tests;
+#[cfg(test)]
+mod save_transaction_tests;
 
 #[cfg(test)]
 mod tests {

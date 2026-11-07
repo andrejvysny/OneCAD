@@ -5,7 +5,7 @@ use crate::{
 };
 use std::sync::Arc;
 
-struct Quiet;
+pub(super) struct Quiet;
 impl EventSink for Quiet {
     fn emit(&self, _: AppEvent) -> Result<(), String> {
         Ok(())

@@ -10,6 +10,9 @@ edition = "2021"
 # protocol to the C++ worker; this crate owns identity/repair/timeline/IO only.
 # Do not add a `tauri` dependency here.
 
+[features]
+test-hooks = []
+
 [dependencies]
 onecad-assembly = { path = "../onecad-assembly" }
 serde = { workspace = true }
