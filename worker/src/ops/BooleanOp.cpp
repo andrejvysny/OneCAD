@@ -14,6 +14,7 @@
 #include "modeling/BooleanMode.h"
 #include "kernel/validation/GeometryPrecision.h"
 #include "ops/BooleanParticipation.h"
+#include "ops/CommonInternals.h"
 #include "ops/OpCommon.h"
 
 namespace onecad::ops {
@@ -248,8 +249,15 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
         policy.tier == kernel::validation::PublicationTier::TierB;
     policy.maximum_tolerance = tool_group_tolerance(old_target, tool_shapes);
     policy.allow_empty_lifecycle = true;
-    const kernel::validation::PublicationDecision decision =
+    kernel::validation::PublicationDecision decision =
         publication_decision(br.shape, policy, ctx.cancel);
+    if (*mode == app::BooleanMode::Intersect &&
+        decision.reason_code == "PUBLICATION_OPEN_MANIFOLD" &&
+        decision.evidence.manifold_checked && decision.evidence.open_edge_count > 0 &&
+        decision.evidence.non_manifold_edge_count == 0 &&
+        normalize_common_internals(old_target, br.shape, builder, ctx.cancel)) {
+        decision = publication_decision(br.shape, policy, ctx.cancel);
+    }
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable() && !decision.lifecycle_only()) {
         return publication_refusal(decision, "publication");

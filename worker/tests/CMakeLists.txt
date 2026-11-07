@@ -5,6 +5,10 @@ add_executable(test_frame_roundtrip test_frame_roundtrip.cpp)
 target_link_libraries(test_frame_roundtrip PRIVATE worker_core)
 add_test(NAME frame_roundtrip COMMAND test_frame_roundtrip)
 
+add_executable(test_common_internals test_common_internals.cpp)
+target_link_libraries(test_common_internals PRIVATE worker_core)
+add_test(NAME common_internals COMMAND test_common_internals)
+
 # --- W-WP3b: NORMATIVE region-id cross-check vs the Rust reference impl ---
 add_executable(test_region_id test_region_id.cpp)
 target_link_libraries(test_region_id PRIVATE worker_core)
