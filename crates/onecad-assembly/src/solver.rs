@@ -1,12 +1,19 @@
 //! Deterministic rigid-body joint solver (Levenberg-Marquardt) with DOF report.
 //!
-//! Unknowns are a 6-vector per non-grounded body: a left-perturbation
-//! `pose' = (exp(dθ), dt) ∘ pose`. Bodies and joints are visited in input order;
+//! Unknowns are a 6-vector per non-grounded body: world-axis rotation about
+//! the body origin and world-axis translation. Bodies and joints are visited in input order;
 //! no hash iteration, so identical input gives bit-identical output.
 //!
 //! The Jacobian uses central finite differences. At ≤120 unknowns (20
 //! occurrences) the cost is trivial and it cannot disagree with the residuals;
 //! analytic derivatives are a later optimisation.
+//!
+//! Rank is a finite-difference estimate; the solver refuses an uncertain estimate
+//! when ranks disagree across two step sizes, a pivot is near threshold, or a
+//! nonzero column is too small. This is not a proof of rank in all cases.
+//! Tests cover rigid, slider and revolute DOF at world origins 0 and 20,000 mm,
+//! local frame offsets 0.001, 1 and 20,000 mm, and two global rotations.
+//! These sampled cases do not establish arbitrary scale or origin invariance.
 //!
 //! Non-convergence never partially moves the assembly: failure outcomes carry
 //! no poses, so the caller keeps its input poses (ONECAD-401).
@@ -84,7 +91,7 @@ pub enum SolverError {
     UnknownOccurrence(JointId),
     #[error("duplicate solver body {0:?}")]
     DuplicateBody(OccurrenceId),
-    #[error("body {0:?} has a non-finite pose")]
+    #[error("body {0:?} has a non-rigid or non-finite pose")]
     NonFinitePose(OccurrenceId),
     #[error("drive references unknown joint {0:?}")]
     UnknownDriveJoint(JointId),
@@ -104,6 +111,10 @@ pub enum SolveOutcome {
         max_residual: f64,
         remaining_dof: usize,
         redundant_constraints: usize,
+    },
+    /// Residuals converged, but numerical rank is sensitive to the estimate.
+    NumericallyUncertain {
+        max_residual: f64,
     },
     NotConverged {
         max_residual: f64,
@@ -206,7 +217,7 @@ fn check_bodies(bodies: &[SolverBody]) -> Result<(), SolverError> {
         if bodies[..i].iter().any(|prev| prev.id == body.id) {
             return Err(SolverError::DuplicateBody(body.id));
         }
-        if !body.pose.is_finite() {
+        if !body.pose.is_rigid() {
             return Err(SolverError::NonFinitePose(body.id));
         }
     }
@@ -302,7 +313,12 @@ fn copy_poses(poses: &[RigidTransform]) -> Vec<RigidTransform> {
 fn solve_fixed(req: &SolveRequest, problem: &Problem, start: &[RigidTransform]) -> SolveOutcome {
     let r = residuals(start, problem.cons);
     let max_residual = max_abs(&r);
-    if max_residual > problem.tol {
+    let max_residual = if max_residual.is_finite() {
+        max_residual.max(limit_violation(start, problem.cons))
+    } else {
+        f64::INFINITY
+    };
+    if !max_residual.is_finite() || max_residual > problem.tol {
         return SolveOutcome::Inconsistent { max_residual };
     }
     SolveOutcome::Converged {
@@ -328,11 +344,23 @@ fn pose_pairs(
 fn finish(req: &SolveRequest, problem: &Problem, fin: LmOutcome, iterations: u32) -> SolveOutcome {
     match fin.status {
         LmStatus::Converged => {
-            let (remaining_dof, redundant_constraints) = dof_report(&fin.poses, problem);
+            let residual = max_abs(&residuals(&fin.poses, problem.cons));
+            let max_residual = if residual.is_finite() {
+                residual.max(limit_violation(&fin.poses, problem.cons))
+            } else {
+                f64::INFINITY
+            };
+            if !max_residual.is_finite() || max_residual > problem.tol {
+                return SolveOutcome::Inconsistent { max_residual };
+            }
+            let Some((remaining_dof, redundant_constraints)) = dof_report(&fin.poses, problem)
+            else {
+                return SolveOutcome::NumericallyUncertain { max_residual };
+            };
             SolveOutcome::Converged {
                 poses: pose_pairs(&req.bodies, &fin.poses),
                 iterations,
-                max_residual: fin.max_residual,
+                max_residual,
                 remaining_dof,
                 redundant_constraints,
             }
@@ -354,24 +382,50 @@ fn apply_limit_clamps(cons: &mut [Constraint], poses: &[RigidTransform], tol: f6
         let (None, Some(limits)) = (c.target, c.limits) else {
             continue;
         };
-        let value = joint_value(poses, c);
-        if value < limits.min - tol {
-            c.target = Some(limits.min);
-            changed = true;
-        } else if value > limits.max + tol {
-            c.target = Some(limits.max);
+        let (target, distance) = nearest_limit(joint_value(poses, c), c.kind, limits);
+        if distance > tol {
+            c.target = Some(target);
             changed = true;
         }
     }
     changed
 }
 
-fn dof_report(poses: &[RigidTransform], problem: &Problem) -> (usize, usize) {
+fn limit_violation(poses: &[RigidTransform], cons: &[Constraint]) -> f64 {
+    cons.iter()
+        .filter_map(|c| c.limits.map(|l| (c, l)))
+        .fold(0.0_f64, |max, (c, limits)| {
+            let value = joint_value(poses, c);
+            if !value.is_finite() {
+                return f64::INFINITY;
+            }
+            max.max(nearest_limit(value, c.kind, limits).1)
+        })
+}
+
+// ±π represent the same revolute pose; compare equivalent angles at the seam.
+fn nearest_limit(value: f64, kind: JointKind, limits: JointLimits) -> (f64, f64) {
+    let mut best = (value.clamp(limits.min, limits.max), f64::INFINITY);
+    for offset in [0.0, -TAU, TAU] {
+        if kind != JointKind::Revolute && offset != 0.0 {
+            continue;
+        }
+        let candidate = value + offset;
+        let target = candidate.clamp(limits.min, limits.max);
+        let distance = (candidate - target).abs();
+        if distance < best.1 {
+            best = (target, distance);
+        }
+    }
+    best
+}
+
+fn dof_report(poses: &[RigidTransform], problem: &Problem) -> Option<(usize, usize)> {
     let r = residuals(poses, problem.cons);
     let (m, n) = (r.len(), problem.layout.unknowns);
-    let jac = jacobian(poses, problem, m);
-    let rank = numerical_rank(jac, m, n);
-    (n - rank, m - rank)
+    let first = numerical_rank(jacobian_with_step(poses, problem, m, FD_STEP), m, n)?;
+    let second = numerical_rank(jacobian_with_step(poses, problem, m, FD_STEP * 2.0), m, n)?;
+    (first == second).then_some((n - first, m - first))
 }
 
 // ---------------------------------------------------------------- residuals
@@ -424,9 +478,9 @@ fn push_joint_residuals(poses: &[RigidTransform], c: &Constraint, out: &mut Vec<
         }
         JointKind::Revolute => {
             push_vec3(out, d);
-            let tilt = za.cross(rb.rotate(Vec3d::Z));
-            out.push(tilt.dot(xa));
-            out.push(tilt.dot(ya));
+            let relative = ra.conjugate() * rb;
+            out.push(2.0 * relative.x);
+            out.push(2.0 * relative.y);
             if let Some(t) = c.target {
                 out.push(wrap_angle(relative_angle(ra, rb) - t));
             }
@@ -466,7 +520,7 @@ fn sum_squares(v: &[f64]) -> f64 {
 
 // ------------------------------------------------------------------ stepping
 
-/// Apply the increment `dx` (6 per free body) as a left perturbation.
+/// Apply world-axis rotation around each body origin and world-axis translation.
 fn apply_step(poses: &[RigidTransform], layout: &Layout, dx: &[f64]) -> Vec<RigidTransform> {
     poses
         .iter()
@@ -476,10 +530,13 @@ fn apply_step(poses: &[RigidTransform], layout: &Layout, dx: &[f64]) -> Vec<Rigi
             Some(o) => {
                 let dtheta = Vec3d::new(dx[*o], dx[o + 1], dx[o + 2]);
                 let dt = Vec3d::new(dx[o + 3], dx[o + 4], dx[o + 5]);
-                let moved =
-                    RigidTransform::new(Quat::from_rotation_vector(dtheta), dt).compose(pose);
-                let q = moved.rotation.normalized().unwrap_or(moved.rotation);
-                RigidTransform::new(q, moved.translation)
+                let Some(delta) = Quat::from_rotation_vector(dtheta) else {
+                    return *pose;
+                };
+                let q = (delta * pose.rotation)
+                    .normalized()
+                    .unwrap_or(pose.rotation);
+                RigidTransform::new(q, pose.translation + dt)
             }
         })
         .collect()
@@ -487,17 +544,26 @@ fn apply_step(poses: &[RigidTransform], layout: &Layout, dx: &[f64]) -> Vec<Rigi
 
 /// Row-major `m x n` central-difference Jacobian of the residuals.
 fn jacobian(poses: &[RigidTransform], problem: &Problem, m: usize) -> Vec<f64> {
+    jacobian_with_step(poses, problem, m, FD_STEP)
+}
+
+fn jacobian_with_step(
+    poses: &[RigidTransform],
+    problem: &Problem,
+    m: usize,
+    step: f64,
+) -> Vec<f64> {
     let n = problem.layout.unknowns;
     let mut jac = vec![0.0; m * n];
     let mut dx = vec![0.0; n];
     for col in 0..n {
-        dx[col] = FD_STEP;
+        dx[col] = step;
         let plus = residuals(&apply_step(poses, problem.layout, &dx), problem.cons);
-        dx[col] = -FD_STEP;
+        dx[col] = -step;
         let minus = residuals(&apply_step(poses, problem.layout, &dx), problem.cons);
         dx[col] = 0.0;
         for row in 0..m {
-            jac[row * n + col] = (plus[row] - minus[row]) / (2.0 * FD_STEP);
+            jac[row * n + col] = (plus[row] - minus[row]) / (2.0 * step);
         }
     }
     jac
@@ -648,12 +714,28 @@ fn solve_linear(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> 
 
 /// Rank of a row-major `m x n` matrix by elimination with complete pivoting.
 ///
-/// The threshold is relative to the largest entry so finite-difference noise
-/// (≈ eps·|r|/h) on large-coordinate scenes is not counted as rank.
-fn numerical_rank(mut j: Vec<f64>, m: usize, n: usize) -> usize {
+/// Columns are scaled independently to make translation and rotation comparable.
+/// Rank remains a finite-difference estimate near singular configurations.
+fn numerical_rank(mut j: Vec<f64>, m: usize, n: usize) -> Option<usize> {
+    if j.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    for col in 0..n {
+        let scale = (0..m)
+            .map(|row| j[row * n + col].abs())
+            .fold(0.0_f64, f64::max);
+        if scale > 0.0 && scale < RANK_REL_TOL * 10.0 {
+            return None;
+        }
+        if scale > 0.0 && scale.is_finite() {
+            for row in 0..m {
+                j[row * n + col] /= scale;
+            }
+        }
+    }
     let scale = max_abs(&j);
     if scale == 0.0 || !scale.is_finite() {
-        return 0;
+        return Some(0);
     }
     let tol = RANK_REL_TOL * scale;
     let mut rank = 0;
@@ -666,6 +748,9 @@ fn numerical_rank(mut j: Vec<f64>, m: usize, n: usize) -> usize {
                     (pr, pc, best) = (r, c, v);
                 }
             }
+        }
+        if best > tol * 0.1 && best < tol * 10.0 {
+            return None;
         }
         if best <= tol {
             break;
@@ -684,7 +769,7 @@ fn numerical_rank(mut j: Vec<f64>, m: usize, n: usize) -> usize {
         }
         rank += 1;
     }
-    rank
+    Some(rank)
 }
 
 #[cfg(test)]
@@ -910,5 +995,335 @@ mod tests {
             ),
             "got {out:?}"
         );
+    }
+    #[test]
+    fn regression_invalid_rotation() {
+        let invalid = pose(
+            Quat {
+                w: 0.0,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Vec3d::ZERO,
+        );
+        assert!(matches!(
+            solve(&SolveRequest::new(two_bodies(invalid), vec![])),
+            SolveOutcome::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn regression_grounded_limit() {
+        let mut j = joint(
+            10,
+            JointKind::Slider,
+            frame_at(Vec3d::ZERO),
+            frame_at(Vec3d::ZERO),
+            1,
+            2,
+        );
+        j.limits = Some(JointLimits { min: 0.0, max: 5.0 });
+        let bodies = vec![
+            body(1, RigidTransform::IDENTITY, true),
+            body(2, pose(Quat::IDENTITY, Vec3d::new(0.0, 0.0, 8.0)), true),
+        ];
+        assert!(!matches!(
+            solve(&SolveRequest::new(bodies, vec![j])),
+            SolveOutcome::Converged { .. }
+        ));
+    }
+
+    #[test]
+    fn regression_antiparallel_axis() {
+        let j = joint(
+            10,
+            JointKind::Revolute,
+            frame_at(Vec3d::ZERO),
+            frame_at(Vec3d::ZERO),
+            1,
+            2,
+        );
+        let flip = Quat::from_axis_angle(Vec3d::X, std::f64::consts::PI).unwrap();
+        let bodies = vec![
+            body(1, RigidTransform::IDENTITY, true),
+            body(2, pose(flip, Vec3d::ZERO), true),
+        ];
+        assert!(!matches!(
+            solve(&SolveRequest::new(bodies, vec![j])),
+            SolveOutcome::Converged { .. }
+        ));
+    }
+
+    #[test]
+    fn regression_rigid_dof_at_offset() {
+        let j = joint(
+            10,
+            JointKind::Rigid,
+            frame_at(Vec3d::ZERO),
+            frame_at(Vec3d::ZERO),
+            1,
+            2,
+        );
+        let p = pose(Quat::IDENTITY, Vec3d::new(20000.0, 20000.0, 20000.0));
+        let bodies = vec![body(1, p, true), body(2, p, false)];
+        let out = solve(&SolveRequest::new(bodies, vec![j]));
+        assert!(
+            matches!(
+                out,
+                SolveOutcome::Converged {
+                    remaining_dof: 0,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn dof_across_origins_rotations_and_frame_scales() {
+        for scale in [0.001, 1.0, 20000.0] {
+            for angle in [0.0, 0.7] {
+                let q = Quat::from_axis_angle(Vec3d::new(1.0, 2.0, 3.0), angle).unwrap();
+                for origin in [Vec3d::ZERO, Vec3d::new(20000.0, -20000.0, 20000.0)] {
+                    let p = pose(q, origin);
+                    for (kind, expected) in [
+                        (JointKind::Rigid, 0),
+                        (JointKind::Slider, 1),
+                        (JointKind::Revolute, 1),
+                    ] {
+                        let f = frame_at(Vec3d::new(scale, -scale, scale));
+                        let j = joint(10, kind, f, f, 1, 2);
+                        let out = solve(&SolveRequest::new(
+                            vec![body(1, p, true), body(2, p, false)],
+                            vec![j],
+                        ));
+                        assert!(
+                            matches!(out, SolveOutcome::Converged { remaining_dof, .. } if remaining_dof == expected),
+                            "{scale} {angle} {kind:?}: {out:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oriented_revolute_near_pi_is_not_fixed_success() {
+        for angle in [std::f64::consts::PI, std::f64::consts::PI - 1e-8] {
+            let j = joint(
+                10,
+                JointKind::Revolute,
+                frame_at(Vec3d::ZERO),
+                frame_at(Vec3d::ZERO),
+                1,
+                2,
+            );
+            let global = Quat::from_axis_angle(Vec3d::Y, 0.7).unwrap();
+            let flip = Quat::from_axis_angle(Vec3d::X, angle).unwrap();
+            let a = pose(global, Vec3d::ZERO);
+            let b = pose(global * flip, Vec3d::ZERO);
+            let out = solve(&SolveRequest::new(
+                vec![body(1, a, true), body(2, b, true)],
+                vec![j],
+            ));
+            assert!(!matches!(out, SolveOutcome::Converged { .. }), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn clamping_one_joint_cannot_violate_another_limit() {
+        let id = frame_at(Vec3d::ZERO);
+        let mut first = joint(10, JointKind::Slider, id, id, 1, 2);
+        first.limits = Some(JointLimits { min: 0.0, max: 5.0 });
+        let mut second = joint(11, JointKind::Slider, id, id, 2, 3);
+        second.limits = Some(JointLimits { min: 0.0, max: 1.0 });
+        let bodies = vec![
+            body(1, RigidTransform::IDENTITY, true),
+            body(2, pose(Quat::IDENTITY, Vec3d::new(0.0, 0.0, 8.0)), false),
+            body(3, pose(Quat::IDENTITY, Vec3d::new(0.0, 0.0, 8.0)), true),
+        ];
+        let out = solve(&SolveRequest::new(bodies, vec![first, second]));
+        assert!(!matches!(out, SolveOutcome::Converged { .. }), "{out:?}");
+    }
+
+    #[test]
+    fn antiparallel_revolute_never_returns_wrong_axes() {
+        for angle in [std::f64::consts::PI, std::f64::consts::PI - 1e-8] {
+            let mut j = joint(
+                10,
+                JointKind::Revolute,
+                frame_at(Vec3d::ZERO),
+                frame_at(Vec3d::ZERO),
+                1,
+                2,
+            );
+            j.limits = Some(JointLimits {
+                min: -1.0,
+                max: 1.0,
+            });
+            let flip = Quat::from_axis_angle(Vec3d::X, angle).unwrap();
+            let mut req = SolveRequest::new(two_bodies(pose(flip, Vec3d::ZERO)), vec![j]);
+            req.drive.push((JointId(Uuid::from_u128(10)), 0.4));
+            let out = solve(&req);
+            if let SolveOutcome::Converged { .. } = &out {
+                let p = converged_pose(&out, 2);
+                assert!(
+                    (p.rotation.rotate(Vec3d::Z) - Vec3d::Z).norm() < 1e-8,
+                    "{out:?}"
+                );
+                assert!((relative_angle(Quat::IDENTITY, p.rotation) - 0.4).abs() < 1e-8);
+            }
+        }
+    }
+    #[test]
+    fn limits_accept_endpoints_and_reject_bad_drives() {
+        for value in [0.0, 5.0] {
+            let mut j = joint(
+                10,
+                JointKind::Slider,
+                frame_at(Vec3d::ZERO),
+                frame_at(Vec3d::ZERO),
+                1,
+                2,
+            );
+            j.limits = Some(JointLimits { min: 0.0, max: 5.0 });
+            let mut req = SolveRequest::new(
+                two_bodies(pose(Quat::IDENTITY, Vec3d::new(0.0, 0.0, value))),
+                vec![j],
+            );
+            req.drive.push((JointId(Uuid::from_u128(10)), value));
+            assert!(matches!(solve(&req), SolveOutcome::Converged { .. }));
+            req.drive[0].1 = 6.0;
+            assert!(matches!(
+                solve(&req),
+                SolveOutcome::Invalid(SolverError::BadDriveValue(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn revolute_wrap_does_not_bypass_limits() {
+        let mut j = joint(
+            10,
+            JointKind::Revolute,
+            frame_at(Vec3d::ZERO),
+            frame_at(Vec3d::ZERO),
+            1,
+            2,
+        );
+        j.limits = Some(JointLimits {
+            min: -0.5,
+            max: 0.5,
+        });
+        let bodies = vec![
+            body(1, RigidTransform::IDENTITY, true),
+            body(
+                2,
+                pose(rot_z(std::f64::consts::PI + 0.1), Vec3d::ZERO),
+                true,
+            ),
+        ];
+        assert!(!matches!(
+            solve(&SolveRequest::new(bodies, vec![j])),
+            SolveOutcome::Converged { .. }
+        ));
+    }
+    #[test]
+    fn near_degenerate_rank_is_uncertain_and_exact_redundancy_is_reported() {
+        let make = |offset| {
+            let id = frame_at(Vec3d::ZERO);
+            let shifted = frame_at(Vec3d::new(offset, 0.0, 0.0));
+            SolveRequest::new(
+                two_bodies(RigidTransform::IDENTITY),
+                vec![
+                    joint(10, JointKind::Revolute, id, id, 1, 2),
+                    joint(11, JointKind::Revolute, shifted, shifted, 1, 2),
+                ],
+            )
+        };
+        let redundant = solve(&make(0.0));
+        assert!(
+            matches!(
+                redundant,
+                SolveOutcome::Converged {
+                    remaining_dof: 1,
+                    redundant_constraints: 5,
+                    ..
+                }
+            ),
+            "{redundant:?}"
+        );
+        let uncertain = solve(&make(1e-8));
+        assert!(
+            matches!(uncertain, SolveOutcome::NumericallyUncertain { .. }),
+            "{uncertain:?}"
+        );
+    }
+
+    #[test]
+    fn revolute_limits_outside_principal_range_are_invalid() {
+        for limits in [
+            JointLimits {
+                min: -3.2,
+                max: 0.0,
+            },
+            JointLimits { min: 0.0, max: 3.2 },
+        ] {
+            let mut j = joint(
+                10,
+                JointKind::Revolute,
+                frame_at(Vec3d::ZERO),
+                frame_at(Vec3d::ZERO),
+                1,
+                2,
+            );
+            j.limits = Some(limits);
+            let out = solve(&SolveRequest::new(
+                two_bodies(RigidTransform::IDENTITY),
+                vec![j],
+            ));
+            assert!(
+                matches!(
+                    out,
+                    SolveOutcome::Invalid(SolverError::InvalidJoint {
+                        source: JointError::RevoluteLimitsOutsidePrincipalRange { .. },
+                        ..
+                    })
+                ),
+                "{out:?}"
+            );
+        }
+    }
+    #[test]
+    fn revolute_limits_accept_either_pi_seam() {
+        use std::f64::consts::PI;
+        for (angle, limits) in [
+            (
+                PI,
+                JointLimits {
+                    min: -PI,
+                    max: -2.0,
+                },
+            ),
+            (-PI, JointLimits { min: 2.0, max: PI }),
+        ] {
+            let mut j = joint(
+                10,
+                JointKind::Revolute,
+                frame_at(Vec3d::ZERO),
+                frame_at(Vec3d::ZERO),
+                1,
+                2,
+            );
+            j.value = (limits.min + limits.max) * 0.5;
+            j.limits = Some(limits);
+            let bodies = vec![
+                body(1, RigidTransform::IDENTITY, true),
+                body(2, pose(rot_z(angle), Vec3d::ZERO), true),
+            ];
+            let out = solve(&SolveRequest::new(bodies, vec![j]));
+            assert!(matches!(out, SolveOutcome::Converged { .. }), "{out:?}");
+        }
     }
 }
