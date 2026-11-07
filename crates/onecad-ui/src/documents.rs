@@ -555,6 +555,7 @@ impl App {
     /// The switched-in document cannot be drawn from its retained capture: drop
     /// it rather than wait forever; the next publication of the document redraws.
     pub(crate) fn display_unavailable(&mut self, error: String) {
+        self.doc.display_error = Some(error.clone());
         self.doc.status = format!("Document display: {error}");
         self.doc.awaiting_scene = false;
         self.doc.prepare_in_flight = None;

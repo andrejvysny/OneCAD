@@ -132,8 +132,14 @@ fn tree(app: &mut App, ui: &mut Ui) {
             .placeholder("Filter")
             .width(width),
     );
+    if let Some(error) = &app.doc.display_error {
+        ui.label("Geometry unavailable");
+        ui.label(error);
+    }
     let Some(display) = app.doc.display.clone() else {
-        ui.label("Opening document…");
+        if app.doc.display_error.is_none() {
+            ui.label("Opening document…");
+        }
         return;
     };
     let filter = app.ui.explorer_filter.clone();

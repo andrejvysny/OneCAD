@@ -208,6 +208,8 @@ mod document_tabs_tests;
 
 #[path = "document_tab_delivery_tests.rs"]
 mod document_tab_delivery_tests;
+#[path = "capture_failure_delivery_tests.rs"]
+mod capture_failure_delivery_tests;
 
 #[path = "library_delivery_tests.rs"]
 mod library_delivery_tests;

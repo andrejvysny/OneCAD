@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "desktop_document_io_tests.rs"]
 mod desktop_tests;
+#[path = "document_io_tests/native_public_capture_diagnostic.rs"]
+mod native_public_capture_diagnostic;
 
 #[derive(Default)]
 struct Events {

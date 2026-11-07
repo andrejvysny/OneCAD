@@ -102,6 +102,7 @@ impl crate::app::App {
                 != (!state.runtime_session.is_empty()).then_some(state.runtime_session.as_str())
             {
                 crate::assembly_controls::reset_session(self);
+                self.doc.display_error = None;
             }
             self.doc.document_state_serial = serial;
             self.doc
