@@ -688,6 +688,28 @@ mod tests {
         assert_eq!(t, back);
     }
     #[test]
+    fn repeated_small_rotations_preserve_rigidity_and_accumulated_angle() {
+        let step = Quat::from_axis_angle(Vec3d::Z, PI / 8192.0).unwrap();
+        let mut rotation = Quat::IDENTITY;
+        for _ in 0..4096 {
+            rotation = rotation * step;
+        }
+        let norm_squared: f64 = rotation.components().iter().map(|v| v * v).sum();
+        assert!((norm_squared - 1.0).abs() < EPS);
+        let (x, y, z) = (
+            rotation.rotate(Vec3d::X),
+            rotation.rotate(Vec3d::Y),
+            rotation.rotate(Vec3d::Z),
+        );
+        assert!(close(x, Vec3d::Y, EPS));
+        assert!(close(y, -Vec3d::X, EPS));
+        assert!(close(z, Vec3d::Z, EPS));
+        assert!((x.dot(y.cross(z)) - 1.0).abs() < EPS);
+        let vector = Vec3d::new(3.0, -2.0, 5.0);
+        assert!((rotation.rotate(vector).norm() - vector.norm()).abs() < EPS);
+    }
+
+    #[test]
     fn checked_quaternions_preserve_rigid_geometry() {
         for w in [0.0, 1e-100, 1e100, 2.0, f64::NAN, f64::INFINITY] {
             assert!(Quat::try_new(w, 0.0, 0.0, 0.0).is_none());

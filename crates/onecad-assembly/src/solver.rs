@@ -928,6 +928,35 @@ mod tests {
     }
 
     #[test]
+    fn one_iteration_exhaustion_returns_no_poses_and_preserves_request() {
+        let j = joint(
+            10,
+            JointKind::Rigid,
+            frame_at(Vec3d::new(1.0, 0.0, 0.0)),
+            frame_at(Vec3d::ZERO),
+            1,
+            2,
+        );
+        let mut request = SolveRequest::new(
+            two_bodies(pose(rot_z(0.4), Vec3d::new(0.0, 5.0, 7.0))),
+            vec![j],
+        );
+        request.max_iterations = 1;
+        let before = serde_json::to_value(&request).unwrap();
+        match solve(&request) {
+            SolveOutcome::NotConverged {
+                iterations,
+                max_residual,
+            } => {
+                assert_eq!(iterations, 1);
+                assert!(max_residual.is_finite() && max_residual > request.tolerance);
+            }
+            other => panic!("expected iteration exhaustion, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&request).unwrap(), before);
+    }
+
+    #[test]
     fn rigid_joint_pulls_b_onto_a() {
         let fa = frame_at(Vec3d::new(1.0, 0.0, 0.0));
         let j = joint(10, JointKind::Rigid, fa, frame_at(Vec3d::ZERO), 1, 2);
