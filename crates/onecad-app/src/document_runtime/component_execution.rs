@@ -126,6 +126,11 @@ impl DocumentRuntime {
                 "component replay belongs to a stale runtime".into(),
             ));
         }
+        if self.session.transaction_open() {
+            return Err(ApiError::InvalidCommand(
+                "component replay is blocked by an open transaction".into(),
+            ));
+        }
         let doc = self.session.document();
         let def = doc
             .definitions
@@ -165,6 +170,11 @@ impl DocumentRuntime {
             || output.epoch != current_epoch
         {
             return Err(ApiError::InvalidCommand("component replay is stale".into()));
+        }
+        if self.session.transaction_open() {
+            return Err(ApiError::InvalidCommand(
+                "component replay is blocked by an open transaction".into(),
+            ));
         }
         let current = self
             .session

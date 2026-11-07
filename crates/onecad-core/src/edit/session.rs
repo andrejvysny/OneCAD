@@ -56,6 +56,7 @@
 //! it would leave the sketch on the XY placeholder — a silent wrong frame, not a
 //! deferred resolution.
 
+pub(crate) mod component_history;
 mod sketch_history;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,8 +78,8 @@ use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchEr
 use super::command::{EditCommand, InputPath, InputRef, SketchEditOp, VisibilityTarget};
 use super::outcome::{CommandOutcome, ProjectionDelta, RegenHint};
 use super::undo::{
-    fold_floor, insert_record_at, replace_record_at, AppliedEdit, Inverse, Txn, UndoOutcome,
-    UndoStack,
+    fold_floor, insert_record_at, replace_record_at, AppliedEdit, HistoryDirection, Inverse, Txn,
+    UndoOutcome, UndoStack,
 };
 
 /// Owns the document and applies [`EditCommand`]s as the sole writer.
@@ -148,7 +149,10 @@ impl DocumentSession {
         id: onecad_assembly::occurrence::ComponentDefId,
         component: crate::document::component::ComponentDef,
     ) -> bool {
-        if component.id != id || !self.document.definitions.contains_key(&id) {
+        if self.open_txn.is_some()
+            || component.id != id
+            || !self.document.definitions.contains_key(&id)
+        {
             return false;
         }
         self.document.definitions.insert(id, component);
@@ -765,6 +769,9 @@ impl DocumentSession {
         if self.open_txn.is_some() {
             return None;
         }
+        let component_redo = self
+            .capture_component_identities(self.undo.history_txn(HistoryDirection::Undo)?)
+            .ok()?;
         let txn = self.undo.pop_for_undo()?;
         let mut dirty_floor: Option<usize> = None;
         for edit in txn.edits.iter().rev() {
@@ -772,7 +779,7 @@ impl DocumentSession {
             edit.inverse.clone().apply(&mut self.document);
         }
         self.rebuild_graph();
-        self.undo.push_undone(txn);
+        self.undo.push_undone_with_components(txn, component_redo);
         Some(UndoOutcome { dirty_floor })
     }
 
@@ -791,9 +798,13 @@ impl DocumentSession {
         if self.open_txn.is_some() {
             return Ok(None);
         }
-        let Some(txn) = self.undo.pop_for_redo() else {
+        let Some((txn, component_redo)) = self.undo.pop_redo_with_components() else {
             return Ok(None);
         };
+        if let Err(error) = self.check_undone_component_identities(&component_redo) {
+            self.undo.push_undone_with_components(txn, component_redo);
+            return Err(error);
+        }
         let mut new_edits: Vec<AppliedEdit> = Vec::with_capacity(txn.edits.len());
         let mut dirty_floor: Option<usize> = None;
         for edit in &txn.edits {
@@ -810,10 +821,18 @@ impl DocumentSession {
                         done.inverse.apply(&mut self.document);
                     }
                     self.rebuild_graph();
-                    self.undo.push_undone(txn);
+                    self.undo.push_undone_with_components(txn, component_redo);
                     return Err(e);
                 }
             }
+        }
+        if let Err(error) = self.restore_component_identities(&component_redo) {
+            for done in new_edits.into_iter().rev() {
+                done.inverse.apply(&mut self.document);
+            }
+            self.rebuild_graph();
+            self.undo.push_undone_with_components(txn, component_redo);
+            return Err(error);
         }
         self.undo.push_redone(Txn {
             label: txn.label,

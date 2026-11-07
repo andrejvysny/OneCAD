@@ -1,6 +1,6 @@
 use super::replay::hash_edges;
 use super::*;
-use onecad_core::edit::AssemblyEdit;
+use onecad_core::edit::{AssemblyEdit, EditCommand};
 
 fn runtime() -> DocumentRuntime {
     let backend = Arc::new(crate::worker::PendingBackend);
@@ -51,6 +51,134 @@ fn output(input: ComponentReplayInput, epoch: WorkerEpoch) -> ComponentReplayOut
         minted: false,
         _retention: input._retention,
     }
+}
+
+#[test]
+fn prepare_replay_refuses_open_transaction_without_mutation() {
+    let mut runtime = runtime();
+    let id = ComponentDefId(Uuid::from_u128(0x501));
+    runtime
+        .apply_assembly_edit(AssemblyEdit::CreateDefinition {
+            id,
+            name: "Part".into(),
+        })
+        .unwrap();
+    runtime.dirty = false;
+    runtime.session.begin_transaction("caller");
+    let pending = ComponentDefId(Uuid::from_u128(0x505));
+    runtime
+        .session
+        .apply(EditCommand::Assembly {
+            edit: Box::new(AssemblyEdit::CreateDefinition {
+                id: pending,
+                name: "Pending".into(),
+            }),
+        })
+        .unwrap();
+    let before = serde_json::to_value(runtime.session.document()).unwrap();
+    let state = (
+        runtime.revision(),
+        runtime.persisted_generation(),
+        runtime.undo_depth(),
+        runtime.redo_depth(),
+    );
+    let error = match runtime.prepare_component_replay(id, &runtime.runtime_session()) {
+        Ok(_) => panic!("replay preparation must refuse an open transaction"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("blocked by an open transaction"));
+    assert!(runtime.session.transaction_open());
+    assert_eq!(
+        serde_json::to_value(runtime.session.document()).unwrap(),
+        before
+    );
+    assert_eq!(
+        (
+            runtime.revision(),
+            runtime.persisted_generation(),
+            runtime.undo_depth(),
+            runtime.redo_depth()
+        ),
+        state
+    );
+    assert!(!runtime.is_dirty());
+    assert!(runtime.component_cache.is_empty());
+    runtime.session.cancel_transaction();
+    assert!(!runtime
+        .session
+        .document()
+        .definitions
+        .contains_key(&pending));
+}
+
+#[test]
+fn commit_replay_refuses_transaction_opened_after_prepare_without_mutation() {
+    let mut runtime = runtime();
+    let id = ComponentDefId(Uuid::from_u128(0x502));
+    runtime
+        .apply_assembly_edit(AssemblyEdit::CreateDefinition {
+            id,
+            name: "Part".into(),
+        })
+        .unwrap();
+    let input = runtime
+        .prepare_component_replay(id, &runtime.runtime_session())
+        .unwrap();
+    runtime
+        .commit_component_replay(output(input, WorkerEpoch(2)), WorkerEpoch(2))
+        .unwrap();
+    let input = runtime
+        .prepare_component_replay(id, &runtime.runtime_session())
+        .unwrap();
+    let mut replay = output(input, WorkerEpoch(2));
+    replay
+        .definition
+        .bodies
+        .register(onecad_core::document::body::BodyMeta::new(
+            BodyId(Uuid::from_u128(0x503)),
+            "Replayed",
+            RecordId(Uuid::from_u128(0x504)),
+        ));
+    runtime.dirty = false;
+    runtime.session.begin_transaction("caller");
+    let before = serde_json::to_value(runtime.session.document()).unwrap();
+    let state = (
+        runtime.revision(),
+        runtime.persisted_generation(),
+        runtime.undo_depth(),
+        runtime.redo_depth(),
+        runtime.component_generation,
+    );
+    let cache = &runtime.component_cache[&id];
+    let cached = (cache.generation, cache.fingerprint.clone());
+    let error = runtime
+        .commit_component_replay(replay, WorkerEpoch(2))
+        .unwrap_err();
+    assert!(error.to_string().contains("blocked by an open transaction"));
+    assert!(runtime.session.transaction_open());
+    assert_eq!(
+        serde_json::to_value(runtime.session.document()).unwrap(),
+        before
+    );
+    assert_eq!(
+        (
+            runtime.revision(),
+            runtime.persisted_generation(),
+            runtime.undo_depth(),
+            runtime.redo_depth(),
+            runtime.component_generation
+        ),
+        state
+    );
+    assert_eq!(
+        (
+            runtime.component_cache[&id].generation,
+            runtime.component_cache[&id].fingerprint.clone()
+        ),
+        cached
+    );
+    assert!(!runtime.is_dirty());
+    runtime.session.cancel_transaction();
 }
 
 #[test]

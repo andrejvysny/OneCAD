@@ -349,6 +349,7 @@ impl Txn {
 pub struct UndoStack {
     undo: Vec<Txn>,
     redo: Vec<Txn>,
+    redo_components: Vec<Vec<super::session::component_history::ComponentRedoState>>,
     /// Monotonic count of committed steps EVICTED past [`UNDO_CAP`] since this
     /// stack was created. A depth-based watermark (the sketch-session squash) is
     /// only valid while this is unchanged: once the bottom shifts out, a
@@ -464,6 +465,7 @@ impl UndoStack {
     pub fn push_committed(&mut self, txn: Txn) {
         self.undo.push(txn);
         self.redo.clear();
+        self.redo_components.clear();
         self.enforce_cap();
     }
 
@@ -482,6 +484,7 @@ impl UndoStack {
             self.undo.push(txn);
         }
         self.redo.clear();
+        self.redo_components.clear();
         self.enforce_cap();
     }
 
@@ -515,6 +518,7 @@ impl UndoStack {
             .edits
             .push(edit);
         self.redo.clear();
+        self.redo_components.clear();
     }
 
     /// Pops the newest undo transaction (the session applies its inverses).
@@ -525,11 +529,32 @@ impl UndoStack {
     /// Pushes an undone transaction onto the redo stack.
     pub fn push_undone(&mut self, txn: Txn) {
         self.redo.push(txn);
+        self.redo_components.push(Vec::new());
     }
 
     /// Pops the newest redo transaction (the session replays its forwards).
     pub fn pop_for_redo(&mut self) -> Option<Txn> {
-        self.redo.pop()
+        self.pop_redo_with_components().map(|(txn, _)| txn)
+    }
+
+    pub(crate) fn pop_redo_with_components(
+        &mut self,
+    ) -> Option<(
+        Txn,
+        Vec<super::session::component_history::ComponentRedoState>,
+    )> {
+        let txn = self.redo.pop()?;
+        let states = self.redo_components.pop().expect("redo metadata is paired");
+        Some((txn, states))
+    }
+
+    pub(crate) fn push_undone_with_components(
+        &mut self,
+        txn: Txn,
+        states: Vec<super::session::component_history::ComponentRedoState>,
+    ) {
+        self.push_undone(txn);
+        *self.redo_components.last_mut().expect("just pushed redo") = states;
     }
 
     /// Pushes a redone transaction back onto the undo stack **without** clearing
@@ -547,12 +572,14 @@ impl UndoStack {
     /// session the user just discarded, so the entry is dropped.
     pub fn clear_redo(&mut self) {
         self.redo.clear();
+        self.redo_components.clear();
     }
 
     /// Clears both stacks.
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.redo_components.clear();
     }
 
     fn enforce_cap(&mut self) {

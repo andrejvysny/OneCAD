@@ -27,6 +27,14 @@ translation control does not establish full part-editor parity.
 
 The root `DocumentSession` is the single authoritative mutation and undo owner.
 Flat occurrence edits and embedded definition edits enter that same history.
+Replay adoption is refused while a document transaction is open. When Undo
+captures a definition edit, its Redo metadata retains only changed topology
+entries minted by the completed replay. Redo restores those entries only after
+checking the undone definition state and replayed authored inputs. Recreated
+copies also check body/repair state and inherited element evidence. A newer
+replay while undone can therefore refuse Redo atomically; it cannot combine
+old persistent identities with newer evidence. This metadata is session-local
+and does not change the document schema or serialized transaction format.
 Repeated occurrences refer to one definition; pose, visibility, and grounding
 belong to each occurrence. Make-independent copies the definition without
 rewriting its local identities. Nested occurrence authoring and root-recursive
