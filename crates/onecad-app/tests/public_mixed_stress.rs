@@ -46,6 +46,9 @@ use sha2::{Digest, Sha256};
 use std::{path::Path, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+// Both cases own the process-wide auxiliary worker permit through teardown.
+static WORKER_LANE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn open(path: &Path, root: &Path) -> (Harness, String) {
     let h = Harness::new(root).await;
     let opened = api::open_assembly_document(
@@ -208,6 +211,7 @@ async fn verify_scene(state: &AppState, session: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_mixed_ten_definitions_twenty_occurrences_cold_reopen() {
+    let _worker_lane = WORKER_LANE.lock().await;
     host::required_worker();
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     if let Some(area) = std::env::var_os("ONECAD_PUBLIC_MIXED_CHILD") {

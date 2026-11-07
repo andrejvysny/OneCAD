@@ -41,6 +41,7 @@ fn write(path: &Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn framework_assembly_topology_rebind_refuses_without_adoption() {
+    let _worker_lane = WORKER_LANE.lock().await;
     host::required_worker();
     let area = tempfile::tempdir().unwrap();
     let path = area.path().join("framework.onecad");
