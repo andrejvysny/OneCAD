@@ -34,6 +34,7 @@ pub fn sweep(profile: SketchRegionRef, id: RecordId, step: u32) -> OperationReco
             profile: Some(profile),
             path_sketch: None,
             path_edge: None,
+            path_range: None,
             boolean_mode: BooleanMode::NewBody,
             extra: Default::default(),
         }),

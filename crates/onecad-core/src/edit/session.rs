@@ -2494,9 +2494,7 @@ fn validate_offset_face(op: &Operation) -> Result<(), DomainError> {
     p.validate().map_err(DomainError::Validation)
 }
 
-/// Validates the optional SCHEMA §7.3 `regionAnchor` an Extrude/Revolve profile
-/// may carry: present ⇒ two FINITE numbers. Other and opaque ops are trivially
-/// valid.
+/// Validates profile anchors and the optional bounded Sweep path interval.
 ///
 /// Enforced here for the same single-writer reason as [`validate_hole`]: a
 /// malformed anchor decides what the op may bind to, so it is refused BY NAME at
@@ -2510,6 +2508,7 @@ fn validate_region_anchor(op: &Operation) -> Result<(), DomainError> {
         Operation::Known(KnownOperation::Revolve(p)) => {
             p.validate().map_err(DomainError::Validation)
         }
+        Operation::Known(KnownOperation::Sweep(p)) => p.validate().map_err(DomainError::Validation),
         _ => Ok(()),
     }
 }

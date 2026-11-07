@@ -324,6 +324,7 @@ pub fn op_sweep() -> Operation {
         profile: Some(profile()),
         path_sketch: Some(SketchId(uid(0x5C03))),
         path_edge: None,
+        path_range: None,
         boolean_mode: BooleanMode::NewBody,
         extra: Default::default(),
     }))

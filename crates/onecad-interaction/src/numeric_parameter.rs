@@ -339,6 +339,7 @@ pub(crate) fn validate_operation(operation: &Operation) -> Result<(), String> {
         Operation::Known(KnownOperation::Revolve(p)) => p.validate(),
         Operation::Known(KnownOperation::Loft(p)) => p.validate(),
         Operation::Known(KnownOperation::Sweep(p)) => {
+            p.validate()?;
             let profile = p.profile.as_ref().ok_or("Sweep requires a profile")?;
             let path = p.path_sketch.ok_or("Choose a Sweep path sketch")?;
             if p.path_edge.is_some()

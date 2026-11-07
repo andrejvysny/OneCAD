@@ -7,6 +7,12 @@
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRep_Tool.hxx>
+#include <GeomAbs_SurfaceType.hxx>
+#include <Precision.hxx>
+#include <gp_Pln.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <gp_Pnt.hxx>
@@ -347,9 +353,12 @@ void refusals() {
     { Fixture f(4,4,.5,false); f.cancel.cancel(); const auto out = f.run();
       check(out.status == ops::OpOutcome::Status::Cancelled && f.bodies.all().empty(), "cancellation publishes nothing"); }
 }
-void transaction_fences() {
+#include "sweep_open_cases.h"
+
+void transaction_fences(bool open = false) {
     Fixture fixture(4, 2, .2, true);
     set_standard_xy(fixture, 4);
+    if (open) fixture.op["params"]["pathRange"] = {{"startRadians", 0.0}, {"endRadians", .5}};
     json operations = json::array();
     int index = 0;
     for (const auto& [id, data] : fixture.sketches) {
@@ -380,9 +389,10 @@ void transaction_fences() {
     check(accepted.ok.value_or(false) && state.bodies_copy().contains("body_sweep"), "accepted sweep published");
 }
 
-void previews() {
+void previews(bool open = false) {
     Fixture fixture(4, 2, .2, true);
     set_standard_xy(fixture, 4);
+    if (open) fixture.op["params"]["pathRange"] = {{"startRadians", 0.0}, {"endRadians", .5}};
     session::Session state;
     state.open("sweep-preview", 0, 3, "determinism");
     for (const auto& [id, params] : fixture.sketches) state.sketches().upsert(id, params);
@@ -423,7 +433,11 @@ int main() {
     opposite_profile_normal();
     anchor_rebinding();
     refusals();
+    open_arc_controls();
+    open_arc_refusals();
     transaction_fences();
+    transaction_fences(true);
     previews();
+    previews(true);
     return failures;
 }
