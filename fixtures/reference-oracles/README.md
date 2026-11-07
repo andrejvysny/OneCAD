@@ -37,3 +37,33 @@ agreed on 2002.3754 mm³ and 3197.8774 mm². The four displayed decimal places b
 rounding only; import conversion and healing uncertainty remain unmeasured.
 This observation does not replace an existing oracle or justify widening a
 tolerance. It does not establish native OneCAD history or source equivalence.
+## Upstream Prusa source tessellations
+
+The separately pinned, unmodified box, cover and lever STLs come from the same
+Prusa revision as the STEP inputs. `inspect_prusa_source_stl.py` uses only the
+Python standard library to read binary triangles, verify opposite edge winding,
+count edge-connected components, and calculate bounds, area and signed volume.
+Its analytic tetrahedron and malformed-input tests run with:
+
+```sh
+python -m unittest discover -s fixtures/reference-oracles -p test_prusa_source_stl.py
+python fixtures/reference-oracles/inspect_prusa_source_stl.py \
+  fixtures/public-cad/prusa/MINI-fsenzor-lever.stl /tmp/new-lever-report.json
+```
+
+For box and cover, pass `--expected-sha256` with the respective exact digest from
+`fixtures/public-cad/manifest.json`. Existing reports are never overwritten.
+The checked reports are `prusa-box-stl.json`, `prusa-cover-stl.json` and
+`prusa-lever-stl.json`. Each has one edge-connected component and closed opposite
+winding. Euler characteristics are -14, -4 and -4 respectively; those values
+alone do not certify vertex manifoldness, self-intersection freedom or hole
+geometry. The upstream meshes are independent of OneCAD output; their export
+engine and meshing deflection are not certified.
+
+The STL and STEP poses differ for cover and lever. The native lever regression
+compares sorted bound spans under an explicitly unqualified axis-permutation
+assumption, plus volume and the closed-mesh Euler characteristic. Sorted AABB
+spans are not invariant under arbitrary rotation and do not prove alignment. It does not compare mesh bytes across kernels.
+The 0.15 mm and 2% numerical bounds reuse existing Prusa trial diagnostics;
+they are not a ratified exact-BRep or physical accuracy budget. These coarse
+checks and topology do not uniquely establish shape equivalence.

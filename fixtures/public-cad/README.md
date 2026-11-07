@@ -19,6 +19,9 @@ authored occurrence/joint intent must be stored separately from imported STEP.
 - Original Prusa MINI filament sensor: Prusa Research, GPL v3 license text and
   upstream README retained. Box, cover and lever remain separate original STEP
   inputs. Their inclusion does not assert mechanical joints or native history.
+  The unmodified box, cover and lever STLs are separately pinned at the same revision
+  for source-authored tessellation measurements. STL has no embedded unit or
+  exact-surface accuracy guarantee; those limits remain explicit in its report.
 - Robonine simulation clamp meshes: © 2025 Robonine, CERN-OHL-P-2.0. Only the
   two explicitly attributed visual clamp STLs are admitted, alongside the
   Apache-2.0 xacro description, REUSE license map, notices and license texts.

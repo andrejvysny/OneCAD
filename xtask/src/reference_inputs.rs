@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn admitted_reference_inventory_is_exact_and_offline() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/public-cad");
-        assert_eq!(verify(&root).unwrap(), 27);
+        assert_eq!(verify(&root).unwrap(), 30);
         let manifest: Manifest =
             serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
         let expected: BTreeSet<_> = [
@@ -261,8 +261,11 @@ mod tests {
             "nist/nist_ftc_10_asme1_rb.stp",
             "prusa/LICENSE",
             "prusa/MINI-fsenzor-box.stp",
+            "prusa/MINI-fsenzor-box.stl",
             "prusa/MINI-fsenzor-cover.stp",
+            "prusa/MINI-fsenzor-cover.stl",
             "prusa/MINI-fsenzor-lever.stp",
+            "prusa/MINI-fsenzor-lever.stl",
             "prusa/README.md",
             "robonine/DOCS-LICENSE.txt",
             "robonine/LICENSES/Apache-2.0.txt",

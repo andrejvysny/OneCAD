@@ -174,6 +174,18 @@
       "geometryOracleStatus": "pending"
     },
     {
+      "path": "prusa/MINI-fsenzor-box.stl",
+      "byteLength": 776284,
+      "sha256": "4665d3b0653d601e9b1e9adbe9e960ac78df38897edd32741e86aff37094bb7f",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/STL/MINI-fsenzor-box.stl",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "mm; source project convention, not embedded STL metadata",
+      "intendedUse": "Upstream-authored tessellation for independent source-mesh bounds and volume diagnostics; not exact BRep or physical qualification",
+      "geometryOracleStatus": "pending"
+    },
+    {
       "path": "prusa/MINI-fsenzor-cover.stp",
       "byteLength": 89896,
       "sha256": "e6391172f932b141483f7b8b1a0b560c4260ba1116e588873916ba0ecacb2bd5",
@@ -186,6 +198,18 @@
       "geometryOracleStatus": "pending"
     },
     {
+      "path": "prusa/MINI-fsenzor-cover.stl",
+      "byteLength": 100484,
+      "sha256": "36e77fec08db8a439907110e9371f58b4b39e54644b7e480f3a36b3c51a55543",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/STL/MINI-fsenzor-cover.stl",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "mm; source project convention, not embedded STL metadata",
+      "intendedUse": "Upstream-authored tessellation for independent source-mesh bounds and volume diagnostics; not exact BRep or physical qualification",
+      "geometryOracleStatus": "pending"
+    },
+    {
       "path": "prusa/MINI-fsenzor-lever.stp",
       "byteLength": 44308,
       "sha256": "beee16c2e5c09d26777d4971df8c343d467f926121d1753c6b41bc0b5ff6bbc6",
@@ -195,6 +219,18 @@
       "license": "GPL-3.0-only",
       "units": "mm",
       "intendedUse": "Reference geometry import; native reconstruction and assembly qualification are separate",
+      "geometryOracleStatus": "pending"
+    },
+    {
+      "path": "prusa/MINI-fsenzor-lever.stl",
+      "byteLength": 107484,
+      "sha256": "720e305f4a783a706a08091f62a4ac0eef89335e7d0c78fcb6bdae4f58cada73",
+      "sourceUrl": "https://raw.githubusercontent.com/prusa3d/Original-Prusa-MINI/853bc30c4b10190f1d669ed6d0a567e333c28f21/STL/MINI-fsenzor-lever.stl",
+      "revision": "853bc30c4b10190f1d669ed6d0a567e333c28f21",
+      "archiveMember": null,
+      "license": "GPL-3.0-only",
+      "units": "mm; source project convention, not embedded STL metadata",
+      "intendedUse": "Upstream-authored tessellation for independent source-mesh bounds and volume diagnostics; not exact BRep or physical qualification",
       "geometryOracleStatus": "pending"
     },
     {
