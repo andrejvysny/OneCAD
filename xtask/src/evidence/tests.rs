@@ -115,7 +115,7 @@ fn host_service_selection_requires_its_own_exact_inventory_and_count() {
         assert!(host::inventory(&output, services).is_err());
     }
     let summary =
-        "test result: ok. 6 passed; 0 failed; 0 ignored; 58 filtered out; finished in 1s\n";
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 58 filtered out; finished in 1s\n";
     // Service verification does not infer renderer qualification from its log.
     let passed = SERVICE_TESTS
         .iter()
@@ -127,8 +127,12 @@ fn host_service_selection_requires_its_own_exact_inventory_and_count() {
         "test result: ok. 0 passed; 0 failed; 0 ignored;".into(),
         passed.replacen("... ok\n", "... FAILED\n", 1),
         passed.replace(
+            "7 passed; 0 failed; 0 ignored;",
+            "6 passed; 0 failed; 1 ignored;",
+        ),
+        passed.replace(
+            "7 passed; 0 failed; 0 ignored;",
             "6 passed; 0 failed; 0 ignored;",
-            "5 passed; 0 failed; 1 ignored;",
         ),
         passed.replace(&format!("test {} ... ok\n", SERVICE_TESTS[3]), ""),
         passed.clone() + summary,

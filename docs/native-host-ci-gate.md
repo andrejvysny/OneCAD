@@ -49,10 +49,11 @@ Ctrl+Tab cycling, unpreparable-switch fallback, and the new-tab Home and close
 prompt.
 
 The service selection (`document_services::tests::home_lifecycle_tests::` and
-`bridge::tests::` and the two explicit native assembly document tests,
-`SERVICE_TESTS`) has six cases: three no-document Home
-lifecycle cases and the production bridge actor no-document start and explicit
-New capture, plus assembly capture/save/reopen and native assembly controls.
+`bridge::tests::`, two explicit native assembly document tests and the repeated-
+occurrence source-restoration module, `SERVICE_TESTS`) has seven cases: three
+no-document Home lifecycle cases and the production bridge actor no-document
+start and explicit New capture, plus assembly capture/save/reopen, native assembly
+controls and source restoration with stale/sibling pick refusal.
 These cases emit no required adapter record, so Metal provenance for the run
 comes from the lifecycle selection.
 
