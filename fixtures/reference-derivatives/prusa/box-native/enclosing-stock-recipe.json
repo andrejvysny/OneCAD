@@ -1,0 +1,15 @@
+{
+  "sourceSha256": "c8b06ef5271166c367d27be13e9c8f93a7ae07707033e4d23bd1ed5997285cb6",
+  "description": "Deliberately oversized enclosing stock; not source geometry.",
+  "corner": [
+    -40.0,
+    -26.0,
+    -10.0
+  ],
+  "dimensions": [
+    61.0,
+    28.0,
+    15.0
+  ],
+  "sourceMinusStockVolumeMm3SameKernel": 0.0
+}

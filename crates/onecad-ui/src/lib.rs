@@ -142,6 +142,7 @@ pub fn run() -> Result<(), String> {
     paths.require_launch_environment()?;
     let _profile_lifetime = paths.clone();
     let _logging = onecad_app::logging::init_with_default_directory(&paths.logs);
+    performance::initialize(&paths.root.join("performance"));
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
         "../../../assets/native/app-icons/icon.png"
     ))
@@ -173,6 +174,7 @@ pub fn run() -> Result<(), String> {
         }),
     )
     .map_err(|error| error.to_string())?;
+    performance::request_export();
     tracing::info!("Native host exited cleanly");
     Ok(())
 }
