@@ -1,4 +1,7 @@
+#[path = "error_cleanup_cancellation.rs"]
+mod cancellation;
 use super::*;
+pub(super) use cancellation::{cancel_replay_during_worker_io, install_budget};
 
 async fn definition(
     state: &AppState,

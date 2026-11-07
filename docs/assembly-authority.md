@@ -99,7 +99,9 @@ solver inputs and symbolic DOF expectations live under
 ## Native translation continuity
 
 An appended, non-copy, literal translation may continue a previously verified
-component prefix. The runtime requires the same root worker head and replay
+component prefix containing only known native operations and no imported-face
+certificates. Imported, placed-library and frozen definitions retain the existing full-replay
+path; this continuation does not reconstruct imported producer provenance. The runtime requires the same root worker head and replay
 settings/import context, an exact matching authoritative history inverse, and
 unchanged definition fields outside the appended suffix. Historical proof work
 has its own archive admission. Rotations, expressions, copies, suppressed steps
@@ -128,3 +130,21 @@ owned until the working runtime is dropped. These local limits do not raise
 OCW1, mesh, scene or host resource caps. Post-admission replay failures drain their
 owned worker before returning; cancellation retains its existing retirement guard.
 Startup failure and teardown-timeout background reaping remain distinct paths.
+
+Observed non-copy transform output writeback is retained with component Redo.
+Only empty command outputs that replay filled with exactly the existing target
+bodies qualify. The sidecar checks unchanged authored fields, record identity,
+opaque state and body producers, restores outputs atomically with identity deltas,
+and rebuilds dependencies. It does not discard arbitrary record outputs or alter
+suppressed, opaque, copied or unexecuted feature metadata.
+
+Checkpoint transport does not reconstruct the native prefix's producer/alias
+metadata. The continuation keeps the freshly executed, identity-verified prefix
+registry and appends only checked suffix `Modified` events for the declared
+transform targets. Any body-set, ownership or event-kind change refuses the
+continuation. This preserves producer IDs, aliases and complete lifecycle history
+without claiming a new owner from incomplete checkpoint metadata.
+
+The continuation future has an explicit size-based scratch reservation and lives
+on the heap. This keeps deep native capture calls within the existing thread stack
+budget; no stack, transport or scene cap is increased.

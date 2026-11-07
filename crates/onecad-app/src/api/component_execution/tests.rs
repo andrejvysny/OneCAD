@@ -52,6 +52,7 @@ async fn real_worker_replays_shared_definition_and_fresh_reopen() {
     let (_, host, _, _) =
         super::super::recovery_identity_tests::pending_copy(area.path(), false).await;
     let state = Arc::new(AppState::default());
+    let replay_budget = error_cleanup::install_budget(&state);
     state.start(host.clone()).unwrap();
     let opened = super::super::open_assembly_document(
         &state,
@@ -63,6 +64,7 @@ async fn real_worker_replays_shared_definition_and_fresh_reopen() {
     .unwrap();
     assert!(state.readiness().wait_ready(Duration::from_secs(15)).await);
     let session = opened.runtime_session;
+    error_cleanup::cancel_replay_during_worker_io(&state, &session, id, &replay_budget).await;
     error_cleanup::unpromoted_read_only_replay(&state, &session, id).await;
     error_cleanup::failed_replay_releases_capacity(&state, &session, id, host.clone()).await;
     let (generation, projection) = regenerate_component(&state, &session, id).await.unwrap();

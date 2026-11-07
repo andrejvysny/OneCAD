@@ -1,8 +1,48 @@
 //! Isolated component replay and checked mesh verification.
 use super::*;
 
+struct AbortReplayTask(tokio::task::AbortHandle);
+impl Drop for AbortReplayTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn future_bytes<F: std::future::Future>(_: &impl FnOnce() -> F) -> usize {
+    std::mem::size_of::<F>()
+}
+
 impl ComponentReplayInput {
     pub(crate) async fn drive(
+        self,
+        worker: crate::worker::WorkerManager,
+        epoch: WorkerEpoch,
+        promote: bool,
+    ) -> Result<ComponentReplayOutput, ApiError> {
+        let budget = self.archive_budget.clone();
+        let make_work = move || self.drive_inner(worker, epoch, promote);
+        let work_bytes = future_bytes(&make_work)
+            .checked_add(std::mem::size_of_val(&make_work))
+            .ok_or_else(|| ApiError::Io("component replay task size overflow".into()))?;
+        let reservation = budget
+            .reserve(work_bytes, crate::resource_admission::ArchiveUse::Scratch)
+            .map_err(ApiError::Io)?;
+        let child_reservation = reservation.clone();
+        // Replay must not share the UI's deep poll stack. Cancellation aborts
+        // only this isolated task; its worker lease still owns process reaping.
+        let task = tokio::spawn(async move {
+            let _reservation = child_reservation;
+            // Construct the large future only on the isolated task's short
+            // poll stack, then move its state to the admitted allocation.
+            Box::pin(make_work()).await
+        });
+        let _abort = AbortReplayTask(task.abort_handle());
+        task.await.map_err(|error| {
+            ApiError::Internal(format!("component replay task stopped: {error}"))
+        })?
+    }
+
+    async fn drive_inner(
         self,
         worker: crate::worker::WorkerManager,
         epoch: WorkerEpoch,
@@ -47,10 +87,18 @@ impl ComponentReplayInput {
             ));
         }
         let continuation_retention = if let Some(base) = &self.translation_prefix {
-            Some(
-                super::translation::continue_translation(&self, &mut working, &worker, base)
-                    .await?,
-            )
+            let continuation =
+                super::translation::continue_translation(&self, &mut working, &worker, base);
+            // An inline continuation enlarges deep native capture futures even
+            // when their replay does not take this branch.
+            let _future_retention = self
+                .archive_budget
+                .reserve(
+                    std::mem::size_of_val(&continuation),
+                    crate::resource_admission::ArchiveUse::Scratch,
+                )
+                .map_err(ApiError::Io)?;
+            Some(Box::pin(continuation).await?)
         } else {
             let report = working
                 .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())

@@ -1,6 +1,8 @@
 //! Continue a verified native prefix without resolving old evidence on moved geometry.
 use super::*;
 use crate::worker::{ElementQuery, WorkerManager};
+#[path = "translation_lifecycle.rs"]
+mod lifecycle;
 use onecad_core::document::element_index::ElementEntry;
 use onecad_core::document::record::{KnownOperation, Operation};
 
@@ -63,6 +65,7 @@ fn translations(def: &ComponentDef, from: usize) -> Option<BTreeMap<BodyId, [f64
         if record.suppressed
             || !record.extra.is_empty()
             || params.copy
+            || params.is_identity()
             || !params.extra.is_empty()
             || params.rotate.angle_deg.value != 0.0
             || params.rotate.angle_deg.expr.is_some()
@@ -87,6 +90,19 @@ fn translations(def: &ComponentDef, from: usize) -> Option<BTreeMap<BodyId, [f64
     Some(offsets)
 }
 
+fn native_definition(def: &ComponentDef) -> bool {
+    !def.elements
+        .iter()
+        .any(|(_, entry)| entry.import_source_identity.is_some())
+        && !def.timeline.records().iter().any(|record| {
+            matches!(
+                record.op,
+                Operation::Known(KnownOperation::ImportStep(_) | KnownOperation::PlaceComponent(_))
+                    | Operation::Opaque(_)
+            )
+        })
+}
+
 impl DocumentRuntime {
     pub(super) fn component_translation_prefix(
         &self,
@@ -100,7 +116,10 @@ impl DocumentRuntime {
         {
             return None;
         }
-        if def.elements.is_empty() || def.timeline.cursor() != def.timeline.len() {
+        if def.elements.is_empty()
+            || def.timeline.cursor() != def.timeline.len()
+            || !native_definition(def)
+        {
             return None;
         }
         let current_context = context(def)?;
@@ -251,10 +270,15 @@ async fn refresh_entry(
     Ok(())
 }
 
+struct BoundPrefix {
+    faces: BTreeMap<BodyId, BTreeSet<String>>,
+    bodies: onecad_core::document::body::BodyRegistry,
+}
+
 async fn replay_bound_prefix(
     runtime: &mut DocumentRuntime,
     base: &TranslationBase,
-) -> Result<BTreeMap<BodyId, BTreeSet<String>>, ApiError> {
+) -> Result<BoundPrefix, ApiError> {
     let prefix = base.prefix;
     runtime
         .session
@@ -279,7 +303,10 @@ async fn replay_bound_prefix(
         ));
     }
     drop(prefix_meshes);
-    face_ids(runtime).await
+    Ok(BoundPrefix {
+        faces: face_ids(runtime).await?,
+        bodies: runtime.regen.bodies.clone(),
+    })
 }
 
 async fn save_bound_checkpoint(
@@ -364,7 +391,7 @@ pub(super) async fn continue_translation(
     }
     let offsets = translations(&input.definition, base.prefix)
         .ok_or_else(|| invalid("unsupported component identity continuation"))?;
-    let before_faces = replay_bound_prefix(runtime, base).await?;
+    let proven = replay_bound_prefix(runtime, base).await?;
     let retention = save_bound_checkpoint(input, runtime, worker).await?;
     runtime
         .session
@@ -380,7 +407,8 @@ pub(super) async fn continue_translation(
         )
         .await;
     ensure_valid(&report)?;
-    refresh_translated_entries(input, runtime, worker, &offsets, before_faces).await?;
+    lifecycle::restore(runtime, &input.definition, base.prefix, proven.bodies)?;
+    refresh_translated_entries(input, runtime, worker, &offsets, proven.faces).await?;
     Ok(retention)
 }
 

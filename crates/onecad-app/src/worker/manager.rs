@@ -674,6 +674,11 @@ pub struct WorkerManager {
 pub(crate) mod component_checkpoint;
 
 impl WorkerManager {
+    #[cfg(test)]
+    pub(crate) fn test_has_inflight_plan(&self) -> bool {
+        !self.shared.inflight.lock().unwrap().is_empty()
+    }
+
     /// Process-local identity for runtime ownership fencing.
     #[must_use]
     pub(crate) fn identity_token(&self) -> u64 {

@@ -6701,8 +6701,8 @@ impl PreparedRegen {
     /// [`FencingCell`], so an edit that lands during worker IO is observed at accept
     /// time (fencing live). Returns the driven result for
     /// [`DocumentRuntime::finish_regen`].
-    pub async fn drive(self, cancel: CancelToken) -> DrivenRegen {
-        self.drive_with_checkpoint_policy(cancel, false).await
+    pub fn drive(self, cancel: CancelToken) -> impl std::future::Future<Output = DrivenRegen> {
+        self.drive_with_checkpoint_policy(cancel, false)
     }
 
     async fn drive_with_checkpoint_policy(

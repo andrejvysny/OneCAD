@@ -211,3 +211,93 @@ fn historical_proof_refuses_when_its_own_reservation_is_denied() {
     assert!(runtime.component_translation_prefix(id, def).is_none());
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[test]
+fn native_continuation_refuses_imported_frozen_or_certified_definitions() {
+    use onecad_core::document::{
+        import_source_identity::{ImportIdentityCodec, ImportSourceAddress, ImportSourceIdentity},
+        record::{ImportSourceCodec, ImportStepParams, OpaqueOperation},
+    };
+    let (runtime, id, body, _) = proof();
+    let native = runtime.session.document().definitions[&id].clone();
+    assert!(native_definition(&native));
+    let mut imported = native.clone();
+    let import = Operation::Known(KnownOperation::ImportStep(ImportStepParams {
+        source_sha256: "a".repeat(64),
+        source_codec: ImportSourceCodec::Step,
+        source_name: "source.step".into(),
+        heal_policy: "occt-step-default-v1".into(),
+        unit_scale: Scalar::new(1.0),
+        brep_format: None,
+        provenance_sha256: None,
+        extra: Default::default(),
+    }));
+    imported.timeline.insert_at_cursor(OperationRecord::new(
+        RecordId(Uuid::new_v4()),
+        0,
+        "Imported",
+        import,
+    ));
+    assert!(!native_definition(&imported));
+    let placed = Operation::Known(KnownOperation::PlaceComponent(
+        onecad_core::document::record::PlaceComponentParams {
+            component_id: "test.embedded".into(),
+            component_version: "1.0.0".into(),
+            component_revision: format!("sha256:{}", "a".repeat(64)),
+            params: BTreeMap::new(),
+            source: onecad_core::document::record::ComponentSourceRef::Embedded {
+                sha256: "a".repeat(64),
+                codec: ImportSourceCodec::Step,
+                brep_format: None,
+                extra: Default::default(),
+            },
+            mate: None,
+            placement: onecad_core::document::record::FrozenPlacement {
+                translate: std::array::from_fn(|_| Scalar::new(0.0)),
+                rotate: Default::default(),
+            },
+            extra: Default::default(),
+        },
+    ));
+    let mut embedded = native.clone();
+    embedded.timeline.insert_at_cursor(OperationRecord::new(
+        RecordId(Uuid::new_v4()),
+        0,
+        "Embedded source",
+        placed,
+    ));
+    assert!(!native_definition(&embedded));
+    let mut opaque = native.clone();
+    opaque.timeline.insert_at_cursor(OperationRecord::new(
+        RecordId(Uuid::new_v4()),
+        0,
+        "Frozen",
+        Operation::Opaque(OpaqueOperation {
+            raw: serde_json::from_value(serde_json::json!({"opType":"FutureSolid"})).unwrap(),
+        }),
+    ));
+    assert!(!native_definition(&opaque));
+    let mut certified = native;
+    certified.elements.insert(
+        ElementId::new("el_certified"),
+        ElementEntry::new(body, ElementKind::Face).with_import_source_identity(Some(
+            ImportSourceIdentity {
+                version: 1,
+                source_sha256: "a".repeat(64),
+                codec: ImportIdentityCodec::Step,
+                codec_version: "ISO-10303-21".into(),
+                reader_policy: "occt-step-default-v1".into(),
+                kernel_fingerprint: "0a6a1dce34181289".into(),
+                producer_record_id: RecordId(Uuid::from_u128(1)),
+                body_id: body,
+                unit_scale_bits: format!("{:016x}", 1.0f64.to_bits()),
+                source_address: ImportSourceAddress::Step {
+                    root_entity_label: 1,
+                    occurrence_path: vec![],
+                    face_entity_label: 2,
+                },
+            },
+        )),
+    );
+    assert!(!native_definition(&certified));
+}
