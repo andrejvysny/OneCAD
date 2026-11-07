@@ -31,6 +31,7 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::arc_slot_delivery_tests::tangent_chain_batched_drag_release",
     "app_logic_tests::arc_slot_delivery_tests::tangent_chain_single_frame_drag_release",
     "app_logic_tests::arc_slot_delivery_tests::tangent_chain_cancelled_drag_ownership",
+    "app_logic_tests::arc_slot_delivery_tests::tangent_chain_view_change_cancels_before_and_after_promotion",
     "app_logic_tests::profile_delivery_tests::finish_with_invalid_profile_closes_sketch_and_reports_overlap",
     "app_logic_tests::selection_delivery_tests::marquee_survives_redraw_and_cancels_when_camera_changes",
     "app_logic_tests::point_center_delivery_tests::point_tab_before_pointer_signed_zero_and_repeated_construction_clicks",

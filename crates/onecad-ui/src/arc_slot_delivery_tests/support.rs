@@ -1,5 +1,78 @@
 use super::*;
 
+pub(super) fn chain_input_state(host: &Host) -> String {
+    let session = host.app.doc.sketch.session.as_ref().unwrap();
+    format!(
+        "dirty={}, view={:?}, accepted={:?}, phase={:?}, sequence={}, tangent_allowed={}, pointer_owned={}, focused={}, composing={}",
+        host.app.draw_dirty,
+        host.app.doc.view.map(|view| view.identity()),
+        session.accepted_capture,
+        session.phase,
+        session.request.sequence,
+        session.can_tangent_arc(),
+        crate::sketch_creation::chain_input::pointer_owned(&host.context),
+        host.context.text_edit_focused(),
+        host.app.composing,
+    )
+}
+
+pub(super) async fn changed_view_cancels_drag(root: &std::path::Path) {
+    let mut host = Host::new(root).await;
+    host.control("Line");
+    host.xy(-20.0, -10.0);
+    host.xy(0.0, -10.0);
+    host.count(3).await;
+    let before = host.sketch().clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
+    for promoted in [false, true] {
+        host.redraw();
+        let anchor = host
+            .app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .anchor;
+        let from = host.project(anchor.x, anchor.y);
+        let to = host.project(anchor.x + 10.0, anchor.y + 10.0);
+        host.ui(vec![egui::Event::PointerMoved(from), button(from, true)]);
+        assert!(crate::sketch_creation::chain_input::pointer_owned(
+            &host.context
+        ));
+        if promoted {
+            host.ui(vec![egui::Event::PointerMoved(to)]);
+            assert!(tangent_mode(&host));
+        }
+        let captured = host.app.doc.view.unwrap().identity();
+        host.app.doc.camera.offset *= 1.05;
+        host.redraw();
+        assert_ne!(host.app.doc.view.unwrap().identity(), captured);
+        assert!(!crate::sketch_creation::chain_input::pointer_owned(
+            &host.context
+        ));
+        host.ui(vec![egui::Event::PointerMoved(to), button(to, false)]);
+        assert!(!tangent_mode(&host));
+        assert_eq!(host.sketch(), &before);
+        assert_eq!(
+            host.app.doc.sketch.session.as_ref().unwrap().history,
+            history
+        );
+    }
+    host.stop().await;
+}
+
 pub(super) fn pointer(host: &mut Host, x: f64, y: f64) {
     host.redraw();
     host.ui(vec![egui::Event::PointerMoved(host.project(x, y))]);

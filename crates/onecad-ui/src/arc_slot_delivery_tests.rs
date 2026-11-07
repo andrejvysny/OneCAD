@@ -240,9 +240,15 @@ async fn tangent_chain_drag_release_once_and_accepted_closure_profile() {
     let from = host.project(anchor.x, anchor.y);
     let to = host.project(anchor.x, anchor.y + 20.0);
     let depth = undo_depth(&host);
+    let before_press = chain_input_state(&host);
     host.ui(vec![egui::Event::PointerMoved(from), button(from, true)]);
+    let after_press = chain_input_state(&host);
     host.ui(vec![egui::Event::PointerMoved(to)]);
-    assert!(tangent_mode(&host));
+    assert!(
+        tangent_mode(&host),
+        "drag from {from:?} to {to:?}: before={before_press}; pressed={after_press}; moved={}",
+        chain_input_state(&host)
+    );
     host.ui(vec![button(to, false)]);
     host.count(5).await;
     host.ui(vec![button(to, false)]);
@@ -326,4 +332,11 @@ async fn tangent_chain_cancelled_drag_ownership() {
         &area.path().join("cancel-ownership"),
     ))
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn tangent_chain_view_change_cancels_before_and_after_promotion() {
+    let area = tempfile::tempdir().unwrap();
+    Box::pin(changed_view_cancels_drag(area.path())).await;
 }
