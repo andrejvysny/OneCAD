@@ -49,6 +49,8 @@ fn output(input: ComponentReplayInput, epoch: WorkerEpoch) -> ComponentReplayOut
         budget: MeshBudget::default(),
         snapshot: SnapshotId(1),
         minted: false,
+        replay_context: translation::replay_context(&input.settings, &input.imports).unwrap(),
+        identity_signature: Some(BTreeMap::new()),
         _retention: input._retention,
     }
 }
@@ -324,6 +326,8 @@ fn root_publication_evicts_component_caches_before_new_scene() {
             fingerprint: String::new(),
             generation: 1,
             verified_head: None,
+            replay_context: [0; 32],
+            identity_signature: BTreeMap::new(),
             meshes: BTreeMap::new(),
             budget: MeshBudget {
                 triangles: MAX_TRIANGLES,
@@ -359,6 +363,8 @@ fn aggregate_budget_refusal_keeps_existing_component_cache() {
             fingerprint: String::new(),
             generation: 1,
             verified_head: None,
+            replay_context: [0; 32],
+            identity_signature: BTreeMap::new(),
             meshes: BTreeMap::new(),
             budget: MeshBudget {
                 triangles: 1,

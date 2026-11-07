@@ -46,26 +46,34 @@ impl ComponentReplayInput {
                 "component contains sketches without authored timeline records".into(),
             ));
         }
-        let report = working
-            .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
-            .await;
-        if !matches!(report.outcome, Outcome::Published(_) | Outcome::NoOp)
-            || !report.failed_steps.is_empty()
-            || !report.needs_repair.is_empty()
-            || (matches!(report.outcome, Outcome::NoOp)
-                && self
-                    .definition
-                    .timeline
-                    .records()
-                    .iter()
-                    .take(self.definition.timeline.cursor())
-                    .any(|record| !record.suppressed))
-            || (matches!(report.outcome, Outcome::NoOp) && !working.regen.bodies.is_empty())
-        {
-            return Err(ApiError::InvalidCommand(
-                "component replay did not produce valid geometry".into(),
-            ));
-        }
+        let continuation_retention = if let Some(base) = &self.translation_prefix {
+            Some(
+                super::translation::continue_translation(&self, &mut working, &worker, base)
+                    .await?,
+            )
+        } else {
+            let report = working
+                .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+                .await;
+            if !matches!(report.outcome, Outcome::Published(_) | Outcome::NoOp)
+                || !report.failed_steps.is_empty()
+                || !report.needs_repair.is_empty()
+                || (matches!(report.outcome, Outcome::NoOp)
+                    && self
+                        .definition
+                        .timeline
+                        .records()
+                        .iter()
+                        .take(self.definition.timeline.cursor())
+                        .any(|record| !record.suppressed))
+                || (matches!(report.outcome, Outcome::NoOp) && !working.regen.bodies.is_empty())
+            {
+                return Err(ApiError::InvalidCommand(
+                    "component replay did not produce valid geometry".into(),
+                ));
+            }
+            None
+        };
         if worker.current_epoch() != epoch {
             return Err(ApiError::InvalidCommand(
                 "component worker epoch changed during replay".into(),
@@ -108,6 +116,18 @@ impl ComponentReplayInput {
             .latest_snapshot
             .as_ref()
             .map_or(SnapshotId(0), |snapshot| snapshot.id);
+        let replay_context = super::translation::replay_context(&self.settings, &self.imports)
+            .ok_or_else(|| {
+                ApiError::InvalidCommand("component replay context serialization failed".into())
+            })?;
+        let identity_signature = if promote || continuation_retention.is_some() {
+            Some(mesh_signatures(&meshes)?)
+        } else {
+            None
+        };
+        drop(working);
+        let translated = continuation_retention.is_some();
+        drop(continuation_retention);
         Ok(ComponentReplayOutput {
             id: self.id,
             runtime_session: self.runtime_session,
@@ -118,7 +138,9 @@ impl ComponentReplayInput {
             meshes,
             budget,
             snapshot,
-            minted,
+            minted: minted || translated,
+            replay_context,
+            identity_signature,
             _retention: self._retention,
         })
     }
@@ -167,7 +189,7 @@ impl ComponentReplayInput {
     }
 }
 
-async fn collect_fresh_meshes(
+pub(super) async fn collect_fresh_meshes(
     runtime: &DocumentRuntime,
 ) -> Result<(BTreeMap<BodyId, Arc<Vec<u8>>>, MeshBudget), ApiError> {
     let mut meshes = BTreeMap::new();
@@ -274,51 +296,57 @@ async fn promote_anchored(
 
 impl ComponentReplayOutput {
     pub(crate) fn verification_signature(&self) -> Result<BTreeMap<BodyId, Vec<u8>>, ApiError> {
-        self.meshes
-            .iter()
-            .map(|(body, bytes)| {
-                let mesh = MeshView::decode(bytes, MeshLimits::default())
-                    .map_err(|error| ApiError::InvalidCommand(error.to_string()))?;
-                let mut hash = Sha256::new();
-                hash.update(b"onecad.component-replay.mesh.v1\0");
-                hash_floats(&mut hash, Some(mesh.positions()));
-                hash_floats(&mut hash, mesh.normals());
-                hash_floats(&mut hash, mesh.edge_positions());
-                hash_floats(&mut hash, mesh.face_bboxes());
-                hash.update(mesh.indices().len().to_le_bytes());
-                for value in mesh.indices().iter() {
-                    hash.update(value.to_le_bytes());
-                }
-                hash.update(mesh.header().face_count.to_le_bytes());
-                hash.update(mesh.header().edge_count.to_le_bytes());
-                for row in 0..mesh.header().face_count as usize {
-                    let id = mesh
-                        .face_id(row)
-                        .filter(|id| id.starts_with("el_"))
-                        .ok_or_else(|| {
-                            ApiError::InvalidCommand(
-                                "component face identity cannot be verified".into(),
-                            )
-                        })?;
-                    hash.update(id.len().to_le_bytes());
-                    hash.update(id.as_bytes());
-                    hash.update(
-                        serde_json::to_vec(
-                            &mesh.face_range(row).map(|range| (range.first, range.count)),
-                        )
-                        .map_err(|error| ApiError::Internal(error.to_string()))?,
-                    );
-                }
-                hash.update([u8::from(mesh.face_colors().is_some())]);
-                if let Some(colors) = mesh.face_colors() {
-                    hash.update(colors.len().to_le_bytes());
-                    hash.update(colors);
-                }
-                hash_edges(&mut hash, &mesh)?;
-                Ok((*body, hash.finalize().to_vec()))
-            })
-            .collect()
+        mesh_signatures(&self.meshes)
     }
+}
+
+pub(super) fn mesh_signatures(
+    meshes: &BTreeMap<BodyId, Arc<Vec<u8>>>,
+) -> Result<BTreeMap<BodyId, Vec<u8>>, ApiError> {
+    meshes
+        .iter()
+        .map(|(body, bytes)| {
+            let mesh = MeshView::decode(bytes, MeshLimits::default())
+                .map_err(|error| ApiError::InvalidCommand(error.to_string()))?;
+            let mut hash = Sha256::new();
+            hash.update(b"onecad.component-replay.mesh.v1\0");
+            hash_floats(&mut hash, Some(mesh.positions()));
+            hash_floats(&mut hash, mesh.normals());
+            hash_floats(&mut hash, mesh.edge_positions());
+            hash_floats(&mut hash, mesh.face_bboxes());
+            hash.update(mesh.indices().len().to_le_bytes());
+            for value in mesh.indices().iter() {
+                hash.update(value.to_le_bytes());
+            }
+            hash.update(mesh.header().face_count.to_le_bytes());
+            hash.update(mesh.header().edge_count.to_le_bytes());
+            for row in 0..mesh.header().face_count as usize {
+                let id = mesh
+                    .face_id(row)
+                    .filter(|id| id.starts_with("el_"))
+                    .ok_or_else(|| {
+                        ApiError::InvalidCommand(
+                            "component face identity cannot be verified".into(),
+                        )
+                    })?;
+                hash.update(id.len().to_le_bytes());
+                hash.update(id.as_bytes());
+                hash.update(
+                    serde_json::to_vec(
+                        &mesh.face_range(row).map(|range| (range.first, range.count)),
+                    )
+                    .map_err(|error| ApiError::Internal(error.to_string()))?,
+                );
+            }
+            hash.update([u8::from(mesh.face_colors().is_some())]);
+            if let Some(colors) = mesh.face_colors() {
+                hash.update(colors.len().to_le_bytes());
+                hash.update(colors);
+            }
+            hash_edges(&mut hash, &mesh)?;
+            Ok((*body, hash.finalize().to_vec()))
+        })
+        .collect()
 }
 
 pub(super) fn hash_edges(hash: &mut Sha256, mesh: &MeshView<'_>) -> Result<(), ApiError> {

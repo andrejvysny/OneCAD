@@ -1,3 +1,5 @@
+#[path = "error_cleanup.rs"]
+mod error_cleanup;
 use super::*;
 use onecad_core::{
     document::{
@@ -61,6 +63,8 @@ async fn real_worker_replays_shared_definition_and_fresh_reopen() {
     .unwrap();
     assert!(state.readiness().wait_ready(Duration::from_secs(15)).await);
     let session = opened.runtime_session;
+    error_cleanup::unpromoted_read_only_replay(&state, &session, id).await;
+    error_cleanup::failed_replay_releases_capacity(&state, &session, id, host.clone()).await;
     let (generation, projection) = regenerate_component(&state, &session, id).await.unwrap();
     assert!(state.runtime.lock().await.as_ref().unwrap().is_dirty());
     assert_eq!(projection.occurrences.len(), 2);

@@ -100,6 +100,30 @@ fn prior_definitions<'a>(
 }
 
 impl DocumentSession {
+    /// Finds an authored history baseline without cloning component geometry or metadata.
+    /// The predicate must verify all evidence needed by its continuation policy.
+    pub fn find_prior_component_definition(
+        &self,
+        id: ComponentDefId,
+        mut accepts: impl FnMut(&ComponentDef) -> bool,
+    ) -> Option<&ComponentDef> {
+        if self.transaction_open() {
+            return None;
+        }
+        for txn in self.undo.undo_transactions() {
+            let mut prior = BTreeMap::new();
+            for edit in &txn.edits {
+                prior_definitions(&edit.inverse, &mut prior);
+            }
+            if let Some(Some(definition)) = prior.get(&id) {
+                if accepts(definition) {
+                    return Some(definition);
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn capture_component_identities(
         &self,
         txn: &Txn,

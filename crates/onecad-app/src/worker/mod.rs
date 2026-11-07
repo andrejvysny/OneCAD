@@ -21,6 +21,7 @@
 // temporary copies. These local policies do not change OCW1/MESH1 limits.
 pub(crate) const MAX_PREVIEW_RESPONSE_JSON_BYTES: u32 = 256 << 10;
 pub(crate) const MAX_PREVIEW_RESPONSE_MESH_BYTES: u32 = 32 << 20;
+pub(crate) use manager::component_checkpoint::MAX_BINARY_BYTES as MAX_COMPONENT_CHECKPOINT_BYTES;
 pub(crate) const MAX_PREVIEW_BODIES: usize = 256;
 
 use std::collections::HashSet;

@@ -95,3 +95,36 @@ finite differences use circular differences across the wrapped-error seam;
 residuals, tolerances and iteration caps are unchanged. Captured source-grounded
 solver inputs and symbolic DOF expectations live under
 `crates/onecad-assembly/tests/fixtures`.
+
+## Native translation continuity
+
+An appended, non-copy, literal translation may continue a previously verified
+component prefix. The runtime requires the same root worker head and replay
+settings/import context, an exact matching authoritative history inverse, and
+unchanged definition fields outside the appended suffix. Historical proof work
+has its own archive admission. Rotations, expressions, copies, suppressed steps
+and unknown transform semantics do not use this bounded continuation path.
+
+The transient worker first replays and strictly rebinds the unchanged prefix.
+Its checked geometry and persistent identity mapping must equal the retained
+verified prefix signature. The worker then saves a bounded checkpoint containing
+those bindings and must restore it without drift; this invocation cannot retry
+from zero or use an isolation replay. A failed proof refuses publication. Normal
+checkpoint fallback and cache-free opening remain unchanged.
+
+After translation, all live face identities and persisted partitions must remain
+unchanged. The runtime queries actual topology keys, refreshes opaque evidence
+through the worker, and requires the same ID, body, kind and critical import-source
+certificate. Only each targeted body's anchor point and local-frame origin move;
+UV coordinates, axes, adjacency and unknown anchor fields remain intact. Operation
+input anchors are not rewritten. A second fresh worker must reproduce the final
+geometry and identities from the refreshed definition before current-session
+publication. Undo/Redo retains these derived identity deltas with the authored edit.
+
+The transient checkpoint response is limited to 32 MiB binary and 256 KiB JSON
+before allocation. Referenced sections cannot amplify copies beyond that budget.
+A shared archive reservation covers four response/artifact copies and remains
+owned until the working runtime is dropped. These local limits do not raise
+OCW1, mesh, scene or host resource caps. Post-admission replay failures drain their
+owned worker before returning; cancellation retains its existing retirement guard.
+Startup failure and teardown-timeout background reaping remain distinct paths.

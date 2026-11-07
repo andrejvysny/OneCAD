@@ -279,6 +279,16 @@ pub(crate) struct WorkerLease {
 }
 
 impl WorkerLease {
+    async fn drain_on_error<T>(self, result: Result<T, ApiError>) -> Result<(Self, T), ApiError> {
+        match result {
+            Ok(value) => Ok((self, value)),
+            Err(error) => {
+                self.drain().await;
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) async fn drain(mut self) {
         self.worker.retire();
         if self.worker.wait_torn_down(REAP_TIMEOUT).await {
@@ -382,26 +392,35 @@ async fn regenerate_component_inner(
             .prepare_component_replay(id, expected_session)?
     };
     let lease = open_worker(state, &input).await?;
-    let mut result = input
+    let replay = input
         .clone()
         .drive(lease.worker.clone(), lease.epoch, true)
-        .await?;
+        .await;
+    let (lease, mut result) = lease.drain_on_error(replay).await?;
     let lease = if result.minted {
-        let signature = result.verification_signature()?;
+        let signature = result.verification_signature();
+        let (lease, signature) = lease.drain_on_error(signature).await?;
         // Retain only bounded signatures while the independent worker replays.
         result.meshes.clear();
         lease.drain().await;
         let mut verification = input;
         verification.definition = result.definition.clone();
+        verification.translation_prefix = None;
         let lease = open_worker(state, &verification).await?;
         let replay = verification
             .drive(lease.worker.clone(), lease.epoch, false)
-            .await?;
-        if signature != replay.verification_signature()? {
-            return Err(ApiError::InvalidCommand(
-                "component rehydration geometry or identity mismatch".into(),
-            ));
-        }
+            .await;
+        let (lease, replay) = lease.drain_on_error(replay).await?;
+        let checked = replay.verification_signature().and_then(|actual| {
+            if signature == actual {
+                Ok(())
+            } else {
+                Err(ApiError::InvalidCommand(
+                    "component rehydration geometry or identity mismatch".into(),
+                ))
+            }
+        });
+        let (lease, ()) = lease.drain_on_error(checked).await?;
         result.meshes = replay.meshes;
         result.budget = replay.budget;
         result.snapshot = replay.snapshot;

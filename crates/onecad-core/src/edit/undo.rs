@@ -379,6 +379,10 @@ impl UndoStack {
         ))).count()
     }
 
+    pub(crate) fn undo_transactions(&self) -> impl Iterator<Item = &Txn> {
+        self.undo.iter().rev()
+    }
+
     pub(crate) fn history_txn(&self, direction: HistoryDirection) -> Option<&Txn> {
         match direction {
             HistoryDirection::Undo => self.undo.last(),

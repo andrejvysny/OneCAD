@@ -1939,6 +1939,20 @@ impl DocumentRuntime {
         self.finish_regen(driven)
     }
 
+    async fn run_regen_requiring_checkpoint(
+        &mut self,
+        request: RegenRequest,
+        cancel: CancelToken,
+    ) -> RegenReport {
+        let Some(prepared) = self.begin_regen(request) else {
+            return self.noop_report();
+        };
+        // This continuation depends on identities bound into the checkpoint.
+        // A from-zero isolation retry would lose that proof.
+        let driven = prepared.drive_with_checkpoint_policy(cancel, true).await;
+        self.finish_regen(driven)
+    }
+
     /// A `NoOp` [`RegenReport`] stamped at the current revision — shared by the inline
     /// [`run_regen`](Self::run_regen) empty-plan path and the production driver's
     /// empty-plan branch (`lib.rs`), so a no-op-producing request STILL emits exactly
@@ -6688,6 +6702,14 @@ impl PreparedRegen {
     /// time (fencing live). Returns the driven result for
     /// [`DocumentRuntime::finish_regen`].
     pub async fn drive(self, cancel: CancelToken) -> DrivenRegen {
+        self.drive_with_checkpoint_policy(cancel, false).await
+    }
+
+    async fn drive_with_checkpoint_policy(
+        self,
+        cancel: CancelToken,
+        require_checkpoint: bool,
+    ) -> DrivenRegen {
         let PreparedRegen {
             work,
             mut scratch,
@@ -6727,6 +6749,11 @@ impl PreparedRegen {
                 // The executor deposits the terminal prepare's inline meshes here on a
                 // PUBLISH; phase 3 decides whether that publish actually commits.
                 let executor = RegenExecutor::new(*engine).with_mesh_sink(mesh_sink.clone());
+                let executor = if require_checkpoint {
+                    executor.require_checkpoint()
+                } else {
+                    executor
+                };
                 executor
                     .run(*plan_req, &mut scratch, &gate, &cancel, &publisher)
                     .instrument(span.clone())

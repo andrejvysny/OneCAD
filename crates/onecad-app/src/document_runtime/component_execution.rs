@@ -3,6 +3,7 @@ use super::*;
 use onecad_core::document::component::{ComponentDef, ComponentDefId, OccurrencePath};
 use onecad_protocol::mesh::{MeshLimits, MeshView};
 mod preflight;
+mod translation;
 
 const MAX_TRIANGLES: usize = 500_000;
 const MAX_SEGMENTS: usize = 500_000;
@@ -65,6 +66,8 @@ pub(crate) struct ComponentCache {
     fingerprint: String,
     pub generation: u64,
     verified_head: Option<super::joint_execution::JointHead>,
+    replay_context: [u8; 32],
+    identity_signature: BTreeMap<BodyId, Vec<u8>>,
     pub(super) meshes: BTreeMap<BodyId, Arc<Vec<u8>>>,
     budget: MeshBudget,
 }
@@ -77,10 +80,12 @@ pub(crate) struct ComponentReplayInput {
     pub revision: DocumentRevision,
     pub source_fingerprint: String,
     pub definition: ComponentDef,
+    pub translation_prefix: Option<translation::TranslationBase>,
     pub settings: onecad_core::document::DocumentSettings,
     pub imports: ImportBlobs,
     pub revision_fence: Arc<AtomicU64>,
     pub read_only: bool,
+    pub archive_budget: crate::resource_admission::ArchiveBudget,
     pub(crate) _retention: crate::resource_admission::Retention,
 }
 
@@ -95,13 +100,15 @@ pub(crate) struct ComponentReplayOutput {
     pub(crate) budget: MeshBudget,
     pub(crate) snapshot: SnapshotId,
     pub minted: bool,
+    replay_context: [u8; 32],
+    identity_signature: Option<BTreeMap<BodyId, Vec<u8>>>,
     pub(crate) _retention: crate::resource_admission::Retention,
 }
 
 fn fingerprint(definition: &ComponentDef) -> Result<String, ApiError> {
-    let bytes = serde_json::to_vec(definition)
-        .map_err(|error| ApiError::InvalidCommand(format!("component serialization: {error}")))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    let hash = translation::digest(definition)
+        .ok_or_else(|| ApiError::InvalidCommand("component serialization failed".into()))?;
+    Ok(hash.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn namespace(document: DocumentId, definition: ComponentDefId) -> DocumentId {
@@ -152,10 +159,12 @@ impl DocumentRuntime {
             revision: self.revision(),
             source_fingerprint: fingerprint(def)?,
             definition: def.clone(),
+            translation_prefix: self.component_translation_prefix(id, def),
             settings: doc.settings.clone(),
             imports: self.imports.clone(),
             revision_fence: self.fencing.revision.clone(),
             read_only: self.read_only,
+            archive_budget: self.archive_budget.clone(),
             _retention: retention,
         })
     }
@@ -192,6 +201,11 @@ impl DocumentRuntime {
             .component_generation
             .checked_add(1)
             .ok_or_else(|| ApiError::InvalidCommand("component generation exhausted".into()))?;
+        let identity_signature = output.identity_signature.ok_or_else(|| {
+            ApiError::InvalidCommand(
+                "component publication lacks a checked identity signature".into(),
+            )
+        })?;
         let new_fingerprint = fingerprint(&output.definition)?;
         let persisted_changed = new_fingerprint != output.source_fingerprint;
         if persisted_changed {
@@ -221,6 +235,8 @@ impl DocumentRuntime {
                 fingerprint: new_fingerprint,
                 generation,
                 verified_head: None,
+                replay_context: output.replay_context,
+                identity_signature,
                 meshes: output.meshes,
                 budget: output.budget,
             },

@@ -671,6 +671,8 @@ pub struct WorkerManager {
     shared: Arc<Shared>,
 }
 
+pub(crate) mod component_checkpoint;
+
 impl WorkerManager {
     /// Process-local identity for runtime ownership fencing.
     #[must_use]
