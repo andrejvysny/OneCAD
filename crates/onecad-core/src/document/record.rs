@@ -1977,6 +1977,39 @@ pub struct LoftParams {
     pub extra: Extra,
 }
 
+/// An increasing interval in the original analytic path's parameter basis.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SweepPathRange {
+    pub start_radians: f64,
+    pub end_radians: f64,
+}
+
+impl SweepPathRange {
+    /// Keeps parameter conditioning bounded; output geometry still needs validation.
+    pub fn validate(&self) -> Result<(), String> {
+        let full_turn = std::f64::consts::TAU;
+        if !self.start_radians.is_finite()
+            || !self.end_radians.is_finite()
+            || self.start_radians.abs() > full_turn
+            || self.end_radians.abs() > full_turn
+            || self.end_radians <= self.start_radians
+            || self.end_radians - self.start_radians >= full_turn
+        {
+            return Err("Sweep pathRange requires finite endpoints within [-2π, 2π] and an increasing span below 2π".into());
+        }
+        Ok(())
+    }
+}
+
+fn de_optional_sweep_path_range<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SweepPathRange>, D::Error> {
+    let range = SweepPathRange::deserialize(deserializer)?;
+    range.validate().map_err(serde::de::Error::custom)?;
+    Ok(Some(range))
+}
+
 /// Sweep parameters (OneCAD-CPP `SweepParams` `OperationRecord.h:152-158`).
 /// `profile` pairs the C++ `profileSketchId`+`profileRegionId`; the path is a
 /// sketch wire (`path_sketch`) or a body edge (`path_edge`).
@@ -1997,9 +2030,28 @@ pub struct SweepParams {
         skip_serializing_if = "Option::is_none"
     )]
     pub path_edge: Option<ElementId>,
+    #[serde(
+        default,
+        deserialize_with = "de_optional_sweep_path_range",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub path_range: Option<SweepPathRange>,
     pub boolean_mode: BooleanMode,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
+}
+
+impl SweepParams {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_region_anchor(self.profile.as_ref(), "Sweep")?;
+        if self.extra.contains_key("pathRange") {
+            return Err("Sweep pathRange must use its typed field, not extra".into());
+        }
+        if let Some(range) = self.path_range {
+            range.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// Mirror-body parameters (OneCAD-CPP `MirrorBodyParams`

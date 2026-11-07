@@ -31,6 +31,8 @@
 #include <gp_Vec.hxx>
 
 #include "kernel/validation/GeometryPrecision.h"
+#include "loop/FaceBuilder.h"
+#include "sketch/WireSketch.h"
 #include "ops/CancelProgress.h"
 #include "ops/OpCommon.h"
 #include "ops/TopologyHistory.h"
@@ -54,13 +56,35 @@ const json* find_sketch(const OpContext& ctx, const std::string& id) {
     return nullptr;
 }
 
+struct PathRange {
+    double start;
+    double end;
+};
+
+OpOutcome validate_range(const json& params) {
+    if (!params.contains("pathRange")) return OpOutcome::ok();
+    const auto& range = params["pathRange"];
+    if (!range.is_object() || range.size() != 2 || !range.contains("startRadians") ||
+        !range.contains("endRadians") || !range["startRadians"].is_number() ||
+        !range["endRadians"].is_number())
+        return OpOutcome::fail("OP_FAILED", "Sweep: pathRange requires startRadians and endRadians only");
+    const double start = range["startRadians"].get<double>();
+    const double end = range["endRadians"].get<double>();
+    const double turn = 2.0 * std::acos(-1.0);
+    if (!std::isfinite(start) || !std::isfinite(end) || start < -turn || start > turn ||
+        end < -turn || end > turn || !(start < end) || !(end - start < turn))
+        return OpOutcome::fail("OP_FAILED", "Sweep: invalid open pathRange");
+    return OpOutcome::ok();
+}
+
 OpOutcome validate_params(const json& params) {
     if (params.empty()) return OpOutcome::unsupported("Sweep: missing profile and path");
     if (!finite_numbers(params)) return OpOutcome::fail("OP_FAILED", "Sweep: nonfinite parameter");
     for (auto it = params.begin(); it != params.end(); ++it) {
         const auto& key = it.key();
         if (key != "sketchId" && key != "regionId" && key != "regionIdentityVersion" &&
-            key != "regionAnchor" && key != "pathSketchId" && key != "booleanMode")
+            key != "regionAnchor" && key != "pathSketchId" && key != "booleanMode" &&
+            key != "pathRange")
             return OpOutcome::unsupported("Sweep: unsupported parameter " + key);
     }
     for (const char* key : {"sketchId", "regionId", "pathSketchId"}) {
@@ -73,7 +97,7 @@ OpOutcome validate_params(const json& params) {
     if (!params.contains("booleanMode") || !params["booleanMode"].is_string())
         return OpOutcome::fail("OP_FAILED", "Sweep: missing booleanMode");
     if (params["booleanMode"] != "NewBody") return OpOutcome::unsupported("Sweep: only NewBody is supported");
-    return OpOutcome::ok();
+    return validate_range(params);
 }
 
 bool read_vector(const json& value, gp_Vec& result) {
@@ -206,9 +230,40 @@ OpOutcome rephase_circle(const gp_Circ& circle, const gp_Pnt& center, double res
     return OpOutcome::ok();
 }
 
+OpOutcome open_path(const BRepAdaptor_Curve& curve, const PathRange& range,
+                    const std::optional<gp_Circ>& circle, TopoDS_Wire& path_wire) {
+    BRepBuilderAPI_MakeEdge edge = circle
+        ? BRepBuilderAPI_MakeEdge(*circle, range.start, range.end)
+        : BRepBuilderAPI_MakeEdge(curve.Ellipse(), range.start, range.end);
+    if (!edge.IsDone()) return OpOutcome::fail("OP_FAILED", "Sweep: cannot build open analytic path");
+    BRepBuilderAPI_MakeWire wire(edge.Edge());
+    if (!wire.IsDone() || BRep_Tool::IsClosed(wire.Wire()))
+        return OpOutcome::fail("OP_FAILED", "Sweep: pathRange must produce an open wire");
+    path_wire = wire.Wire();
+    return OpOutcome::ok();
+}
+
+OpOutcome ranged_circle(const OpContext& ctx, const json& params, const TopoDS_Edge& spine,
+                        std::optional<gp_Circ>& circle) {
+    if (!params.contains("pathRange")) return OpOutcome::ok();
+    BRepAdaptor_Curve curve(spine);
+    if (curve.GetType() != GeomAbs_Circle) return OpOutcome::ok();
+    const auto* path = find_sketch(ctx, params["pathSketchId"].get<std::string>());
+    if (!path) return OpOutcome::fail("REF_UNRESOLVED", "Sweep: path sketch not found");
+    auto translated = wire::translate(*path);
+    if (!translated.ok || !translated.sketch)
+        return OpOutcome::fail("OP_FAILED", "Sweep: cannot translate path sketch plane");
+    const gp_Pln plane = core::loop::FaceBuilder::sketchPlaneToGpPln(translated.sketch->getPlane());
+    const gp_Circ original = curve.Circle();
+    circle.emplace(gp_Ax2(original.Location(), plane.Axis().Direction(), plane.Position().XDirection()),
+                   original.Radius());
+    return OpOutcome::ok();
+}
+
 OpOutcome validate_geometry(const TopoDS_Face& profile, const TopoDS_Edge& section,
                             const TopoDS_Face& path, const TopoDS_Edge& spine,
-                            TopoDS_Wire& path_wire) {
+                            TopoDS_Wire& path_wire, const std::optional<PathRange>& range,
+                            const std::optional<gp_Circ>& circle) {
     BRepAdaptor_Curve section_curve(section);
     BRepAdaptor_Curve path_curve(spine);
     if (section_curve.GetType() != GeomAbs_Circle ||
@@ -229,16 +284,18 @@ OpOutcome validate_geometry(const TopoDS_Face& profile, const TopoDS_Edge& secti
     if (!planar_face_plane_normal(profile, plane, normal))
         return OpOutcome::fail("OP_FAILED", "Sweep: profile plane is invalid");
     const gp_Pnt center = section_curve.Circle().Location();
-    const double parameter = path_curve.GetType() == GeomAbs_Circle
+    const double parameter = range ? range->start : (path_curve.GetType() == GeomAbs_Circle
         ? ElCLib::Parameter(path_curve.Circle(), center)
-        : ElCLib::Parameter(path_curve.Ellipse(), center);
+        : ElCLib::Parameter(path_curve.Ellipse(), center));
     if (!std::isfinite(parameter)) return OpOutcome::fail("OP_FAILED", "Sweep: invalid path parameter");
     gp_Pnt start;
     gp_Vec tangent;
-    path_curve.D1(parameter, start, tangent);
+    if (range && circle) ElCLib::D1(parameter, *circle, start, tangent);
+    else path_curve.D1(parameter, start, tangent);
     if (tangent.Magnitude() <= resolution || center.Distance(start) > resolution ||
         !normal.IsParallel(gp_Dir(tangent), Precision::Angular()))
         return OpOutcome::fail("OP_FAILED", "Sweep: profile center and normal must match a path point and tangent");
+    if (range) return open_path(path_curve, *range, circle, path_wire);
     if (path_curve.GetType() == GeomAbs_Ellipse) {
         const gp_Pnt original_start = path_curve.Value(path_curve.FirstParameter());
         if (center.Distance(original_start) > resolution)
@@ -284,7 +341,15 @@ OpOutcome sweep_impl(OpContext& ctx, const json& op, const std::string& op_id,
     if (result.status != OpOutcome::Status::Ok) return result;
     result = one_closed_edge(path, path_wire, spine);
     if (result.status != OpOutcome::Status::Ok) return result;
-    result = validate_geometry(profile, section, path, spine, path_wire);
+    std::optional<PathRange> range;
+    if (params.contains("pathRange")) {
+        const auto& value = params["pathRange"];
+        range = PathRange{value["startRadians"].get<double>(), value["endRadians"].get<double>()};
+    }
+    std::optional<gp_Circ> circle;
+    result = ranged_circle(ctx, params, spine, circle);
+    if (result.status != OpOutcome::Status::Ok) return result;
+    result = validate_geometry(profile, section, path, spine, path_wire, range, circle);
     if (result.status != OpOutcome::Status::Ok) return result;
     BRepOffsetAPI_MakePipeShell builder(path_wire);
     // Fixed Frenet frame; rotating a circular section about its own normal does

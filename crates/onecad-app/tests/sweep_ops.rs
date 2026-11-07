@@ -141,6 +141,7 @@ fn operation(path: SketchId, profile: SketchRegionRef) -> Operation {
         profile: Some(profile),
         path_sketch: Some(path),
         path_edge: None,
+        path_range: None,
         boolean_mode: BooleanMode::NewBody,
         extra: Default::default(),
     }))

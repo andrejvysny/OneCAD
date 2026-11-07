@@ -230,6 +230,7 @@ async fn add_features(h: &Harness, g: &Geometry) {
         profile: Some(profile),
         path_sketch: Some(sk(1)),
         path_edge: None,
+        path_range: None,
         boolean_mode: BooleanMode::NewBody,
         extra: Default::default(),
     }));

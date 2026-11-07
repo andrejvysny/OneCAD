@@ -1891,7 +1891,7 @@ together. This is additive; old readers may continue to use the legacy pair.
   pole edges of a shaft or a sphere. Pinned by
   `worker/tests/test_commit_tier_validation.cpp`.
 
-**Sweep** (`op.sweep`) — bounded circular section on one closed analytic sketch path.
+**Sweep** (`op.sweep`) — bounded circular section on one analytic sketch path.
 
 ```json
 // inputs: [] — sketch-region references are not semantic body references
@@ -1912,20 +1912,48 @@ together. This is additive; old readers may continue to use the legacy pair.
   Rust flattens the typed `SweepParams.profile` into these wire keys.
 - The selected section must be one closed circular edge without holes. The path
   sketch must contain exactly one non-construction Circle or Ellipse, plus
-  optional points. It must produce one closed analytic edge. Open paths, chains,
-  body-edge paths, splines, holes, extra parameters, nonempty semantic `inputs`,
+  optional points. The sketch provides one closed analytic edge. An optional
+  `pathRange` selects a bounded open interval on that same curve; arbitrary open
+  sketch paths, chains, body-edge paths, splines, holes, extra parameters, nonempty semantic `inputs`,
   Boolean modes other than NewBody, and authored twist/scale/orientation options
   are unsupported. No inferred conversion or approximation substitutes for them.
+- Omitted `pathRange` retains the existing closed-path semantics. A present
+  value is exactly `{"startRadians": s, "endRadians": e}`: both finite,
+  endpoints within [-2π, 2π], and 0 < e - s < 2π. Null, missing members,
+  unknown members, reversed/equal/full-turn ranges and numeric overflow refuse;
+  they never mean a closed path. For a Circle, parameter zero is the validated
+  path sketch frame's X direction, with increasing parameter toward its Y
+  direction. The worker re-expresses that same circle in this authored frame;
+  OCCT's arbitrary global default axis does not define the interval. For an
+  Ellipse, parameter zero is its authored positive major axis, including sketch
+  frame and ellipse rotation, with the original increasing parameter direction.
+  A negative-to-positive interval may cross the seam. No section-derived circle
+  rephasing changes an explicit interval's basis.
+  The section center and normal must match the point and tangent at `s`.
+  Construction uses one directly bounded analytic edge and two end caps; it does
+  not Boolean-trim a closed tube. Every interval must pass the unchanged
+  publication checks; numerically indistinguishable endpoints may refuse even
+  below a full turn. A small endpoint-center gap alone does not imply cap
+  intersection. No fallback shifts endpoints or raises tolerances.
+- `SweepParams.path_range` is optional in document schema 4 and uses the same
+  `pathRange` object on OCW1. Existing closed records serialize it as absent.
+  Earlier readers retain it in their existing extra map, while the earlier
+  closed-only worker refuses the unknown parameter. A newer writer rejects a
+  typed/extra `pathRange` collision rather than silently replacing either value.
+  The OCW1 parser's existing duplicate-key behavior is unchanged; this extension
+  does not claim new raw-JSON duplicate detection. Worker/hash negotiation and
+  explicit unsupported/refusal behavior remain mandatory.
 - Both sketches use finite rigid right-handed frames. Custom frames require
   origin, xAxis, yAxis and normal, with unit and orthogonality drift at most 1e-8.
   Named XY/XZ/YZ planes accept either the legacy absent basis or all four vectors
   matching their exact shared preset; partial or inconsistent bases refuse
-  rather than being ignored. For a circular path, the authored section center
+  rather than being ignored. For a closed circular path, the authored section center
   chooses the radial seam: the worker re-expresses the same exact circle with
   that radial axis and an untrimmed full edge. The center must lie on that circle
   within shared authoring resolution. This avoids OCCT's arbitrary circle-axis
   default changing the meaning under a rigid transform. An ellipse currently
-  requires its positive-major-axis start; arbitrary ellipse seams are unsupported.
+  requires its positive-major-axis start when `pathRange` is absent; explicit
+  bounded intervals instead use their specified start in the original basis.
   The section normal must be parallel or antiparallel to the tangent at the
   admitted seam within `Precision::Angular()`.
 - With path major/minor radii a >= b and section radius r, all radii must be

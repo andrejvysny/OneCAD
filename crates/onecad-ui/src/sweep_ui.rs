@@ -220,6 +220,16 @@ pub(crate) fn rows(
                 }
             });
     });
+    if let Some(range) = p.path_range {
+        rows.row("Path interval", |ui| {
+            ui.label(format!(
+                "{:.6}° to {:.6}°",
+                range.start_radians.to_degrees(),
+                range.end_radians.to_degrees()
+            ))
+            .on_hover_text("Zero follows the circle’s sketch X axis or the ellipse’s major axis; angles increase in the path sketch direction.");
+        });
+    }
     rows.row("", |ui| {
         ui.add(egui::Label::new(egui::RichText::new(
             "Circular section; one closed circle or ellipse path. Placement and clearance are verified by preview.",

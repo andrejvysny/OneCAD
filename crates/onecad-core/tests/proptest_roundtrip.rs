@@ -13,7 +13,7 @@ use onecad_core::document::record::{
     DeterminismSettings, ExtrudeMode, ExtrudeParams, FilletParams, HoleParams, HolePoint,
     HolePointId, HoleType, KnownOperation, LinearPatternParams, LoftParams, MirrorBodyParams,
     OpaqueOperation, Operation, OperationRecord, PlaneKind, RevolveParams, ShellParams,
-    SketchOpParams, SketchPlaneRef, SweepParams,
+    SketchOpParams, SketchPlaneRef, SweepParams, SweepPathRange,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, Extra, IntentQuery, LocalFrame, PrimaryRef,
@@ -402,12 +402,19 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
         proptest::option::of(sketch_id()),
         proptest::option::of(opaque_string_id()),
         boolean_mode(),
+        proptest::option::of((-3000i32..=3000, 1i32..=3000).prop_map(|(start, span)| {
+            SweepPathRange {
+                start_radians: f64::from(start) / 1000.0,
+                end_radians: f64::from(start + span) / 1000.0,
+            }
+        })),
     )
-        .prop_map(|(profile, path_sketch, path_edge, bmode)| {
+        .prop_map(|(profile, path_sketch, path_edge, bmode, path_range)| {
             Operation::Known(KnownOperation::Sweep(SweepParams {
                 profile,
                 path_sketch,
                 path_edge: path_edge.map(ElementId::new),
+                path_range,
                 boolean_mode: bmode,
                 extra: Default::default(),
             }))
