@@ -1,5 +1,16 @@
 # Robonine analytic joint fixture
 
+Set `ONECAD_PUBLIC_ASSEMBLY_CAPTURE_DIR` to retain the static and joint workflow's
+saved `.onecad` documents for subsequent native UI checks. Each test creates a
+new labeled directory with the document and a SHA-256 manifest, refusing an
+existing directory. `ONECAD_SOURCE_COMMIT`, when supplied, is recorded as an
+environment claim; the manifest separately pins the top-level test source,
+compiled test executable, and resolved worker path bytes at capture. Runtime
+startup evidence must establish the executed kernel identity. Captures follow a
+successful save and host shutdown; cold-reopen validation continues afterward.
+These captures retain imported part history and do not establish native feature
+authoring, physical fit, or native UI acceptance.
+
 This is an imported-parts, kinematic solver fixture. It does not establish physical fit, collision-free travel, gear coupling, contact, dynamics, or native editable feature history.
 
 The exact XBF assets and source provenance are pinned by `analytic/observations.json` and its README. Cylindrical rail face `0:1:1:1:9` in part 020 (SHA-256 `932cc0452078850d9059ed6ad0716dd3658d35b8117c5598c2f0699e2b14b21c`) measures radius 2.85 mm, axis +X on the line through `(24.888015895285545, -16, 11)` mm. Cylindrical bore face `0:1:1:1:6` in part 040 (SHA-256 `2e780afa05c59f10fb3a8c4acf1cc0c2289d45312dedc0172bc7fa83ecbeffc0`) measures radius 3 mm, axis -Z on the line through `(0, 0, 6.202235200000838)` mm. These are same-kernel OCP 8.0.1.1 measurements of retained XBF source labels, not independent metrology or STEP entity addresses. Joint frames are queried and certified by the production worker; rooted side A is an explicit literal datum equal to the initial world composition of side B, not a frame attached to the grounded geometry.

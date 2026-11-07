@@ -1,4 +1,5 @@
 //! Imported analytic source parts; placements are test inputs, not kinematic qualification.
+mod public_assembly_artifacts;
 mod robonine_analytic_support;
 use async_trait::async_trait;
 use onecad_app::{
@@ -488,6 +489,11 @@ async fn analytic_assembly_shared_services_cold_reopen() {
             .clean
     );
     api::shutdown_host(&state, host, None).await.unwrap();
+    public_assembly_artifacts::retain(
+        &path,
+        "robonine-static",
+        include_bytes!("robonine_analytic_assembly.rs"),
+    );
     verify_sources(&path);
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([

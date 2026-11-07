@@ -3,6 +3,7 @@
 mod export_reimport;
 #[path = "robonine_analytic_support/joints.rs"]
 mod joint_support;
+mod public_assembly_artifacts;
 mod robonine_analytic_support;
 use async_trait::async_trait;
 use joint_support::{fixtures, pose};
@@ -406,6 +407,11 @@ async fn source_qualified_analytic_joints_cold_reopen() {
             .clean
     );
     api::shutdown_host(&state, host, None).await.unwrap();
+    public_assembly_artifacts::retain(
+        &path,
+        "robonine-joints",
+        include_bytes!("robonine_analytic_joints.rs"),
+    );
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
