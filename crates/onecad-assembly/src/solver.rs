@@ -8,9 +8,10 @@
 //! occurrences) the cost is trivial and it cannot disagree with the residuals;
 //! analytic derivatives are a later optimisation.
 //!
-//! Rank is a finite-difference estimate; the solver refuses an uncertain estimate
-//! when ranks disagree across two step sizes, a pivot is near threshold, or a
-//! nonzero column is too small. This is not a proof of rank in all cases.
+//! A regular acyclic graph with at most one ground per component has a structural
+//! rank certificate. Other graphs use a finite-difference estimate and refuse
+//! disagreement across two steps, near-threshold pivots, or tiny nonzero columns.
+//! Coordinate representability and final residual/limit checks apply to both paths.
 //! Tests cover rigid, slider and revolute DOF at world origins 0 and 20,000 mm,
 //! local frame offsets 0.001, 1 and 20,000 mm, and two global rotations.
 //! These sampled cases do not establish arbitrary scale or origin invariance.
@@ -26,6 +27,9 @@ use thiserror::Error;
 use crate::joint::{Joint, JointError, JointId, JointKind, JointLimits};
 use crate::math::{Quat, RigidTransform, Vec3d};
 use crate::occurrence::OccurrenceId;
+
+#[path = "solver/forest.rs"]
+mod forest;
 
 const FD_STEP: f64 = 1e-7;
 const RANK_REL_TOL: f64 = 1e-8;
@@ -135,7 +139,7 @@ struct Constraint {
     b: usize,
     la: RigidTransform,
     lb: RigidTransform,
-    /// Fixed joint value (drive, or limit clamp); `None` = free.
+    /// Fixed joint value (drive, equality bound, or limit clamp); `None` = free.
     target: Option<f64>,
     limits: Option<JointLimits>,
 }
@@ -253,7 +257,13 @@ fn build_constraints(req: &SolveRequest) -> Result<Vec<Constraint>, SolverError>
             .iter()
             .rev()
             .find(|(id, _)| *id == joint.id)
-            .map(|(_, v)| *v);
+            .map(|(_, v)| *v)
+            .or_else(|| {
+                joint
+                    .limits
+                    .filter(|limits| limits.min == limits.max)
+                    .map(|limits| limits.min)
+            });
         cons.push(Constraint {
             kind: joint.kind,
             a,
@@ -443,6 +453,9 @@ fn dof_report(poses: &[RigidTransform], problem: &Problem) -> Option<(usize, usi
     }) {
         return None;
     }
+    if let Some(report) = forest::dof(poses, problem) {
+        return Some(report);
+    }
     let r = residuals(poses, problem.cons);
     let (m, n) = (r.len(), problem.layout.unknowns);
     let first = numerical_rank(jacobian_with_step(poses, problem, m, FD_STEP), m, n)?;
@@ -576,6 +589,7 @@ fn jacobian_with_step(
     step: f64,
 ) -> Vec<f64> {
     let n = problem.layout.unknowns;
+    let periodic = periodic_residual_rows(problem.cons, m);
     let mut jac = vec![0.0; m * n];
     let mut dx = vec![0.0; n];
     for col in 0..n {
@@ -585,10 +599,34 @@ fn jacobian_with_step(
         let minus = residuals(&apply_step(poses, problem.layout, &dx), problem.cons);
         dx[col] = 0.0;
         for row in 0..m {
-            jac[row * n + col] = (plus[row] - minus[row]) / (2.0 * step);
+            let delta = plus[row] - minus[row];
+            let delta = if periodic[row] {
+                wrap_angle(delta)
+            } else {
+                delta
+            };
+            jac[row * n + col] = delta / (2.0 * step);
         }
     }
     jac
+}
+
+// A driven hinge residual lives on a circle. Its finite difference must not
+// mistake the ±π branch jump for a derivative of approximately 2π / step.
+fn periodic_residual_rows(cons: &[Constraint], rows: usize) -> Vec<bool> {
+    let mut periodic = vec![false; rows];
+    let mut offset = 0;
+    for constraint in cons {
+        if constraint.kind == JointKind::Revolute && constraint.target.is_some() {
+            periodic[offset + 5] = true;
+        }
+        offset += match constraint.kind {
+            JointKind::Rigid => 6,
+            JointKind::Revolute | JointKind::Slider => 5 + usize::from(constraint.target.is_some()),
+        };
+    }
+    debug_assert_eq!(offset, rows);
+    periodic
 }
 
 /// `(JᵀJ, Jᵀr)` for row-major `J` of size `m x n`.
@@ -1372,3 +1410,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "solver/forest_tests.rs"]
+mod forest_tests;

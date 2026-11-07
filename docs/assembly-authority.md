@@ -70,3 +70,20 @@ are retained from every embedded definition. Import Project refuses an assembly 
 It also refuses documents carrying component-package metadata or archive entries
 until that source closure can be imported atomically; opening such a document
 directly preserves it. MESH1 and OCW1 remain unchanged.
+
+For regular acyclic joint graphs with at most one grounded body per connected
+component, the solver certifies local equality-constraint rank structurally.
+Each tree edge introduces six relative coordinates and contributes six rigid
+rows, five free slider/revolute rows, or six driven/equality-bound rows. Floating
+components retain six global DOFs. The certificate requires a rotation-chart
+regularity check independent of the requested solve tolerance, and preserves the
+coordinate representability guard. Cycles and multiple grounds retain the
+conservative two-step numerical estimate; no general rank proof is claimed.
+Final residual and limit validation still precedes publication.
+
+A zero-width limit is an equality target even when the current value already
+satisfies it. A one-sided endpoint retains inward motion. Driven revolute scalar
+finite differences use circular differences across the wrapped-error seam;
+residuals, tolerances and iteration caps are unchanged. Captured source-grounded
+solver inputs and symbolic DOF expectations live under
+`crates/onecad-assembly/tests/fixtures`.
