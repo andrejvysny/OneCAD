@@ -218,3 +218,51 @@ fn cylinder_axis_line_rejects_perpendicular_shift_tilt_and_nonunit_direction() {
         Vec3d::Y
     ));
 }
+
+pub(super) fn verify_sources(path: &Path) {
+    let saved = ContainerReader::open(path).unwrap();
+    assert_eq!(saved.import_blobs().len(), 1);
+    let oracle: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/reference-oracles/prusa-sensor.json"
+    ))
+    .unwrap();
+    let hash = oracle["parts"]["box"]["sha256"].as_str().unwrap();
+    assert_eq!(
+        saved.read_import_blob(hash).unwrap(),
+        include_bytes!("../../../../fixtures/public-cad/prusa/MINI-fsenzor-box.stp")
+    );
+    let boxed = saved
+        .document()
+        .definitions
+        .get(&document::definition(0))
+        .unwrap();
+    assert!(
+        matches!(&boxed.timeline.records()[0].op, Operation::Known(KnownOperation::ImportStep(p)) if p.source_sha256 == hash)
+    );
+    for index in [1, 2, 3] {
+        let part = saved
+            .document()
+            .definitions
+            .get(&document::definition(index))
+            .unwrap();
+        let records = part.timeline.records();
+        let native_count = if index == 1 { 32 } else { 8 };
+        assert_eq!(records.len(), native_count + usize::from(index == 2));
+        assert!(records[..native_count].iter().all(|r| matches!(
+            r.op,
+            Operation::Known(
+                KnownOperation::Sketch(_) | KnownOperation::Extrude(_) | KnownOperation::Revolve(_)
+            )
+        )));
+        if index == 2 {
+            assert!(matches!(
+                records[native_count].op,
+                Operation::Known(KnownOperation::TransformBody(_))
+            ));
+            assert_eq!(
+                records[native_count].record_id,
+                RecordId(Uuid::from_u128(0xA601))
+            );
+        }
+    }
+}
