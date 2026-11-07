@@ -3165,6 +3165,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "insta",
+ "onecad-assembly",
  "proptest",
  "serde",
  "serde_json",

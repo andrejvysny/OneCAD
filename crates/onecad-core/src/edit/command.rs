@@ -47,6 +47,10 @@ use crate::sketch::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum EditCommand {
+    /// Mutates embedded definitions or root-owned occurrences.
+    Assembly {
+        edit: Box<super::assembly::AssemblyEdit>,
+    },
     /// Append an op at the rollback cursor and grow the applied prefix
     /// (C++ `AddOperationCommand`). `at_cursor=false` appends at the end.
     AddOperation {
@@ -283,6 +287,7 @@ impl EditCommand {
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Assembly { .. } => "Edit Assembly",
             Self::AddOperation { .. } => "Add Operation",
             Self::UpdateOperationParams { .. } => "Update Operation",
             Self::EditOperationInput { .. } => "Re-profile Operation",

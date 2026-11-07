@@ -355,6 +355,16 @@ impl ContainerWriter {
         meta: &SaveMeta,
         commit: bool,
     ) -> IoResult<PathBuf> {
+        if document.schema_version != GLOBAL_SCHEMA_VERSION {
+            return Err(IoError::UnsupportedDocumentSchema {
+                found: document.schema_version,
+                supported: GLOBAL_SCHEMA_VERSION,
+            });
+        }
+        document
+            .assembly
+            .validate(document.root_definition_id, &document.definitions)
+            .map_err(|error| IoError::Corrupt(format!("invalid assembly: {error}")))?;
         let sections = build_sections(document, caches, imports)?;
         let manifest = build_manifest(document, meta, &sections);
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
@@ -795,7 +805,7 @@ impl ContainerReader {
     /// # Errors
     /// [`IoError`] on a malformed / hostile / corrupt archive.
     pub fn open(path: &Path) -> IoResult<LoadedContainer> {
-        Self::open_with_registry(path, &MigrationRegistry::new())
+        Self::open_with_registry(path, &MigrationRegistry::current())
     }
 
     /// Opens a container, applying `registry`'s migration chain to older documents.
@@ -821,12 +831,29 @@ impl ContainerReader {
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| IoError::Corrupt(format!("manifest parse: {e}")))?;
         manifest.validate_identity()?;
+        if manifest.global_schema_version > GLOBAL_SCHEMA_VERSION {
+            return Err(IoError::UnsupportedDocumentSchema {
+                found: manifest.global_schema_version,
+                supported: GLOBAL_SCHEMA_VERSION,
+            });
+        }
 
         // Authoritative document body.
         let doc_bytes = read_named(&mut archive, DOCUMENT_PATH, MAX_DOCUMENT_BYTES)?
             .ok_or_else(|| IoError::Corrupt("missing document.json".into()))?;
         verify_authoritative(&manifest, DOCUMENT_PATH, &doc_bytes)?;
         let doc_value = document_io::parse_value(&doc_bytes)?;
+        if let Some(version) = doc_value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+        {
+            if version != u64::from(manifest.global_schema_version) {
+                return Err(IoError::Corrupt(format!(
+                    "document schema {version} disagrees with manifest schema {}",
+                    manifest.global_schema_version
+                )));
+            }
+        }
 
         // Version-aware migration + typed decode.
         let (document, migrated) = super::migrate::migrate_and_decode(
@@ -872,7 +899,12 @@ impl ContainerReader {
 
 /// Rejects typed Shell records whose dependency view and worker input view differ.
 fn validate_persisted_shells(document: &Document) -> IoResult<()> {
-    for record in document.timeline.records() {
+    for record in document.timeline.records().iter().chain(
+        document
+            .definitions
+            .values()
+            .flat_map(|def| def.timeline.records()),
+    ) {
         let Operation::Known(KnownOperation::Shell(params)) = &record.op else {
             continue;
         };

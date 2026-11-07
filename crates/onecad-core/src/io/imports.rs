@@ -188,6 +188,12 @@ pub fn referenced_import_shas(document: &Document) -> BTreeSet<String> {
         .timeline
         .records()
         .iter()
+        .chain(
+            document
+                .definitions
+                .values()
+                .flat_map(|def| def.timeline.records()),
+        )
         .flat_map(|rec| match &rec.op {
             Operation::Known(KnownOperation::ImportStep(p)) => {
                 // The replayed blob AND (brep-primary policy) the co-stored

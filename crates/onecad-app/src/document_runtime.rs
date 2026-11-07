@@ -114,14 +114,14 @@ use crate::worker::{lod_str, wire, AdoptingEngine, EngineClock, MeshProvider, So
 /// holder ever mutates these tokens; reads are lock-free.
 #[derive(Debug)]
 pub struct FencingCell {
-    revision: AtomicU64,
+    revision: Arc<AtomicU64>,
     epoch: AtomicU64,
 }
 
 impl FencingCell {
     fn new(epoch: u64) -> Self {
         Self {
-            revision: AtomicU64::new(0),
+            revision: Arc::new(AtomicU64::new(0)),
             epoch: AtomicU64::new(epoch),
         }
     }
@@ -704,6 +704,11 @@ pub struct DocumentRuntime {
     saved_history: Option<unsaved::SavedHistory>,
     read_only: bool,
     mesh_cache: MeshCache,
+    component_cache: BTreeMap<
+        onecad_core::document::component::ComponentDefId,
+        component_execution::ComponentCache,
+    >,
+    component_generation: u64,
     /// MESH1 blobs read back from the container at **open** — the last-saved
     /// geometry, keyed WITHOUT a generation because it belongs to no live snapshot.
     ///
@@ -940,14 +945,51 @@ impl DocumentRuntime {
         meshes: Arc<dyn MeshProvider>,
         solver: Arc<dyn SolverEngine>,
     ) -> Result<Self, IoError> {
+        Self::open_with_assembly(path, engine, meshes, solver, false)
+    }
+
+    /// Opens an assembly for an explicit assembly-aware host; geometry must be replayed.
+    ///
+    /// # Errors
+    /// Returns an error when the container cannot be decoded.
+    pub fn open_assembly(
+        path: &Path,
+        engine: Arc<dyn GeometryEngine>,
+        meshes: Arc<dyn MeshProvider>,
+        solver: Arc<dyn SolverEngine>,
+    ) -> Result<Self, IoError> {
+        Self::open_with_assembly(path, engine, meshes, solver, true)
+    }
+
+    fn open_with_assembly(
+        path: &Path,
+        engine: Arc<dyn GeometryEngine>,
+        meshes: Arc<dyn MeshProvider>,
+        solver: Arc<dyn SolverEngine>,
+        allow_assembly: bool,
+    ) -> Result<Self, IoError> {
         let loaded = ContainerReader::open(path)?;
+        if !allow_assembly
+            && (!loaded.document().definitions.is_empty()
+                || !loaded.document().assembly.occurrences.is_empty()
+                || !loaded.document().assembly.joints.is_empty())
+        {
+            return Err(IoError::UnsupportedFeature(
+                "assembly definition execution is not yet available".into(),
+            ));
+        }
         let read_only = loaded.outcome.read_only;
+        let migrated = loaded
+            .outcome
+            .migration_report
+            .as_ref()
+            .is_some_and(|report| report.applied);
         let doc = loaded.document().clone();
         let title = title_for_path(path);
         let mut rt = Self::from_document(
             doc,
             title,
-            Some(path.to_path_buf()),
+            (!migrated).then(|| path.to_path_buf()),
             read_only,
             engine,
             meshes,
@@ -1017,6 +1059,8 @@ impl DocumentRuntime {
             saved_history: Some(unsaved::SavedHistory::default()),
             read_only,
             mesh_cache: MeshCache::new(),
+            component_cache: BTreeMap::new(),
+            component_generation: 0,
             cached_meshes: HashMap::new(),
             preview_png: None,
             projection_stale: BTreeMap::new(),
@@ -1284,6 +1328,28 @@ impl DocumentRuntime {
     /// # Errors
     /// [`DomainError`] on validation failure; the document is left unchanged.
     pub fn apply(&mut self, cmd: EditCommand) -> Result<CommandOutcome, DomainError> {
+        if matches!(cmd, EditCommand::Assembly { .. }) {
+            return Err(DomainError::Validation(
+                "assembly definition execution is not yet available".into(),
+            ));
+        }
+        self.apply_authoritative(cmd)
+    }
+
+    /// Applies an explicitly requested assembly edit through the single writer.
+    ///
+    /// # Errors
+    /// Returns the edit's validation error without applying it.
+    pub fn apply_assembly_edit(
+        &mut self,
+        edit: onecad_core::edit::AssemblyEdit,
+    ) -> Result<CommandOutcome, DomainError> {
+        self.apply_authoritative(EditCommand::Assembly {
+            edit: Box::new(edit),
+        })
+    }
+
+    fn apply_authoritative(&mut self, cmd: EditCommand) -> Result<CommandOutcome, DomainError> {
         self.require_generation_capacity()?;
         if self.read_only {
             return Err(DomainError::ReadOnly);
@@ -1320,6 +1386,14 @@ impl DocumentRuntime {
         label: &str,
         commands: Vec<EditCommand>,
     ) -> Result<CommandOutcome, DomainError> {
+        if commands
+            .iter()
+            .any(|command| matches!(command, EditCommand::Assembly { .. }))
+        {
+            return Err(DomainError::Validation(
+                "assembly definition execution is not yet available".into(),
+            ));
+        }
         self.require_generation_capacity()?;
         if self.read_only {
             return Err(DomainError::ReadOnly);
@@ -2602,6 +2676,9 @@ impl DocumentRuntime {
         let mut scratch = scratch;
         self.guard_staged_leaks(&mut scratch);
         self.regen = scratch;
+        // Root geometry can grow independently of embedded definitions; retire
+        // their caches before publishing to preserve the aggregate scene budget.
+        self.component_cache.clear();
         self.latest_snapshot = Some(snap.clone());
         // First publish retires the container's last-saved geometry: real geometry
         // now exists, and these blobs describe a document state the timeline may
@@ -3704,6 +3781,31 @@ impl DocumentRuntime {
 
     // ── Projection ───────────────────────────────────────────────────────────
 
+    /// Returns definition-local body metadata and stable occurrence placements.
+    ///
+    /// # Errors
+    /// Returns an error if the assembly's references are invalid.
+    pub fn assembly_projection(&self) -> Result<crate::dto::AssemblyProjectionDto, ApiError> {
+        let mut document = self.session.document().clone();
+        document.bodies = self.merged_bodies();
+        let mut projection = crate::assembly_projection::project(&document)?;
+        for definition in &mut projection.definitions {
+            if definition.id == document.root_definition_id.to_string() {
+                definition.mesh_generation = self
+                    .latest_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.generation);
+            } else if let Some((id, _)) = document
+                .definitions
+                .iter()
+                .find(|(id, _)| id.to_string() == definition.id)
+            {
+                definition.mesh_generation = self.component_generation(*id);
+            }
+        }
+        Ok(projection)
+    }
+
     /// Builds the frontend [`DocumentProjection`] from the authoritative document
     /// + the regen mirror (states) + the latest snapshot (body geometry).
     #[must_use]
@@ -3722,6 +3824,7 @@ impl DocumentRuntime {
                 b.id.to_string(),
                 BodyDto {
                     id: b.id.to_string(),
+                    created_by: b.created_by.to_string(),
                     name: b.name.clone(),
                     visible: b.visible,
                     health: b.health,
@@ -7098,6 +7201,7 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     }
 }
 
+pub mod component_execution;
 pub mod deletion;
 mod edit_operands;
 pub mod edit_preview;

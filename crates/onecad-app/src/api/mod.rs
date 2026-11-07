@@ -3,11 +3,16 @@
 //! Desktop adapters marshal typed commands and supply host events, paths, and dialogs.
 //! Regeneration and persistence preserve their prepare, unlocked I/O, and fenced commit phases.
 
+mod component_execution;
 mod document_items;
 mod document_state;
 mod edit_operands;
 mod edit_preview;
 mod input_repair;
+pub use component_execution::{
+    apply_assembly_edit, component_element_info, component_mesh_for_path, get_assembly_projection,
+    regenerate_component,
+};
 pub use document_items::{
     delete_document_item, plan_delete_document_item, DeleteTarget, DeletionItem, DeletionPlan,
 };
@@ -153,9 +158,22 @@ pub async fn open_runtime_over_new_backend_blocking(
     state: &AppState,
     path: PathBuf,
 ) -> Result<DocumentRuntime, ApiError> {
+    open_runtime_over_new_backend_blocking_mode(state, path, false).await
+}
+
+async fn open_runtime_over_new_backend_blocking_mode(
+    state: &AppState,
+    path: PathBuf,
+    assembly: bool,
+) -> Result<DocumentRuntime, ApiError> {
     let (engine, meshes, solver, query) = state.make_backend_with_query();
     match tokio::task::spawn_blocking(move || {
-        DocumentRuntime::open(&path, engine, meshes, solver).map(|mut rt| {
+        let result = if assembly {
+            DocumentRuntime::open_assembly(&path, engine, meshes, solver)
+        } else {
+            DocumentRuntime::open(&path, engine, meshes, solver)
+        };
+        result.map(|mut rt| {
             rt.bind_geometry_read_query(query)
                 .expect("fresh runtime has no geometry-read provider");
             rt
@@ -259,6 +277,18 @@ pub(crate) async fn schedule_initial_regen(state: &AppState) {
 }
 
 /// Creates a blank document and opens it (`CadClient.newDocument`).
+/// Retire an auxiliary worker before replacing its runtime while holding the runtime lock.
+pub(crate) fn retire_component_worker(state: &AppState) {
+    if let Some((_, worker)) = state
+        .component_worker
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        worker.retire();
+    }
+}
+
 pub async fn new_document(
     state: &AppState,
     app: HostContext,
@@ -283,6 +313,7 @@ pub async fn new_document(
             state.rollback_backend();
             return Err(error);
         }
+        retire_component_worker(state);
         *guard = Some(runtime);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
@@ -326,13 +357,34 @@ pub async fn open_document(
     path: String,
     on_recovery: Option<String>,
 ) -> Result<DocumentSnapshotDto, ApiError> {
+    open_document_mode(state, app, path, on_recovery, false).await
+}
+
+/// Opens a document for an assembly-aware host; component meshes start unready.
+pub async fn open_assembly_document(
+    state: &AppState,
+    app: HostContext,
+    path: String,
+    on_recovery: Option<String>,
+) -> Result<DocumentSnapshotDto, ApiError> {
+    open_document_mode(state, app, path, on_recovery, true).await
+}
+
+async fn open_document_mode(
+    state: &AppState,
+    app: HostContext,
+    path: String,
+    on_recovery: Option<String>,
+    assembly: bool,
+) -> Result<DocumentSnapshotDto, ApiError> {
     if let Some(offer) = state.pending_recovery_for_path(Path::new(&path)) {
         recovery_open_decision(&offer, &path, on_recovery.as_deref())?;
     }
     // Ownership first: a path open elsewhere is focused, not opened twice.
     let path_claim = state.claim_path(Path::new(&path))?;
     state.ensure_document_capacity()?;
-    let rt = open_runtime_over_new_backend_blocking(state, PathBuf::from(&path)).await?;
+    let rt =
+        open_runtime_over_new_backend_blocking_mode(state, PathBuf::from(&path), assembly).await?;
     let document_claim = match state.claim_document(rt.document_uuid()) {
         Ok(claim) => claim,
         Err(error) => {
@@ -368,6 +420,7 @@ pub async fn open_document(
             state.rollback_backend();
             return Err(error);
         }
+        retire_component_worker(state);
         *guard = Some(rt);
         #[cfg(test)]
         if let Some((started, resume)) = after_publish {
@@ -460,6 +513,7 @@ pub async fn import_step(
         let mut guard = state.runtime.lock().await;
         state.ensure_not_closing()?;
         staged.publish(|| {
+            retire_component_worker(state);
             *guard = Some(rt);
             let rt = guard.as_ref().unwrap();
             rt.adopt_current_epoch();
@@ -565,6 +619,7 @@ pub async fn import_project(
                 }
             };
             rt.adopt_current_epoch();
+            retire_component_worker(state);
             *guard = Some(rt);
             state.bind_restart_owner(guard.as_ref().unwrap());
             state.commit_backend();
@@ -1085,7 +1140,7 @@ async fn start_close(
     discard_session: Option<&str>,
     rewarm: bool,
 ) -> Result<tokio::task::JoinHandle<()>, ApiError> {
-    let (closed, claims) = {
+    let (closed, claims, component_worker) = {
         let mut guard = state.runtime.lock().await;
         if discard_session.is_some_and(|expected| {
             !guard
@@ -1107,13 +1162,22 @@ async fn start_close(
                 rt.persisted_generation(),
             )
         });
+        let component_worker = state
+            .component_worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .map(|(_, worker)| worker);
+        if let Some(worker) = &component_worker {
+            worker.retire();
+        }
         *guard = None;
         state.invalidate_backend_stage();
         state.clear_restart_owner();
         if rewarm {
             state.rewarm();
         }
-        (closed, state.take_claims())
+        (closed, state.take_claims(), component_worker)
     };
     // Never await the writer lane while holding the runtime lock. Admitted
     // autosaves finish before cleanup; queued old-session snapshots fail their fence.
@@ -1134,6 +1198,16 @@ async fn start_close(
             #[cfg(debug_assertions)]
             render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
             let _ = app.emit(AppEvent::ProjectionUpdated(DocumentProjection::empty()));
+        }
+        drop(current);
+        drop(_lane);
+        if let Some(worker) = component_worker {
+            while !worker
+                .wait_torn_down(std::time::Duration::from_secs(30))
+                .await
+            {
+                tracing::warn!("component worker still retiring during close");
+            }
         }
     }))
 }
@@ -1242,6 +1316,28 @@ pub async fn recover_document_at_path(
     accept: bool,
     destination: Option<PathBuf>,
 ) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    recover_document_mode(state, app, document_id, accept, destination, false).await
+}
+
+/// Recovers an assembly into the explicit assembly-capable runtime.
+pub async fn recover_assembly_document_at_path(
+    state: &AppState,
+    app: HostContext,
+    document_id: String,
+    accept: bool,
+    destination: Option<PathBuf>,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    recover_document_mode(state, app, document_id, accept, destination, true).await
+}
+
+async fn recover_document_mode(
+    state: &AppState,
+    app: HostContext,
+    document_id: String,
+    accept: bool,
+    destination: Option<PathBuf>,
+    assembly: bool,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
     let id = parse_document_id(&document_id)?;
     if state.peek_pending_recovery(id).is_none() {
         return Ok(None);
@@ -1272,7 +1368,9 @@ pub async fn recover_document_at_path(
     state.ensure_document_capacity()?;
     // Restore: open the autosave container as the live document. Anything below that
     // fails leaves the offer pending, so the user can try again or discard.
-    let mut rt = open_runtime_over_new_backend_blocking(state, offer.autosave_path.clone()).await?;
+    let mut rt =
+        open_runtime_over_new_backend_blocking_mode(state, offer.autosave_path.clone(), assembly)
+            .await?;
     if rt.document_uuid() != id {
         state.rollback_backend();
         return Err(ApiError::InvalidCommand(
@@ -1311,6 +1409,7 @@ pub async fn recover_document_at_path(
             state.rollback_backend();
             return Err(error);
         }
+        retire_component_worker(state);
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
@@ -5122,6 +5221,7 @@ mod tests {
                 id.into(),
                 crate::dto::BodyDto {
                     id: id.into(),
+                    created_by: "test-operation".into(),
                     name: id.into(),
                     visible,
                     health: onecad_core::document::body::BodyHealth::Healthy,

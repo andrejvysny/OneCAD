@@ -13,6 +13,7 @@ compile_error!(
 compile_error!("onecad-app: iOS requires the `embedded-kernel` feature");
 
 pub mod api;
+pub mod assembly_projection;
 pub mod autosave;
 pub mod document_runtime;
 pub mod dto;

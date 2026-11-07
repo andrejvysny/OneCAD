@@ -44,6 +44,8 @@ pub enum ProjectImportError {
     },
     #[error("source document has no records to import")]
     EmptyDocument,
+    #[error("assembly project import is not supported; open it without flattening")]
+    AssemblyUnsupported,
 }
 
 /// Reads a `.onecad` file and extracts the subset of its state that can be
@@ -54,6 +56,13 @@ pub enum ProjectImportError {
 pub fn read_project_for_import(path: &Path) -> Result<ImportedProject, ProjectImportError> {
     let loaded = ContainerReader::open(path).map_err(ProjectImportError::Container)?;
     let source_doc: Document = loaded.document().clone();
+
+    if !source_doc.definitions.is_empty()
+        || !source_doc.assembly.occurrences.is_empty()
+        || !source_doc.assembly.joints.is_empty()
+    {
+        return Err(ProjectImportError::AssemblyUnsupported);
+    }
 
     if source_doc.timeline.records().is_empty() {
         return Err(ProjectImportError::EmptyDocument);

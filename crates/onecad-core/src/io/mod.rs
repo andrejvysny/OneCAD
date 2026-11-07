@@ -91,6 +91,14 @@ pub enum IoError {
         expected: u32,
     },
 
+    /// Document schema is newer than the reader and must not be adopted.
+    #[error("unsupported document schema {found} (this build reads through {supported})")]
+    UnsupportedDocumentSchema { found: u32, supported: u32 },
+
+    /// The format is recognized, but its semantics are not supported here.
+    #[error("unsupported document feature: {0}")]
+    UnsupportedFeature(String),
+
     /// The archive, an authoritative section, or an authoritative entry hash is
     /// corrupt / malformed.
     #[error("corrupt container: {0}")]

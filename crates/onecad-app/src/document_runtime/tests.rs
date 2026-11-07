@@ -1004,6 +1004,7 @@ async fn projection_prefers_document_body_metadata() {
     assert!(rt.regen.bodies.get(body).unwrap().color.is_none());
 
     let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
+    assert_eq!(dto.created_by, RecordId(Uuid::from_u128(0x10)).to_string());
     assert_eq!(dto.name, "Bracket", "the document's name wins");
     assert!(!dto.visible, "the document's visibility wins");
     assert_eq!(
@@ -1024,6 +1025,23 @@ async fn projection_prefers_document_body_metadata() {
     let meta = saved.get(body).unwrap();
     assert_eq!((meta.name.as_str(), meta.visible), ("Bracket", false));
     assert_eq!(meta.color, Some([10, 20, 30, 240]));
+}
+
+#[test]
+fn body_projection_uses_recorded_producer_not_body_identity() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let body = BodyId(Uuid::from_u128(0xCAFE));
+    let producer = RecordId(Uuid::from_u128(0xBEEF));
+    rt.regen
+        .bodies
+        .register(onecad_core::document::body::BodyMeta::new(
+            body,
+            "Split child",
+            producer,
+        ));
+    let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
+    assert_eq!(dto.created_by, producer.to_string());
+    assert_ne!(dto.created_by, dto.id);
 }
 
 #[tokio::test]

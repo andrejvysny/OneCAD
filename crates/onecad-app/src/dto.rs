@@ -47,6 +47,8 @@ fn body_health_is_healthy(health: &onecad_core::document::body::BodyHealth) -> b
 #[serde(rename_all = "camelCase")]
 pub struct BodyDto {
     pub id: String,
+    /// Operation that first produced this body, from the body registry.
+    pub created_by: String,
     pub name: String,
     pub visible: bool,
     #[serde(skip_serializing_if = "body_health_is_healthy")]
@@ -59,6 +61,36 @@ pub struct BodyDto {
     /// empty so the wire stays lean for bodies without face colors.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub face_colors: std::collections::BTreeMap<String, [u8; 4]>,
+}
+
+/// Definition-local body metadata and instance placement; does not assert mesh readiness.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyProjectionDto {
+    pub root_definition: String,
+    pub definitions: Vec<AssemblyDefinitionDto>,
+    pub occurrences: Vec<AssemblyOccurrenceDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyDefinitionDto {
+    pub id: String,
+    pub name: String,
+    pub bodies: Vec<BodyDto>,
+    /// Current checked mesh generation, absent until a valid replay is accepted.
+    pub mesh_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyOccurrenceDto {
+    pub id: String,
+    pub definition: String,
+    pub path: Vec<String>,
+    pub local: onecad_core::document::component::RigidTransform,
+    pub grounded: bool,
+    pub visible: bool,
 }
 
 /// Sketch solve status (`documentStore.ts` `SketchStatus`).
@@ -2668,6 +2700,7 @@ mod tests {
             "b1".to_string(),
             BodyDto {
                 id: "b1".into(),
+                created_by: "op1".into(),
                 name: "Body 1".into(),
                 visible: true,
                 health: onecad_core::document::body::BodyHealth::Healthy,

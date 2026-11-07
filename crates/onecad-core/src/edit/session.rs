@@ -141,6 +141,20 @@ impl DocumentSession {
         &self.document
     }
 
+    /// Adopts a fenced component replay's derived state; caller must validate
+    /// that the runtime session and component inputs still match the replay.
+    pub fn adopt_component_replay(
+        &mut self,
+        id: onecad_assembly::occurrence::ComponentDefId,
+        component: crate::document::component::ComponentDef,
+    ) -> bool {
+        if component.id != id || !self.document.definitions.contains_key(&id) {
+            return false;
+        }
+        self.document.definitions.insert(id, component);
+        true
+    }
+
     /// The derived dependency graph.
     #[must_use]
     pub fn graph(&self) -> &DependencyGraph {
@@ -817,6 +831,13 @@ impl DocumentSession {
         cmd: &EditCommand,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
         match cmd {
+            EditCommand::Assembly { edit } => {
+                let inverse = super::assembly::memento(&self.document, edit);
+                if !super::assembly::apply(&mut self.document, edit)? {
+                    return Ok((empty_outcome(), Inverse::Noop));
+                }
+                Ok((empty_outcome(), inverse))
+            }
             EditCommand::AddOperation { record, at_cursor } => {
                 self.add_operation(record.clone(), *at_cursor)
             }

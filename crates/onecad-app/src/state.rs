@@ -165,6 +165,8 @@ pub struct AppState {
     /// without that lock. Admitted I/O retains lane ownership independently of its
     /// caller. See `docs/persistence-transactions.md`.
     pub persistence: Arc<Mutex<()>>,
+    /// The active transient component worker, fenced by runtime session.
+    pub(crate) component_worker: Arc<StdMutex<Option<(String, WorkerManager)>>>,
     #[cfg(test)]
     pub(crate) save_before_admission: StdMutex<
         Option<(
@@ -184,6 +186,13 @@ pub struct AppState {
         Option<(
             tokio::sync::oneshot::Sender<()>,
             std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
+    #[cfg(test)]
+    pub(crate) component_before_commit: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
     /// The regen scheduler control surface, set once in `AppState::start`.
@@ -319,12 +328,15 @@ impl AppState {
             native_gestures: Arc::new(StdMutex::new(None)),
             restart_owner: Arc::new(StdMutex::new(None)),
             persistence: Arc::new(Mutex::new(())),
+            component_worker: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             save_before_admission: StdMutex::new(None),
             #[cfg(test)]
             open_before_publish: StdMutex::new(None),
             #[cfg(test)]
             open_after_publish: StdMutex::new(None),
+            #[cfg(test)]
+            component_before_commit: StdMutex::new(None),
             scheduler: Arc::new(OnceLock::new()),
             host: Arc::new(OnceLock::new()),
             autosave_tick: Arc::new(watch::channel(0u64).0),
@@ -800,12 +812,15 @@ impl AppState {
             runtime,
             restart_owner,
             persistence: Arc::new(Mutex::new(())),
+            component_worker: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             save_before_admission: StdMutex::new(None),
             #[cfg(test)]
             open_before_publish: StdMutex::new(None),
             #[cfg(test)]
             open_after_publish: StdMutex::new(None),
+            #[cfg(test)]
+            component_before_commit: StdMutex::new(None),
             scheduler,
             native_gestures: Arc::new(StdMutex::new(None)),
             host: app,

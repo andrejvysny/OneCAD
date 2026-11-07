@@ -11,6 +11,7 @@ edition = "2021"
 # Do not add a `tauri` dependency here.
 
 [dependencies]
+onecad-assembly = { path = "../onecad-assembly" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

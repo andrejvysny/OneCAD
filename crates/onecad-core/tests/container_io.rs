@@ -398,7 +398,7 @@ fn tamper_cache_blob_is_stale_not_corrupt() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn newer_schema_version_opens_read_only() {
+fn newer_schema_version_is_refused() {
     let dir = tmp();
     let path = dir.path().join("future.onecad");
     ContainerWriter::save(&path, &small_doc(), &ContainerCaches::none(), &meta()).unwrap();
@@ -409,13 +409,10 @@ fn newer_schema_version_opens_read_only() {
     set_manifest(&mut entries, &manifest);
     write_entries(&path, &entries);
 
-    let loaded = ContainerReader::open(&path).unwrap();
-    assert!(loaded.outcome.read_only);
-    assert!(loaded
-        .outcome
-        .diagnostics
-        .iter()
-        .any(|d| d.code == "newer-schema-read-only"));
+    assert!(matches!(
+        ContainerReader::open(&path),
+        Err(IoError::UnsupportedDocumentSchema { .. })
+    ));
 }
 
 /// A synthetic v0→v1 migration step (no structural change) at a chosen confidence.
@@ -425,7 +422,7 @@ impl MigrationStep for FakeV0toV1 {
         0
     }
     fn to_version(&self) -> u32 {
-        1
+        2
     }
     fn confidence(&self) -> MigrationConfidence {
         self.0
@@ -433,7 +430,7 @@ impl MigrationStep for FakeV0toV1 {
     fn migrate_document(&self, document: &mut Value) -> Result<(), String> {
         // Stamp the target version; the v1 shape is otherwise already compatible.
         if let Some(obj) = document.as_object_mut() {
-            obj.insert("schemaVersion".into(), Value::from(1u32));
+            obj.insert("schemaVersion".into(), Value::from(2u32));
         }
         Ok(())
     }
@@ -446,6 +443,16 @@ fn write_v0_container(path: &Path) {
     ContainerWriter::save(path, &small_doc(), &ContainerCaches::none(), &meta()).unwrap();
     let mut entries = read_entries(path);
     let mut manifest = manifest_of(&entries);
+    let document = entry_bytes(&mut entries, DOCUMENT_PATH);
+    let mut value: Value = serde_json::from_slice(document).unwrap();
+    value["schemaVersion"] = Value::from(0);
+    *document = serde_json::to_vec(&value).unwrap();
+    manifest
+        .entries
+        .iter_mut()
+        .find(|entry| entry.path == DOCUMENT_PATH)
+        .unwrap()
+        .sha256 = sha256_hex(document);
     manifest.global_schema_version = 0; // pretend it's a legacy v0 file
     set_manifest(&mut entries, &manifest);
     write_entries(path, &entries);
@@ -605,6 +612,33 @@ fn import_blobs_are_not_reported_as_caches() {
     assert_eq!(loaded.read_cache(&blob_path).unwrap(), CacheRead::Missing);
     // ...yet it still reads back through the import API.
     assert!(loaded.read_import_blob(&sha).is_ok());
+}
+
+#[test]
+fn embedded_definition_import_blob_remains_owned_by_saved_document() {
+    use onecad_assembly::occurrence::ComponentDefId;
+    use onecad_core::document::component::ComponentDef;
+    let directory = tmp();
+    let path = directory.path().join("assembly.onecad");
+    let bytes = b"ISO-10303-21; component source";
+    let (sha, blobs) = blob(bytes, ImportSourceCodec::Step);
+    let local = import_doc(&sha, ImportSourceCodec::Step, false);
+    let id = ComponentDefId(Uuid::from_u128(100));
+    let mut component = ComponentDef::new(id, "Embedded");
+    component.timeline = local.timeline;
+    let mut doc = Document::new(DocumentId(Uuid::from_u128(101)));
+    doc.definitions.insert(id, component);
+    ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta())
+        .unwrap();
+    let reopened = ContainerReader::open(&path).unwrap();
+    assert_eq!(reopened.read_import_blob(&sha).unwrap(), bytes);
+    assert_eq!(
+        reopened.document().definitions[&id]
+            .timeline
+            .records()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -861,10 +895,8 @@ fn xorshift(state: &mut u64) -> u64 {
 // Expressions: no migration — a legacy bare-name `expr` IS a valid expression
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A document written by the bare-name-only build (`{"value":10,"expr":"width"}`)
-/// opens unchanged and resolves through the arithmetic evaluator, because a bare
-/// name is just a one-token expression. That is why widening `expr` needed no
-/// container migration and no schema version bump.
+/// The legacy bare-name expression survives the schema-2 root definition and
+/// resolves through the arithmetic evaluator.
 #[test]
 fn a_legacy_bare_name_expr_loads_and_resolves_through_the_evaluator() {
     use onecad_core::document::variables::{Unit, Variable};
@@ -889,7 +921,7 @@ fn a_legacy_bare_name_expr_loads_and_resolves_through_the_evaluator() {
     });
     ContainerWriter::save(&path, &doc, &ContainerCaches::none(), &meta()).unwrap();
 
-    // The stored form on disk is exactly the legacy shape.
+    // The scalar retains its legacy shape under the root definition.
     let raw: Value = {
         let entries = read_entries(&path);
         let (_, bytes) = entries
@@ -899,7 +931,7 @@ fn a_legacy_bare_name_expr_loads_and_resolves_through_the_evaluator() {
         serde_json::from_slice(bytes).unwrap()
     };
     assert_eq!(
-        raw["timeline"]["records"][0]["params"]["distance"],
+        raw["rootDefinition"]["timeline"]["records"][0]["params"]["distance"],
         serde_json::json!({ "value": 10.0, "expr": "width" })
     );
 

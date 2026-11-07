@@ -25,7 +25,7 @@ expression: manifest
       "sha256": "[sha256]"
     }
   ],
-  "globalSchemaVersion": 1,
+  "globalSchemaVersion": 2,
   "magic": "ONECAD",
   "modified": "2026-07-16T00:00:00Z",
   "occtFingerprint": "occt-7.9.3-fixed",
