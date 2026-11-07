@@ -480,7 +480,8 @@ async fn a_provisional_tab_answered_in_the_background_closes_its_host() {
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.document_open() && !app.busy()
+        // Bootstrap New bypasses the file-intent flag; wait for its terminal reply.
+        app.document_open() && !app.busy() && app.doc.status == "Document opened"
     })
     .await;
     let origin = app.doc.tab;
