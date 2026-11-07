@@ -115,6 +115,7 @@ mod sketch_view;
 mod start_screen;
 mod startup_recovery;
 mod support_view;
+mod sweep_ui;
 mod tab_switcher;
 mod tool_palette;
 mod tool_registry;

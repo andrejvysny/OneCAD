@@ -805,8 +805,8 @@
       "previewFidelity": "same constructor; PreviewOp seeds both finalized profile and path from captured session; head unchanged",
       "persistenceBehavior": "typed SweepParams preserve exact profile/version/anchor and path; no legacy identity upgrade",
       "userRecoveryBehavior": "explicit unsupported modes, legacy/malformed profile, missing sketch, frame/curvature/construction refusal; accepted state retained",
-      "uiExposure": "hidden",
-      "notes": "Bounded kernel subset under ONECAD-386. General chains, open/spline/body-edge paths, arbitrary ellipse seams, user twist/scale, native authoring and broad history acceptance remain separate gates."
+      "uiExposure": "exposed",
+      "notes": "Bounded kernel subset under ONECAD-386. General chains, open/spline/body-edge paths, arbitrary ellipse seams, user twist/scale, general native authoring and broad history acceptance remain separate gates. Native controls require an explicit circular region and explicit finalized path choice; native lifecycle seeds profile selection, while separate mandatory synthetic viewport-pointer cases prove picking and suppressed-path refusal. Physical input and full AppKit restart remain unqualified."
     },
     {
       "operation": "PlaceComponent",

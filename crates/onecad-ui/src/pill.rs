@@ -177,6 +177,11 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             crate::operation_start::revolve_ready(app),
             "Select a profile with a sketch line, or multi-select a profile and an axis edge",
         ),
+        ToolId::Sweep => model_view(
+            app,
+            crate::sweep_ui::ready(app),
+            "Select a circular profile and finish an eligible path sketch",
+        ),
         ToolId::Loft => model_view(
             app,
             crate::loft_ui::ready(app),
@@ -345,6 +350,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         ToolId::Hole => crate::operation_start::begin_hole(app),
         ToolId::Revolve => crate::operation_start::begin_revolve(app),
         ToolId::Loft => crate::loft_ui::begin(app),
+        ToolId::Sweep => crate::sweep_ui::begin(app),
         ToolId::DatumPlane | ToolId::OffsetPlane => app.choose_offset_plane(),
         ToolId::LinearPattern
         | ToolId::CircularPattern

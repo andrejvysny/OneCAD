@@ -400,6 +400,16 @@ fn validate_bindings(operation: &KnownOperation) -> Result<(), String> {
             validate_axis(p.axis.as_ref())
         }
         KnownOperation::Loft(p) => p.validate(),
+        KnownOperation::Sweep(p) => {
+            validate_profile(p.profile.as_ref())?;
+            if p.path_edge.is_some()
+                || p.boolean_mode != BooleanMode::NewBody
+                || !p.extra.is_empty()
+            {
+                return Err("Sweep supports only a sketch path and NewBody".into());
+            }
+            Ok(())
+        }
         KnownOperation::Fillet(p) => validate_edges(&p.edge_ids, &p.edges),
         KnownOperation::Chamfer(p) => {
             validate_edges(&p.edge_ids, &p.edges)?;

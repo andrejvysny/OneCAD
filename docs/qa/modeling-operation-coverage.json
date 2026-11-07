@@ -432,13 +432,13 @@
       "supportStatus": "supported",
       "cppTest": "worker/tests/test_sweep.cpp",
       "rustRealWorkerTest": "crates/onecad-app/tests/sweep_ops.rs",
-      "frontendTest": "",
+      "frontendTest": "crates/onecad-ui/src/sweep_delivery_tests.rs; crates/onecad-ui/src/sweep_ui.rs",
       "playwrightTest": "",
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1",
-      "notes": "Bounded kernel subset: analytic independent volume/support points, named/custom planes, refusal and preview/prepared fencing; canonical_sweep_basic/refusal fixtures and typed lifecycle. Native GUI and general Sweep acceptance remain separate gates.",
-      "uiExposure": "hidden"
+      "notes": "Bounded kernel subset: analytic independent volume/support points, named/custom planes, refusal and preview/prepared fencing; canonical_sweep_basic/refusal fixtures and typed lifecycle. Native GUI and general Sweep acceptance remain separate gates. Native controls require an explicit circular region and explicit finalized path choice; native lifecycle seeds profile selection, while separate mandatory synthetic viewport-pointer cases prove picking and suppressed-path refusal. Physical input and full AppKit restart remain unqualified.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "PlaceComponent",
