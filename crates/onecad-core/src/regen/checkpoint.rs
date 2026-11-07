@@ -249,10 +249,9 @@ const LADDER_WIDTH: usize = 5;
 /// checkpoints saved, plans replay from 0** (the correct, cache-free baseline).
 ///
 /// Retention is a **geometric ladder** anchored at the highest stored step `head`:
-/// `head`, `head−1`, and the nearest stored steps at or below `head/2`, `head/4` and
-/// `0`. That keeps re-editing the newest feature cheap while still holding a coarse
-/// fallback deep in the timeline, in a fixed [`LADDER_WIDTH`] slots — so a long
-/// editing session's memory is flat, not linear in the number of saves.
+/// `head`, `head−1`, the nearest stored steps at or below `head/2` and `head/4`,
+/// and the earliest available checkpoint. This keeps a coarse fallback in a fixed
+/// [`LADDER_WIDTH`] slots, so memory stays flat as an editing session grows.
 #[derive(Debug, Default)]
 pub struct InMemoryCheckpointStore {
     by_step: BTreeMap<usize, StoredCheckpoint>,
@@ -274,8 +273,13 @@ impl InMemoryCheckpointStore {
         let Some(&head) = self.by_step.keys().next_back() else {
             return;
         };
-        let mut keep: Vec<usize> = vec![head, head.saturating_sub(1)];
-        for target in [head / 2, head / 4, 0] {
+        let floor = *self
+            .by_step
+            .keys()
+            .next()
+            .expect("nonempty checkpoint store");
+        let mut keep: Vec<usize> = vec![head, head.saturating_sub(1), floor];
+        for target in [head / 2, head / 4] {
             if let Some(&s) = self.by_step.range(..=target).next_back().map(|(s, _)| s) {
                 keep.push(s);
             }
@@ -492,6 +496,47 @@ mod tests {
         assert_eq!(steps(&store), vec![0]);
         store.save(1, artifacts_at(1));
         assert_eq!(steps(&store), vec![0, 1]);
+    }
+
+    #[test]
+    fn nonzero_first_checkpoint_remains_the_floor_through_long_history() {
+        let mut store = InMemoryCheckpointStore::new();
+        for step in 115..=237 {
+            store.save(step, artifacts_at(step));
+            let retained = steps(&store);
+            assert!(retained.len() <= LADDER_WIDTH, "step {step}: {retained:?}");
+            assert!(
+                retained.contains(&115),
+                "step {step} lost first available checkpoint: {retained:?}"
+            );
+            assert_eq!(retained.last(), Some(&step));
+        }
+    }
+
+    #[test]
+    fn sparse_floor_follows_earlier_saves_and_explicit_invalidation() {
+        let mut store = InMemoryCheckpointStore::new();
+        for step in [115, 130, 170, 205, 237] {
+            store.save(step, artifacts_at(step));
+            let retained = steps(&store);
+            assert!(retained.len() <= LADDER_WIDTH, "{retained:?}");
+            assert_eq!(retained.first(), Some(&115), "{retained:?}");
+            assert_eq!(retained.last(), Some(&step), "{retained:?}");
+        }
+        store.save(90, artifacts_at(90));
+        assert_eq!(steps(&store).first(), Some(&90));
+        assert_eq!(steps(&store).last(), Some(&237));
+        store.invalidate_from(116);
+        assert_eq!(steps(&store), vec![90, 115]);
+        store.invalidate_from(115);
+        assert_eq!(steps(&store), vec![90]);
+        store.invalidate_from(0);
+        assert!(steps(&store).is_empty());
+        for step in 160..=170 {
+            store.save(step, artifacts_at(step));
+        }
+        assert_eq!(steps(&store).first(), Some(&160));
+        assert_eq!(steps(&store).last(), Some(&170));
     }
 
     /// Review M7: pruning is anchored at the **highest stored step**, never at the step
