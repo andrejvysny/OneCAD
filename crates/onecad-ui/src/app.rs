@@ -453,6 +453,7 @@ impl App {
             .ok()
             .and_then(|mut value| value.take());
         if let Some(error) = failure {
+            self.doc.display_error = Some(error.clone());
             self.doc.status = error;
             self.doc.diagnostics.record(
                 crate::diagnostics::Source::Worker,
@@ -557,6 +558,7 @@ impl App {
             .runtime(&display.context.runtime_session, &self.doc.status);
         crate::profile_diagnostics::record_display_failures(&mut self.doc.diagnostics, &display);
         crate::item_selection::reconcile(self, &display);
+        self.doc.display_error = None;
         self.doc.display = Some(display);
         crate::item_selection::refresh(self);
     }

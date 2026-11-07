@@ -113,9 +113,13 @@ only in the QA host.
 
 Document identity, runtime session, revision, dirty state, title and path travel
 through a bounded lifecycle slot independently of scene capture. Restore, import
-and Save refresh this state before attempting geometry capture. A failed capture
-therefore keeps Save available and dirty replacement/Quit prompts active, even
-without a display. Title and path are bounded presentation copies; Save uses the
+and Save refresh this state before attempting geometry capture. The host refreshes
+it again after capture, including failed capture, because component topology
+promotion can change persisted metadata without advancing the geometry revision.
+A failed capture therefore keeps Save available and dirty replacement/Quit prompts
+active, even without a display. Explorer retains the capture error until a fresh
+accepted display or document replacement, including when an older tree remains
+visible; its stale geometry cannot authorize a new pick. Title and path are bounded presentation copies; Save uses the
 runtime's complete path. An ordinary dirty close preserves existing recovery and
 releases its marker ownership without dropping labels. Only a clean durable Save
 or explicit session-fenced Discard permits cleanup of dirty recovery. Discovery

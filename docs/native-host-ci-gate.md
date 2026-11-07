@@ -18,7 +18,7 @@ The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It runs thre
 explicitly filtered selections, each with its own exact inventory declared in
 `xtask/src/evidence/host_names.rs`, which is the authoritative list.
 
-The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has 141 cases,
+The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has 147 cases,
 including occluded delivery (one),
 document lifecycle (three), overlays (one), diagnostics (three), existing
 dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
@@ -47,6 +47,9 @@ cases cover second live tabs, re-preparation on switch, tab close, per-document
 crash restore, quit prompts, background close decisions, tab ordering and
 Ctrl+Tab cycling, unpreparable-switch fallback, and the new-tab Home and close
 prompt.
+
+Persistent capture-error and authoritative post-capture metadata cases cover both
+initial refusal and failure after an accepted scene; stale picks remain blocked.
 
 The service selection (`document_services::tests::home_lifecycle_tests::` and
 `bridge::tests::`, two explicit native assembly document tests and the repeated-

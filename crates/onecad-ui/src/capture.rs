@@ -10,6 +10,12 @@ use std::{
 };
 
 pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
+    let result = load_display_inner(backend).await;
+    crate::document_state::refresh(backend).await;
+    result
+}
+
+async fn load_display_inner(backend: &mut Backend) -> Result<Display, String> {
     let epoch = backend
         .shared
         .display_epoch

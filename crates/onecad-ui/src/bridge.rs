@@ -315,6 +315,16 @@ impl Shared {
         let _ = self.library_state.set(Arc::downgrade(state));
     }
 
+    #[cfg(test)]
+    pub(crate) async fn test_document_state(&self) -> onecad_app::dto::DocumentState {
+        let state = self
+            .library_state
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .unwrap();
+        onecad_app::api::get_document_state(&state).await.unwrap()
+    }
+
     pub(crate) fn cancel_joint_solve(&self) -> Result<(), String> {
         let state = self
             .library_state
