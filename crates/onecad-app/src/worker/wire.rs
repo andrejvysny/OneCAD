@@ -4471,7 +4471,13 @@ pub fn validate_resolve_refs_result(req: &ResolveRequest, result: &Value) -> Res
         ));
     }
     let mut echoed_revision = None;
+    let mut ref_ids = std::collections::HashSet::new();
     for (index, (actual, expected)) in resolutions.iter().zip(&req.refs).enumerate() {
+        if !ref_ids.insert(&expected.ref_id) {
+            return Err(format!(
+                "ResolveRefs: duplicate refId at resolutions[{index}]"
+            ));
+        }
         if actual.get("refId").and_then(Value::as_str) != Some(expected.ref_id.as_str()) {
             return Err(format!(
                 "ResolveRefs: mismatched refId at resolutions[{index}]"
@@ -4505,6 +4511,16 @@ pub fn validate_resolve_refs_result(req: &ResolveRequest, result: &Value) -> Res
             echoed_revision = Some(revision);
         }
         validate_resolution_body(index, expected, actual)?;
+        let parsed = parse_one_resolution(actual).ok_or_else(|| {
+            format!("ResolveRefs: resolutions[{index}] has invalid outcome payload")
+        })?;
+        if let ResolveOutcome::NeedsRepair(item) = parsed.outcome {
+            if item.ref_id != expected.ref_id {
+                return Err(format!(
+                    "ResolveRefs: resolutions[{index}] repair refId mismatch"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -5645,6 +5661,91 @@ mod tests {
     }
 
     #[test]
+    fn resolve_refs_rejects_malformed_needs_repair_instead_of_dropping_it() {
+        let req = resolve_req(9, &["op.input0"]);
+        let result = json!({"resolutions": [{
+            "refId": "op.input0", "snapshotId": 9, "revision": 4,
+            "outcome": "needsRepair", "needsRepair": {
+                "reason": "no-candidates", "candidates": [], "ladderFailed": "invalid"
+            }
+        }]});
+        assert!(validate_resolve_refs_result(&req, &result)
+            .unwrap_err()
+            .contains("invalid outcome payload"));
+    }
+
+    #[test]
+    fn resolve_refs_rejects_duplicate_or_mismatched_repair_identity() {
+        let req = resolve_req(9, &["op.input0"]);
+        let mut result = json!({"resolutions": [{
+            "refId": "op.input0", "snapshotId": 9, "revision": 4,
+            "outcome": "needsRepair", "needsRepair": {
+                "refId": "op.other", "ladderFailed": "descriptor",
+                "reason": "no-candidates", "candidates": []
+            }
+        }]});
+        assert!(validate_resolve_refs_result(&req, &result)
+            .unwrap_err()
+            .contains("repair refId mismatch"));
+        result["resolutions"][0]["needsRepair"]["refId"] = json!("op.input0");
+        assert!(validate_resolve_refs_result(&req, &result).is_ok());
+        let duplicate_req = resolve_req(9, &["op.input0", "op.input0"]);
+        let first = result["resolutions"][0].clone();
+        result["resolutions"].as_array_mut().unwrap().push(first);
+        assert!(validate_resolve_refs_result(&duplicate_req, &result)
+            .unwrap_err()
+            .contains("duplicate refId"));
+        let distinct_req = resolve_req(9, &["op.input0", "op.input1"]);
+        assert!(validate_resolve_refs_result(&distinct_req, &result)
+            .unwrap_err()
+            .contains("mismatched refId"));
+    }
+
+    #[test]
+    fn resolve_refs_retains_unknown_repair_reason_and_empty_anchor() {
+        let req = resolve_req(9, &["op.input0"]);
+        let result = json!({"resolutions": [{
+            "refId": "op.input0", "snapshotId": 9, "revision": 4,
+            "bodyId": body_id_wire(BodyId(Uuid::from_u128(3))), "outcome": "needsRepair",
+            "needsRepair": {"ladderFailed": "descriptor", "reason": "future-reason",
+                            "anchor": {}, "candidates": []}
+        }]});
+        assert!(validate_resolve_refs_result(&req, &result).is_ok());
+        let parsed = parse_resolve_refs(&result);
+        assert_eq!(parsed.len(), 1);
+        let ResolveOutcome::NeedsRepair(item) = &parsed[0].outcome else {
+            panic!("expected repair")
+        };
+        assert_eq!(item.ref_id, "op.input0");
+        assert!(item.anchor.is_none());
+        assert_eq!(serde_json::to_value(item).unwrap()["reason"], "unknown");
+    }
+
+    #[test]
+    fn resolve_refs_preserves_and_validates_full_import_source_identity() {
+        let body = Uuid::from_u128(3);
+        let mut req = resolve_req(9, &["op.input0"]);
+        req.refs[0].element = serde_json::from_value(json!({
+            "primary": {"bodyId": body, "elementId": "el_face", "kind": "face"},
+            "importSourceIdentity": {"version": 1, "sourceSha256": "a".repeat(64),
+                "codec": "step", "codecVersion": "occt-step-stream-v1", "readerPolicy": "step-v1",
+                "kernelFingerprint": "0a6a1dce34181289", "producerRecordId": Uuid::from_u128(5),
+                "bodyId": body, "unitScaleBits": "3ff0000000000000",
+                "sourceAddress": {"kind": "step", "rootEntityLabel": 3, "occurrencePath": [], "faceEntityLabel": 7}}
+        })).unwrap();
+        let args = resolve_refs_args(&req);
+        let mut expected =
+            serde_json::to_value(req.refs[0].element.import_source_identity.as_ref().unwrap())
+                .unwrap();
+        expected["bodyId"] = json!(body_id_wire(BodyId(body)));
+        assert_eq!(args["refs"][0]["importSourceIdentity"], expected);
+        assert!(validate_import_source_identities(&args).is_ok());
+        let mut malformed = args.clone();
+        malformed["refs"][0]["importSourceIdentity"]["sourceAddress"]["faceEntityLabel"] = json!(0);
+        assert!(validate_import_source_identities(&malformed).is_err());
+    }
+
+    #[test]
     fn resolve_refs_echo_validates_snapshot_ref_id_and_arity() {
         let req = resolve_req(5012, &["op_5.input0", "op_5.input1"]);
         let good = json!({"resolutions": [
@@ -5652,7 +5753,7 @@ mod tests {
              "bodyId": "body_3", "outcome": "unchanged", "elementId": "el_a"},
             {"refId": "op_5.input1", "snapshotId": 5012, "revision": 44,
              "outcome": "needsRepair", "needsRepair": {"refId": "op_5.input1",
-             "reason": "no-candidates", "candidates": []}},
+             "ladderFailed": "descriptor", "reason": "no-candidates", "candidates": []}},
         ]});
         assert!(validate_resolve_refs_result(&req, &good).is_ok());
 
@@ -5731,7 +5832,7 @@ mod tests {
 
         absent["resolutions"][0]["outcome"] = json!("needsRepair");
         absent["resolutions"][0]["needsRepair"] =
-            json!({"reason": "no-candidates", "candidates": []});
+            json!({"ladderFailed": "descriptor", "reason": "no-candidates", "candidates": []});
         assert!(validate_resolve_refs_result(&req, &absent).is_ok());
     }
 

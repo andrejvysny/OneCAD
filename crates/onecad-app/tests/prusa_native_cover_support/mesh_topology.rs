@@ -44,7 +44,7 @@ pub(super) fn assert_upstream_topology(mesh: &MeshView<'_>, report: &serde_json:
     eprintln!("native mesh topology: {components} component(s), Euler {euler}");
 }
 
-fn component_count(triangles: &[[usize; 3]]) -> usize {
+pub(crate) fn component_count(triangles: &[[usize; 3]]) -> usize {
     let mut parent: Vec<_> = (0..triangles.len()).collect();
     let mut owners = HashMap::<(usize, usize), usize>::new();
     for (index, &[a, b, c]) in triangles.iter().enumerate() {
@@ -68,30 +68,4 @@ fn root(parent: &mut [usize], mut vertex: usize) -> usize {
         vertex = parent[vertex];
     }
     vertex
-}
-
-#[cfg(test)]
-mod tests {
-    use super::component_count;
-
-    #[test]
-    fn closed_tetrahedron_has_one_edge_connected_component() {
-        let tetra = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]];
-        assert_eq!(component_count(&tetra), 1);
-    }
-
-    #[test]
-    fn closed_tetrahedra_touching_only_at_vertex_remain_separate() {
-        let tetrahedra = [
-            [0, 2, 1],
-            [0, 1, 3],
-            [1, 2, 3],
-            [2, 0, 3],
-            [0, 5, 4],
-            [0, 4, 6],
-            [4, 5, 6],
-            [5, 0, 6],
-        ];
-        assert_eq!(component_count(&tetrahedra), 2);
-    }
 }

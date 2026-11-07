@@ -5887,7 +5887,19 @@ impl DocumentRuntime {
                 ResolveOutcome::Unchanged {
                     element_id: Some(id),
                 } if id.as_str() == res.ref_id => unchanged += 1,
-                _ => unresolved += 1,
+                outcome => {
+                    unresolved += 1;
+                    tracing::debug!(
+                        target: "onecad_lib::document_runtime",
+                        snapshot = snapshot.0,
+                        reference = %res.ref_id,
+                        body = %entry.body,
+                        kind = ?entry.kind,
+                        evidence = ?entry,
+                        outcome = ?outcome,
+                        "rebind: unresolved persisted identity"
+                    );
+                }
             }
         }
         let bound = bindings.len() + unchanged;
