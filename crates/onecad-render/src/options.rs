@@ -114,6 +114,17 @@ impl Renderer {
                 "Xray requires FLOAT32_BLENDABLE for bounded order-independent accumulation".into(),
             ));
         }
+        if options.section[..3].iter().any(|v| *v != 0.0)
+            && self
+                .committed
+                .iter()
+                .chain(&self.preview)
+                .any(|body| body.is_instance)
+        {
+            return Err(RenderError::Mesh(
+                "section views of occurrences are not supported",
+            ));
+        }
         validate_section_bodies(options, self.committed.len())?;
         validate_section_bodies(options, self.preview.len())?;
         Ok(())

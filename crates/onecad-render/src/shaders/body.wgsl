@@ -1,3 +1,4 @@
+@group(2) @binding(0) var<uniform> model: mat4x4<f32>;
 // Shared depth/normal, studio shading, transparency, and contact height entry points.
 
 @group(1) @binding(0) var ao_tex: texture_2d<f32>;
@@ -17,18 +18,20 @@ struct VOut {
 @vertex
 fn vs_body(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>) -> VOut {
     var o: VOut;
-    o.pos = u.view_proj * vec4<f32>(p, 1.0);
-    o.wp = p;
-    o.n = n;
+    let world = model * vec4<f32>(p, 1.0);
+    o.pos = u.view_proj * world;
+    o.wp = world.xyz;
+    o.n = (model * vec4<f32>(n, 0.0)).xyz;
     return o;
 }
 
 @vertex
 fn vs_mask(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>) -> VOut {
     var o: VOut;
-    o.pos = u.view_proj * vec4<f32>(p, 1.0);
-    o.wp = p;
-    o.n = n;
+    let world = model * vec4<f32>(p, 1.0);
+    o.pos = u.view_proj * world;
+    o.wp = world.xyz;
+    o.n = (model * vec4<f32>(n, 0.0)).xyz;
     // Wall crossings beyond near/far still cancel winding; only the reconstructed
     // cap and ordinary geometry use the captured depth clip range.
     o.pos.z = 0.5 * o.pos.w;
@@ -149,8 +152,9 @@ fn fs_xray(i: VOut, @builtin(front_facing) front: bool) -> Transparency {
 @vertex
 fn vs_height(@location(0) p: vec3<f32>) -> VOut {
     var o: VOut;
-    o.pos = u.shadow_vp * vec4<f32>(p, 1.0);
-    o.wp = p;
+    let world = model * vec4<f32>(p, 1.0);
+    o.pos = u.shadow_vp * world;
+    o.wp = world.xyz;
     o.n = vec3<f32>(0.0, 0.0, -1.0);
     return o;
 }

@@ -31,7 +31,7 @@ impl Renderer {
     pub(crate) fn visible_committed(&self) -> impl Iterator<Item = &GpuBody> {
         self.committed
             .iter()
-            .filter(|body| !body.preview_suppressed)
+            .filter(|body| body.visible && !body.preview_suppressed)
     }
 }
 

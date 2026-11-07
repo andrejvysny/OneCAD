@@ -1,8 +1,7 @@
 //! Occurrence-instance table (proposed ADR 0021, instanced assembly geometry).
 //!
-//! UNWIRED: not referenced by `SceneSnapshot`, rendering or `pick`. Scene,
-//! render and picking integration is ONECAD-398/400. Caps are provisional.
 //! Models are rigid f64 transforms; ray math runs in the mesh's local frame.
+//! Caps are provisional; application projection into these instances is separate.
 
 use crate::{BodyId, Bounds, DMat4, DVec3, Ray};
 use glam::DMat3;
@@ -97,7 +96,7 @@ impl InstanceTable {
     }
 }
 
-fn check_rigid(m: &DMat4) -> Result<(), InstanceError> {
+pub(crate) fn check_rigid(m: &DMat4) -> Result<(), InstanceError> {
     if !m.to_cols_array().iter().all(|v| v.is_finite()) {
         return Err(InstanceError::NonFinite);
     }

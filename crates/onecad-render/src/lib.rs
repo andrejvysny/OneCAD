@@ -94,6 +94,7 @@ pub struct Renderer {
     preview_source_bytes: u64,
     estimate: MemoryEstimate,
     frame_bindings: uniforms::FrameBindings,
+    identity_model: mesh::ModelBinding,
     frame_stats: FrameStats,
     flight: flight::Flight,
     latest_preview_generation: Option<u64>,
@@ -158,6 +159,11 @@ impl Renderer {
             )?)
         };
         let frame_bindings = uniforms::FrameBindings::new(&gpu, &pipelines.frame_layout);
+        let identity_model = mesh::ModelBinding::new(
+            &gpu,
+            &pipelines.model_layout,
+            &glam::Mat4::IDENTITY.to_cols_array_2d(),
+        );
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -176,6 +182,7 @@ impl Renderer {
             preview_source_bytes: 0,
             estimate,
             frame_bindings,
+            identity_model,
             frame_stats: FrameStats::default(),
             flight: flight::Flight::submitted(queue, || {}),
             latest_preview_generation: None,
@@ -239,6 +246,11 @@ impl Renderer {
         self.require_idle()?;
         let prepared = PreparedScene::new(scene, self.preparation_budget())?;
         if self.options.section[..3].iter().any(|v| *v != 0.0) {
+            if prepared.has_instances() {
+                return Err(RenderError::Mesh(
+                    "section views of occurrences are not supported",
+                ));
+            }
             let contours = PreparedSectionContours::new(
                 scene,
                 self.preparation_budget(),
@@ -272,7 +284,10 @@ impl Renderer {
         self.reset_preview_suppression();
         self.contact_dirty |= self.committed.len() != bodies.len()
             || self.committed.iter().zip(&bodies).any(|(old, new)| {
-                old.id != new.id || !std::sync::Arc::ptr_eq(&old.source, &new.source)
+                old.id != new.id
+                    || !std::sync::Arc::ptr_eq(&old.source, &new.source)
+                    || old.model != new.model
+                    || old.visible != new.visible
             });
         self.committed = bodies;
         self.clear_section_contours();
@@ -352,9 +367,10 @@ impl Renderer {
         self.estimate.source_bytes = self.committed_source_bytes;
         self.estimate.resident_metadata_bytes = self.committed.len() as u64
             * std::mem::size_of::<GpuBody>() as u64
+            + mesh::path_metadata_bytes(&self.committed)
             + self.highlight_metadata_bytes();
         self.estimate.resident_metadata_bytes += self.section_contour_metadata_bytes(false);
-        self.estimate.geometry_bytes = self.committed.iter().map(mesh::gpu_bytes).sum::<u64>()
+        self.estimate.geometry_bytes = mesh::unique_gpu_bytes(&self.committed)
             + limits::shared_uniform_bytes()
             + self.highlight_gpu_bytes();
         self.estimate.geometry_bytes += self.section_contour_gpu_bytes(false);

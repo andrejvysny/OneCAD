@@ -526,3 +526,5 @@ fn origin_axes_shader_validates_and_uniform_matches_wgsl() {
 mod support_grid;
 
 mod shared_uniforms;
+
+mod occurrences;

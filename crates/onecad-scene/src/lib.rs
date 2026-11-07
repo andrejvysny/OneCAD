@@ -36,4 +36,6 @@ pub enum SceneError {
     CaptureMismatch,
     #[error("duplicate body identity in scene")]
     DuplicateBody,
+    #[error("invalid scene instance: {0}")]
+    InvalidInstance(&'static str),
 }

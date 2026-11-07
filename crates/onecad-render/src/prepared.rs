@@ -70,7 +70,13 @@ impl PreparationCache {
     ) -> Result<(u64, u64), RenderError> {
         let mut gpu = 0;
         let mut new_cpu = 0;
-        for body in scene.bodies() {
+        for (index, body) in scene.bodies().iter().enumerate() {
+            if scene.bodies()[..index]
+                .iter()
+                .any(|other| Arc::ptr_eq(other.bytes(), body.bytes()))
+            {
+                continue;
+            }
             let bytes = if let Some(geometry) = self.find(body, retention) {
                 geometry.gpu_bytes(max_buffer)?
             } else {
@@ -91,11 +97,26 @@ impl PreparationCache {
     }
 }
 
+fn visible_work(scene: &SceneSnapshot) -> Result<(u64, u64), RenderError> {
+    let (mut triangles, mut segments) = (0, 0);
+    for body in scene.bodies().iter().filter(|body| body.visible()) {
+        triangles = add(triangles, body.triangle_count() as u64)?;
+        segments = add(segments, body.edge_segment_count() as u64)?;
+        if triangles > 500_000 || segments > 500_000 {
+            return Err(RenderError::Budget("visible draw work"));
+        }
+    }
+    Ok((triangles, segments))
+}
+
 /// Owned CPU arrays with no wgpu handles. Build on the same background worker that captures
 /// the immutable CPU scene; retain only the latest pending preparation in the host.
 pub struct PreparedScene {
     pub(crate) identity: SceneIdentity,
     pub(crate) bounds: Option<Bounds>,
+    pub(crate) has_instances: bool,
+    visible_triangles: u64,
+    visible_segments: u64,
     pub(crate) source_bytes: u64,
     pub(crate) gpu_bytes: u64,
     pub(crate) cpu_bytes: u64,
@@ -129,19 +150,47 @@ impl PreparedScene {
         cache: &mut PreparationCache,
         retention: PreparationRetention,
     ) -> Result<Self, RenderError> {
-        let triangles = scene.bodies().iter().try_fold(0u64, |total, body| {
-            add(total, u64::from(body.mesh()?.header().triangle_count))
-        })?;
+        for body in scene.bodies() {
+            mesh::check_occurrence_precision(body)?;
+        }
+        let (visible_triangles, visible_segments) = visible_work(scene)?;
+        let triangles =
+            scene
+                .bodies()
+                .iter()
+                .enumerate()
+                .try_fold(0u64, |total, (index, body)| {
+                    if scene.bodies()[..index]
+                        .iter()
+                        .any(|other| other.shares_geometry(body))
+                    {
+                        Ok(total)
+                    } else {
+                        add(total, u64::from(body.mesh()?.header().triangle_count))
+                    }
+                })?;
         if triangles > 500_000 {
             return Err(RenderError::Budget("triangle admission"));
         }
         if scene.bodies().len() > budget.limits.max_bodies {
             return Err(RenderError::Budget("body count"));
         }
-        let metadata = mul(
-            scene.bodies().len() as u64,
-            (std::mem::size_of::<(BodyId, PreparedBody)>()
-                + std::mem::size_of::<Arc<PreparedGeometry>>()) as u64,
+        let path_bytes = scene.bodies().iter().try_fold(0u64, |total, body| {
+            add(
+                total,
+                mul(
+                    body.occurrence_path().map_or(0, |path| path.0.len()) as u64,
+                    16,
+                )?,
+            )
+        })?;
+        let metadata = add(
+            path_bytes,
+            mul(
+                scene.bodies().len() as u64,
+                (std::mem::size_of::<(BodyId, PreparedBody)>()
+                    + std::mem::size_of::<Arc<PreparedGeometry>>()) as u64,
+            )?,
         )?;
         let mut scratch = 0;
         for body in scene.bodies() {
@@ -154,11 +203,18 @@ impl PreparedScene {
         if add(retained, minimum)? > budget.limits.max_cpu_prepared_bytes {
             return Err(RenderError::Budget("CPU preparation"));
         }
-        let (gpu_bytes, new_cpu) = cache.estimates(scene, budget.max_buffer, true, &retention)?;
+        let (geometry_bytes, new_cpu) =
+            cache.estimates(scene, budget.max_buffer, true, &retention)?;
+        let models = scene
+            .bodies()
+            .iter()
+            .filter(|body| body.occurrence_path().is_some())
+            .count() as u64;
+        let gpu_bytes = add(geometry_bytes, mul(models, 64)?)?;
         let cpu_bytes = add(retained, new_cpu)?;
         check_preparation_budget(scene, budget, cache, gpu_bytes, cpu_bytes)?;
         let mut bodies = Vec::new();
-        let mut geometries = Vec::new();
+        let mut geometries: Vec<Arc<PreparedGeometry>> = Vec::new();
         bodies
             .try_reserve_exact(scene.bodies().len())
             .map_err(|_| RenderError::Budget("prepared body metadata"))?;
@@ -166,15 +222,21 @@ impl PreparedScene {
             .try_reserve_exact(scene.bodies().len())
             .map_err(|_| RenderError::Budget("prepared cache metadata"))?;
         for body in scene.bodies() {
-            let prepared = if let Some(geometry) = cache.find(body, &retention) {
-                PreparedBody {
-                    mesh_revision: body.mesh_revision(),
-                    geometry: Arc::clone(geometry),
-                }
+            let geometry = geometries
+                .iter()
+                .find(|geometry| Arc::ptr_eq(&geometry.source, body.bytes()))
+                .or_else(|| cache.find(body, &retention));
+            let prepared = if let Some(geometry) = geometry {
+                PreparedBody::from_geometry(body, Arc::clone(geometry))?
             } else {
                 PreparedBody::new_retained(body, retention.clone())?
             };
-            geometries.push(Arc::clone(&prepared.geometry));
+            if !geometries
+                .iter()
+                .any(|geometry| Arc::ptr_eq(geometry, &prepared.geometry))
+            {
+                geometries.push(Arc::clone(&prepared.geometry));
+            }
             bodies.push((body.body_id(), prepared));
         }
         cache.geometries = geometries;
@@ -182,6 +244,12 @@ impl PreparedScene {
         Ok(Self {
             identity: scene.identity(),
             bounds: scene.bounds(),
+            visible_triangles,
+            visible_segments,
+            has_instances: scene
+                .bodies()
+                .iter()
+                .any(|body| body.occurrence_path().is_some()),
             source_bytes: scene.resident_bytes() as u64,
             gpu_bytes,
             cpu_bytes,
@@ -197,6 +265,9 @@ impl PreparedScene {
     pub fn cpu_bytes(&self) -> u64 {
         self.cpu_bytes
     }
+    pub fn has_instances(&self) -> bool {
+        self.has_instances
+    }
     pub fn body_count(&self) -> usize {
         self.bodies.len()
     }
@@ -204,8 +275,17 @@ impl PreparedScene {
     /// `cache` does not also hold. Unlike [`Self::cpu_bytes`] (a preparation peak), this is
     /// what dropping the scene frees while `cache` lives.
     pub fn cpu_bytes_beyond(&self, cache: &PreparationCache) -> u64 {
-        let metadata =
-            self.bodies.capacity() as u64 * std::mem::size_of::<(BodyId, PreparedBody)>() as u64;
+        let metadata = self.bodies.capacity() as u64
+            * std::mem::size_of::<(BodyId, PreparedBody)>() as u64
+            + self
+                .bodies
+                .iter()
+                .map(|(_, body)| {
+                    body.path
+                        .as_ref()
+                        .map_or(0, |path| path.0.capacity() as u64 * 16)
+                })
+                .sum::<u64>();
         let unshared = self
             .bodies
             .iter()
@@ -242,9 +322,20 @@ fn check_preparation_budget(
         upload_bytes: gpu_bytes,
         target_bytes: budget.resident.target_bytes,
         ibl_bytes: budget.resident.ibl_bytes,
-        resident_metadata_bytes: mul(
-            scene.bodies().len() as u64,
-            std::mem::size_of::<GpuBody>() as u64,
+        resident_metadata_bytes: add(
+            mul(
+                scene.bodies().len() as u64,
+                std::mem::size_of::<GpuBody>() as u64,
+            )?,
+            scene.bodies().iter().try_fold(0u64, |total, body| {
+                add(
+                    total,
+                    mul(
+                        body.occurrence_path().map_or(0, |path| path.0.len()) as u64,
+                        16,
+                    )?,
+                )
+            })?,
         )?,
         peak_gpu_bytes: 0,
         peak_total_bytes: 0,
@@ -278,13 +369,49 @@ impl Renderer {
         preview: bool,
     ) -> Result<(Vec<GpuBody>, MemoryEstimate), RenderError> {
         crate::options::validate_section_bodies(self.options, scene.bodies.len())?;
+        if !preview
+            && self.scene_identity == Some(scene.identity)
+            && (scene.has_instances || self.committed.iter().any(|body| body.is_instance))
+        {
+            let same = self.committed.len() == scene.bodies.len()
+                && self
+                    .committed
+                    .iter()
+                    .zip(&scene.bodies)
+                    .all(|(old, (id, new))| {
+                        old.id == *id
+                            && old.source_body_id == new.source_body_id
+                            && old.path == new.path
+                            && old.model64 == new.model64
+                            && old.visible == new.visible
+                            && old.mesh_revision == new.mesh_revision
+                            && Arc::ptr_eq(&old.source, &new.geometry.source)
+                    });
+            if !same {
+                return Err(RenderError::CaptureMismatch);
+            }
+        }
+        if preview {
+            let (triangles, segments) = self.committed.iter().filter(|body| body.visible).fold(
+                (scene.visible_triangles, scene.visible_segments),
+                |(triangles, segments), body| {
+                    (
+                        triangles + u64::from(body.index_count) / 3,
+                        segments + u64::from(body.segment_count),
+                    )
+                },
+            );
+            if triangles > 500_000 || segments > 500_000 {
+                return Err(RenderError::Budget("visible draw work"));
+            }
+        }
         let count = scene.bodies.len() + if preview { self.committed.len() } else { 0 };
         if count > self.limits.max_bodies {
             return Err(RenderError::Budget("body count"));
         }
         let retained = if preview {
             add(
-                self.committed.iter().map(mesh::gpu_bytes).sum::<u64>(),
+                mesh::unique_gpu_bytes(&self.committed),
                 add(
                     self.highlight_gpu_bytes(),
                     self.section_contour_gpu_bytes(false),
@@ -298,13 +425,22 @@ impl Renderer {
         } else {
             &self.committed
         };
-        let reused_bytes = scene.bodies.iter().try_fold(0, |total, (id, body)| {
-            let reused = previous.iter().find(|existing| {
-                existing.id == *id
-                    && std::sync::Arc::ptr_eq(&existing.source, &body.geometry.source)
-            });
-            add(total, reused.map(mesh::gpu_bytes).unwrap_or(0))
-        })?;
+        let reused_bytes =
+            scene
+                .bodies
+                .iter()
+                .enumerate()
+                .try_fold(0, |total, (index, (_, body))| {
+                    if scene.bodies[..index].iter().any(|(_, other)| {
+                        Arc::ptr_eq(&other.geometry.source, &body.geometry.source)
+                    }) {
+                        return Ok(total);
+                    }
+                    let reused = previous
+                        .iter()
+                        .find(|existing| Arc::ptr_eq(&existing.source, &body.geometry.source));
+                    add(total, reused.map(mesh::gpu_bytes).unwrap_or(0))
+                })?;
         let next = MemoryEstimate {
             source_bytes: add(
                 scene.source_bytes,
@@ -316,11 +452,22 @@ impl Renderer {
             )?,
             cpu_prepared_bytes: scene.cpu_bytes,
             resident_metadata_bytes: add(
-                mul(count as u64, std::mem::size_of::<GpuBody>() as u64)?,
+                add(
+                    mul(count as u64, std::mem::size_of::<GpuBody>() as u64)?,
+                    scene.bodies.iter().try_fold(0u64, |total, (_, body)| {
+                        add(
+                            total,
+                            mul(body.path.as_ref().map_or(0, |path| path.0.len()) as u64, 16)?,
+                        )
+                    })?,
+                )?,
                 if preview {
                     add(
-                        self.highlight_metadata_bytes(),
-                        self.section_contour_metadata_bytes(false),
+                        mesh::path_metadata_bytes(&self.committed),
+                        add(
+                            self.highlight_metadata_bytes(),
+                            self.section_contour_metadata_bytes(false),
+                        )?,
                     )?
                 } else {
                     0
@@ -356,29 +503,41 @@ impl Renderer {
             queue: &self.queue,
         };
         for (id, body) in scene.bodies {
-            // Shared geometry still uses distinct committed and preview style bindings.
-            let previous = if preview {
-                &self.preview
-            } else {
-                &self.committed
-            };
-            let reusable = previous.iter().find(|existing| {
-                existing.id == id && std::sync::Arc::ptr_eq(&existing.source, &body.geometry.source)
-            });
+            let reusable = previous
+                .iter()
+                .chain(bodies.iter())
+                .find(|existing| Arc::ptr_eq(&existing.source, &body.geometry.source));
             let frame = self
                 .frame_bindings
                 .body(crate::BodyStyle::default(), preview);
+            let model = if body.is_instance {
+                mesh::ModelBinding::new(&gpu, &self.pipelines.model_layout, &body.model)
+            } else {
+                mesh::ModelBinding {
+                    buffer: self.identity_model.buffer.clone(),
+                    bind: self.identity_model.bind.clone(),
+                }
+            };
             let next = if let Some(existing) = reusable {
-                let mut next = existing.clone();
+                let mut next: GpuBody = existing.clone();
                 next.retain_source(&body);
+                next.id = id;
                 next.mesh_revision = body.mesh_revision;
                 next.style = crate::BodyStyle::default();
                 next.preview_suppressed = false;
                 next.uniform = frame.buffer.clone();
                 next.frame_bind = frame.bind.clone();
+                next.model_buffer = model.buffer;
+                next.model_bind = model.bind;
+                next.model = body.model;
+                next.is_instance = body.is_instance;
+                next.visible = body.visible;
+                next.source_body_id = body.source_body_id;
+                next.path = body.path;
+                next.model64 = body.model64;
                 next
             } else {
-                body.upload(&gpu, frame, id)
+                body.upload(&gpu, frame, id, &model)
             };
             bodies.push(next);
         }

@@ -25,6 +25,7 @@ pub(crate) struct Pipelines {
     pub hidden_silhouette: wgpu::RenderPipeline,
     pub hidden: wgpu::RenderPipeline,
     pub frame_layout: wgpu::BindGroupLayout,
+    pub model_layout: wgpu::BindGroupLayout,
     pub body_layout: wgpu::BindGroupLayout,
     pub ground_layout: wgpu::BindGroupLayout,
     pub post_layout: wgpu::BindGroupLayout,
@@ -96,7 +97,9 @@ impl Pipelines {
                 gpu::tex_entry(1, gpu::FLOAT_NF, gpu::D2),
             ],
         );
-        let body_pl = gpu.pipeline_layout("body", &[&frame_layout, &body_layout]);
+        let model_layout = gpu.layout("model", &[gpu::uniform_entry(0)]);
+        let body_pl = gpu.pipeline_layout("body", &[&frame_layout, &body_layout, &model_layout]);
+        let line_pl = gpu.pipeline_layout("placed lines", &[&frame_layout, &model_layout]);
         let frame_pl = gpu.pipeline_layout("frame", &[&frame_layout]);
         let ground_pl = gpu.pipeline_layout("ground", &[&frame_layout, &ground_layout]);
         let post_pl = gpu.pipeline_layout("post", &[&frame_layout, &post_layout]);
@@ -281,7 +284,7 @@ impl Pipelines {
             ),
             hidden_silhouette: pipe(
                 "hidden silhouettes",
-                &frame_pl,
+                &line_pl,
                 &lines,
                 "vs_sil",
                 Some("fs_hidden"),
@@ -300,7 +303,7 @@ impl Pipelines {
             ),
             hidden: pipe(
                 "hidden edges",
-                &frame_pl,
+                &line_pl,
                 &lines,
                 "vs_edge",
                 Some("fs_hidden"),
@@ -377,7 +380,7 @@ impl Pipelines {
             ),
             highlight_edge: pipe(
                 "highlight edges",
-                &frame_pl,
+                &line_pl,
                 &lines,
                 "vs_edge",
                 Some("fs_line"),
@@ -454,7 +457,7 @@ impl Pipelines {
             ),
             edge: pipe(
                 "edges",
-                &frame_pl,
+                &line_pl,
                 &lines,
                 "vs_edge",
                 Some("fs_line"),
@@ -467,7 +470,7 @@ impl Pipelines {
             ),
             silhouette: pipe(
                 "silhouettes",
-                &frame_pl,
+                &line_pl,
                 &lines,
                 "vs_sil",
                 Some("fs_line"),
@@ -485,6 +488,7 @@ impl Pipelines {
             ao_h: full("AO h", "fs_ao_blur_h", AO_FORMAT),
             ao_v: full("AO v", "fs_ao_blur_v", AO_FORMAT),
             frame_layout,
+            model_layout,
             body_layout,
             ground_layout,
             post_layout,

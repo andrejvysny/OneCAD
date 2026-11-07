@@ -168,7 +168,7 @@ impl RenderLimits {
 }
 
 pub(crate) const fn shared_uniform_bytes() -> u64 {
-    3 * std::mem::size_of::<FrameU>() as u64
+    3 * std::mem::size_of::<FrameU>() as u64 + 64
 }
 
 #[cfg(test)]
