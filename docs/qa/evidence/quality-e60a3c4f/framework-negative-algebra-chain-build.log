@@ -1,0 +1,156 @@
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:153:38: warning: 'TopTools_ListOfShape' is deprecated: TopTools_ListOfShape is deprecated, use NCollection_List<TopoDS_Shape> directly [-Wdeprecated-declarations]
+  153 |     TopoDS_Shape pickBestShape(const TopTools_ListOfShape& list, const ElementDescriptor& target) const;
+      |                                      ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_ListOfShape.hxx:29:3: note: 'TopTools_ListOfShape' has been explicitly marked deprecated here
+   29 |   Standard_DEPRECATED(
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:388:9: warning: 'TopTools_IndexedMapOfShape' is deprecated: TopTools_IndexedMapOfShape is deprecated, use NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> directly [-Wdeprecated-declarations]
+  388 |         TopTools_IndexedMapOfShape map;
+      |         ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_IndexedMapOfShape.hxx:30:3: note: 'TopTools_IndexedMapOfShape' has been explicitly marked deprecated here
+   30 |   Standard_DEPRECATED("TopTools_IndexedMapOfShape is deprecated, use "
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:540:9: warning: 'Standard_Real' is deprecated: Standard_Real is deprecated, use double directly [-Wdeprecated-declarations]
+  540 |         Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+      |         ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_TypeDef.hxx:75:1: note: 'Standard_Real' has been explicitly marked deprecated here
+   75 | Standard_DEPRECATED("Standard_Real is deprecated, use double directly")
+      | ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:683:53: warning: 'TopTools_ListOfShape' is deprecated: TopTools_ListOfShape is deprecated, use NCollection_List<TopoDS_Shape> directly [-Wdeprecated-declarations]
+  683 | inline TopoDS_Shape ElementMap::pickBestShape(const TopTools_ListOfShape& list, const ElementDescriptor& target) const {
+      |                                                     ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_ListOfShape.hxx:29:3: note: 'TopTools_ListOfShape' has been explicitly marked deprecated here
+   29 |   Standard_DEPRECATED(
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:690:10: warning: 'TopTools_ListIteratorOfListOfShape' is deprecated: TopTools_ListIteratorOfListOfShape is deprecated, use NCollection_List<TopoDS_Shape>::Iterator directly [-Wdeprecated-declarations]
+  690 |     for (TopTools_ListIteratorOfListOfShape it(list); it.More(); it.Next()) {
+      |          ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_ListOfShape.hxx:32:1: note: 'TopTools_ListIteratorOfListOfShape' has been explicitly marked deprecated here
+   32 | Standard_DEPRECATED("TopTools_ListIteratorOfListOfShape is deprecated, use "
+      | ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:949:15: warning: 'TopTools_ListOfShape' is deprecated: TopTools_ListOfShape is deprecated, use NCollection_List<TopoDS_Shape> directly [-Wdeprecated-declarations]
+  949 |         const TopTools_ListOfShape& modified = algo.Modified(oldShape);
+      |               ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_ListOfShape.hxx:29:3: note: 'TopTools_ListOfShape' has been explicitly marked deprecated here
+   29 |   Standard_DEPRECATED(
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:970:22: warning: 'TopTools_ListIteratorOfListOfShape' is deprecated: TopTools_ListIteratorOfListOfShape is deprecated, use NCollection_List<TopoDS_Shape>::Iterator directly [-Wdeprecated-declarations]
+  970 |                 for (TopTools_ListIteratorOfListOfShape it(modified); it.More(); it.Next()) {
+      |                      ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_ListOfShape.hxx:32:1: note: 'TopTools_ListIteratorOfListOfShape' has been explicitly marked deprecated here
+   32 | Standard_DEPRECATED("TopTools_ListIteratorOfListOfShape is deprecated, use "
+      | ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:1030:15: warning: 'TopTools_ListOfShape' is deprecated: TopTools_ListOfShape is deprecated, use NCollection_List<TopoDS_Shape> directly [-Wdeprecated-declarations]
+ 1030 |         const TopTools_ListOfShape& generated = algo.Generated(oldShape);
+      |               ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_ListOfShape.hxx:29:3: note: 'TopTools_ListOfShape' has been explicitly marked deprecated here
+   29 |   Standard_DEPRECATED(
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:22:
+In file included from /private/tmp/onecad-quality-resume/worker/src/elementmap/ElementMapPartition.h:42:
+/private/tmp/onecad-quality-resume/worker/src/kernel/elementmap/ElementMap.h:1040:18: warning: 'TopTools_ListIteratorOfListOfShape' is deprecated: TopTools_ListIteratorOfListOfShape is deprecated, use NCollection_List<TopoDS_Shape>::Iterator directly [-Wdeprecated-declarations]
+ 1040 |             for (TopTools_ListIteratorOfListOfShape git(generated); git.More(); git.Next()) {
+      |                  ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_ListOfShape.hxx:32:1: note: 'TopTools_ListIteratorOfListOfShape' has been explicitly marked deprecated here
+   32 | Standard_DEPRECATED("TopTools_ListIteratorOfListOfShape is deprecated, use "
+      | ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:23:
+In file included from /private/tmp/onecad-quality-resume/worker/src/io/SourceClaimBatch.h:12:
+/private/tmp/onecad-quality-resume/worker/src/io/SourceFaceClaim.h:49:42: warning: 'TopTools_IndexedMapOfShape' is deprecated: TopTools_IndexedMapOfShape is deprecated, use NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> directly [-Wdeprecated-declarations]
+   49 | inline bool oriented_source_member(const TopTools_IndexedMapOfShape& faces, const TopoDS_Shape& face) {
+      |                                          ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_IndexedMapOfShape.hxx:30:3: note: 'TopTools_IndexedMapOfShape' has been explicitly marked deprecated here
+   30 |   Standard_DEPRECATED("TopTools_IndexedMapOfShape is deprecated, use "
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:23:
+In file included from /private/tmp/onecad-quality-resume/worker/src/io/SourceClaimBatch.h:12:
+/private/tmp/onecad-quality-resume/worker/src/io/SourceFaceClaim.h:58:5: warning: 'TopTools_IndexedMapOfShape' is deprecated: TopTools_IndexedMapOfShape is deprecated, use NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> directly [-Wdeprecated-declarations]
+   58 |     TopTools_IndexedMapOfShape faces;
+      |     ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_IndexedMapOfShape.hxx:30:3: note: 'TopTools_IndexedMapOfShape' has been explicitly marked deprecated here
+   30 |   Standard_DEPRECATED("TopTools_IndexedMapOfShape is deprecated, use "
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+In file included from /private/tmp/onecad-resume-evidence/framework-negative-algebra-chain.cpp:1:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpCommon.h:31:
+In file included from /private/tmp/onecad-quality-resume/worker/src/ops/OpTypes.h:27:
+/private/tmp/onecad-quality-resume/worker/src/session/TopologyOrigins.h:156:9: warning: 'TopTools_IndexedMapOfShape' is deprecated: TopTools_IndexedMapOfShape is deprecated, use NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> directly [-Wdeprecated-declarations]
+  156 |         TopTools_IndexedMapOfShape members;
+      |         ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_IndexedMapOfShape.hxx:30:3: note: 'TopTools_IndexedMapOfShape' has been explicitly marked deprecated here
+   30 |   Standard_DEPRECATED("TopTools_IndexedMapOfShape is deprecated, use "
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+12 warnings generated.

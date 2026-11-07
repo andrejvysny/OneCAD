@@ -1,0 +1,16 @@
+   Compiling serde_core v1.0.228
+   Compiling syn v2.0.119
+   Compiling libc v0.2.186
+   Compiling getrandom v0.4.3
+   Compiling cfg-if v1.0.4
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.23
+   Compiling thiserror v2.0.18
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+   Compiling serde_json v1.0.150
+   Compiling uuid v1.24.0
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling onecad-assembly v0.1.0 (/private/tmp/onecad-quality-resume/crates/onecad-assembly)
+    Finished `release` profile [optimized] target(s) in 5.08s

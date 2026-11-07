@@ -1,0 +1,165 @@
+   Compiling onecad-app v0.1.0 (/private/tmp/onecad-framework-resume/crates/onecad-app)
+warning: function `capture_inputs` is never used
+   --> crates/onecad-app/tests/framework_native_clip_support/mod.rs:203:10
+    |
+203 | async fn capture_inputs(h: &Harness, sharp: BodyId, protections: &[BodyId]) {
+    |          ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `build_cutter` is never used
+   --> crates/onecad-app/tests/framework_native_clip_support/mod.rs:248:14
+    |
+248 | pub async fn build_cutter(h: &Harness) -> BodyId {
+    |              ^^^^^^^^^^^^
+
+warning: `onecad-app` (test "framework_material_restore_probe") generated 2 warnings
+    Finished `test` profile [unoptimized] target(s) in 5.44s
+     Running tests/framework_material_restore_probe.rs (/private/tmp/onecad-framework-resume-target/debug/deps/framework_material_restore_probe-34486d6360f8c6b2)
+
+running 1 test
+original native volume 2003.2681506547701
+clip native step 00000000-0000-0000-0000-0000fabc000a: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc000b: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc0015: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0016: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0017: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0021: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0022: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0023: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc002d: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc002e: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc002f: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0039: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc003a: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc003b: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0045: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0046: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc0050: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0051: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0052: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc005c: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc005d: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc005e: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0068: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0069: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc006a: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0074: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0075: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0076: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0080: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0081: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0082: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0083: Editable analytic Boolean
+Private eight-retention candidate: omission is explicit, not certified redundant or source-equivalent
+clip native step 00000000-0000-0000-0000-0000fabc0087: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc008b: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc008c: Editable source-intent open sweep
+clip native step 00000000-0000-0000-0000-0000fabc008d: Retain original material for clip blend
+clip native step 00000000-0000-0000-0000-0000fabc008e: Editable analytic Boolean
+private native tangent datum plane 90: source radius 0.3, derived 0.29999999999944404; not literal STEP geometry
+clip native step 00000000-0000-0000-0000-0000fabc0092: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0093: Protection cylinder
+clip native step 00000000-0000-0000-0000-0000fabc009d: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc009e: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc009f: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc00a0: Retain original material for clip blend
+clip native step 00000000-0000-0000-0000-0000fabc00a1: Editable analytic Boolean
+test original_material_restoration_uses_native_history has been running for over 60 seconds
+clip native step 00000000-0000-0000-0000-0000fabc00a2: Retain original material for clip blend
+private native tangent datum plane 81: source radius 0.3, derived 0.29999999999972504; not literal STEP geometry
+clip native step 00000000-0000-0000-0000-0000fabc00a6: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00a7: Protection cylinder
+clip native step 00000000-0000-0000-0000-0000fabc00b1: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00b2: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc00b3: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc00b4: Editable analytic Boolean
+private native tangent datum plane 84: source radius 0.3, derived 0.3000000000001555; not literal STEP geometry
+clip native step 00000000-0000-0000-0000-0000fabc00b8: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00b9: Protection cylinder
+clip native step 00000000-0000-0000-0000-0000fabc00c3: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00c4: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc00c5: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc00c6: Retain original material for clip blend
+clip native step 00000000-0000-0000-0000-0000fabc00c7: Editable analytic Boolean
+private native tangent datum plane 86: source radius 0.3, derived 0.2999999999992333; not literal STEP geometry
+clip native step 00000000-0000-0000-0000-0000fabc00cb: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00cc: Protection cylinder
+clip native step 00000000-0000-0000-0000-0000fabc00d6: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00d7: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc00d8: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc00d9: Retain original material for clip blend
+clip native step 00000000-0000-0000-0000-0000fabc00da: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc00db: Retain original material for clip blend
+private native tangent datum plane 83: source radius 0.3, derived 0.3000000000117815; not literal STEP geometry
+clip native step 00000000-0000-0000-0000-0000fabc00df: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00e0: Protection cylinder
+clip native step 00000000-0000-0000-0000-0000fabc00ea: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00eb: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc00ec: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc00ed: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc00f4: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc00f5: Protection sphere
+clip native step 00000000-0000-0000-0000-0000fabc00ff: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0100: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc0101: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0102: Retain original material for clip blend
+clip native step 00000000-0000-0000-0000-0000fabc0103: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc010a: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc010b: Protection sphere
+clip native step 00000000-0000-0000-0000-0000fabc0115: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0116: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc0117: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0118: Retain original material for clip blend
+clip native step 00000000-0000-0000-0000-0000fabc0119: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc011a: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc011b: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0125: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0126: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc0130: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0131: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0132: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc013c: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc013d: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc013e: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0148: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0149: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc014a: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0154: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0155: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0156: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0160: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0161: Protection box
+clip native step 00000000-0000-0000-0000-0000fabc016b: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc016c: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc016d: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0177: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0178: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0179: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc0183: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0184: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0185: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc018f: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc0190: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc0191: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc019b: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc019c: Source-plane halfspace prism
+clip native step 00000000-0000-0000-0000-0000fabc019d: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc019e: Editable analytic Boolean
+clip native step 00000000-0000-0000-0000-0000fabc01a2: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc01a6: Editable analytic sketch
+clip native step 00000000-0000-0000-0000-0000fabc01a7: Editable source-intent open sweep
+
+thread 'original_material_restoration_uses_native_history' (2997952) panicked at crates/onecad-app/tests/native_plate_support/host.rs:122:10:
+real-worker scheduler must complete requested revision: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test original_material_restoration_uses_native_history ... FAILED
+
+failures:
+
+failures:
+    original_material_restoration_uses_native_history
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 143.08s
+
+error: test failed, to rerun pass `-p onecad-app --test framework_material_restore_probe`

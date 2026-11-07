@@ -1,0 +1,26 @@
+In file included from /private/tmp/onecad-resume-evidence/framework-si-pairs.cpp:7:
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_IndexedMapOfShape.hxx:26:1: warning: TopTools_IndexedMapOfShape.hxx is deprecated since OCCT 8.0.0. Use NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> directly. [-W#pragma-messages]
+   26 | Standard_HEADER_DEPRECATED(
+      | ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:53:44: note: expanded from macro 'Standard_HEADER_DEPRECATED'
+   53 | #define Standard_HEADER_DEPRECATED(theMsg) Standard_DEPRECATED_WARNING(theMsg)
+      |                                            ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:35:47: note: expanded from macro 'Standard_DEPRECATED_WARNING'
+   35 |   #define Standard_DEPRECATED_WARNING(theMsg) Standard_DEPRECATED_WARNING_PRAGMA(GCC warning theMsg)
+      |                                               ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:34:49: note: expanded from macro 'Standard_DEPRECATED_WARNING_PRAGMA'
+   34 |   #define Standard_DEPRECATED_WARNING_PRAGMA(x) _Pragma(#x)
+      |                                                 ^
+<scratch space>:339:6: note: expanded from here
+  339 |  GCC warning "TopTools_IndexedMapOfShape.hxx is deprecated since OCCT 8.0.0. Use " "NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> directly."
+      |      ^
+/private/tmp/onecad-resume-evidence/framework-si-pairs.cpp:12:2: warning: 'TopTools_IndexedMapOfShape' is deprecated: TopTools_IndexedMapOfShape is deprecated, use NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> directly [-Wdeprecated-declarations]
+   12 |  TopTools_IndexedMapOfShape all,faces,edges,vertices;TopExp::MapShapes(s,all);TopExp::MapShapes(s,TopAbs_FACE,faces);TopExp::MapShapes(s,TopAbs_EDGE,edges);TopExp::MapShapes(s,TopAbs_VERTEX,vertices);
+      |  ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/TopTools_IndexedMapOfShape.hxx:30:3: note: 'TopTools_IndexedMapOfShape' has been explicitly marked deprecated here
+   30 |   Standard_DEPRECATED("TopTools_IndexedMapOfShape is deprecated, use "
+      |   ^
+/Users/andrejvysny/.onecad-occt/8.0.1/include/opencascade/Standard_Macro.hxx:136:56: note: expanded from macro 'Standard_DEPRECATED'
+  136 |     #define Standard_DEPRECATED(theMsg) __attribute__((deprecated(theMsg)))
+      |                                                        ^
+2 warnings generated.
