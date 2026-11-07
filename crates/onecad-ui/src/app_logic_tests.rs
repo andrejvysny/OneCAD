@@ -100,11 +100,26 @@ async fn create_app_with(
     root: &std::path::Path,
     profile: onecad_render::RenderProfile,
 ) -> (App, egui::Context) {
-    let (app, context) = create_home_app_with(root, profile).await;
-    app.doc
-        .bridge
-        .submit(crate::bridge::Command::Document(Request::New))
-        .unwrap();
+    let (mut app, context) = create_home_app_with(root, profile).await;
+    let mut frame = eframe::Frame::_new_kittest();
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc
+            .bridge
+            .shared
+            .recovery
+            .lock()
+            .is_ok_and(|recovery| recovery.ready())
+    })
+    .await;
+    app.document_request(Request::New);
+    assert!(
+        app.doc.documents.running,
+        "New must track its terminal reply"
+    );
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.document_open() && !app.busy()
+    })
+    .await;
     (app, context)
 }
 
