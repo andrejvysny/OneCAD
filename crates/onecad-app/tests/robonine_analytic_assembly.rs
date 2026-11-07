@@ -493,6 +493,7 @@ async fn analytic_assembly_shared_services_cold_reopen() {
         &path,
         "robonine-static",
         include_bytes!("robonine_analytic_assembly.rs"),
+        "imported source parts; not native feature-history qualification",
     );
     verify_sources(&path);
     let status = std::process::Command::new(std::env::current_exe().unwrap())

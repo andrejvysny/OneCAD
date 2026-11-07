@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn retain(path: &Path, label: &str, test_source: &[u8]) {
+pub fn retain(path: &Path, label: &str, test_source: &[u8], geometry: &str) {
     let Some(root) = std::env::var_os("ONECAD_PUBLIC_ASSEMBLY_CAPTURE_DIR") else {
         return;
     };
@@ -19,7 +19,7 @@ pub fn retain(path: &Path, label: &str, test_source: &[u8]) {
     let manifest = serde_json::json!({
         "schemaVersion": 1,
         "classification": "successful shared-service save and shutdown; cold-reopen validation continues after capture",
-        "geometry": "imported source parts; not native feature-history qualification",
+        "geometry": geometry,
         "artifact": "assembly.onecad",
         "artifactSha256": digest(&bytes),
         "topLevelTestSourceSha256": digest(test_source),

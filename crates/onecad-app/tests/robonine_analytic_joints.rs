@@ -411,6 +411,7 @@ async fn source_qualified_analytic_joints_cold_reopen() {
         &path,
         "robonine-joints",
         include_bytes!("robonine_analytic_joints.rs"),
+        "imported source parts; not native feature-history qualification",
     );
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
