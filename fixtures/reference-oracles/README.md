@@ -12,6 +12,11 @@ relative threshold was frozen as a trial before running OneCAD and must not be
 widened after observing a failure. Independent numerical justification remains
 part of qualification.
 
+The [direct FTC09 STEP trace](nist-ftc09-direct/README.md) checks pinned source
+entities, units, selected face loops and two-edge circle pairs using only the
+Python standard library. It removes the OCCT transfer dependency for those
+observations; it does not establish arc coverage, mass or the trial tolerance.
+
 Run the production-worker check with the repository's staged pinned worker:
 
 ```sh
