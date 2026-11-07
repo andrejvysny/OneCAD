@@ -150,6 +150,16 @@ impl OperationRecord {
 
 impl Serialize for OperationRecord {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.serialize_with_outputs(serializer, &self.outputs)
+    }
+}
+
+impl OperationRecord {
+    pub(crate) fn serialize_with_outputs<S: Serializer>(
+        &self,
+        serializer: S,
+        outputs: &[BodyId],
+    ) -> Result<S::Ok, S::Error> {
         // The op flattens onto the record as its own top-level keys.
         let op_value = serde_json::to_value(&self.op).map_err(serde::ser::Error::custom)?;
         let op_obj = op_value
@@ -165,7 +175,7 @@ impl Serialize for OperationRecord {
             map.serialize_entry(k, v)?;
         }
         map.serialize_entry("inputs", &self.inputs)?;
-        map.serialize_entry("outputs", &self.outputs)?;
+        map.serialize_entry("outputs", outputs)?;
         map.serialize_entry("determinism", &self.determinism)?;
         map.serialize_entry("suppressed", &self.suppressed)?;
         for (k, v) in &self.extra {

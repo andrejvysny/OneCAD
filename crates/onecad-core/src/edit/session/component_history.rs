@@ -6,6 +6,8 @@ use crate::document::{
 };
 use onecad_assembly::occurrence::ComponentDefId;
 use sha2::{Digest, Sha256};
+#[path = "component_outputs.rs"]
+mod outputs;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ComponentRedoState {
@@ -15,11 +17,12 @@ pub(crate) struct ComponentRedoState {
     lifecycle: [u8; 32],
     upsert: Vec<(crate::ids::ElementId, ElementEntry)>,
     removed: Vec<crate::ids::ElementId>,
+    outputs: Vec<outputs::OutputReplay>,
 }
 
 #[derive(serde::Serialize)]
 struct TimelineView<'a> {
-    records: &'a [OperationRecord],
+    records: outputs::RecordsView<'a>,
     cursor: usize,
 }
 
@@ -49,6 +52,13 @@ impl std::io::Write for HashWriter {
     }
 }
 fn component_hash(definition: &ComponentDef, derived: bool) -> Result<[u8; 32], DomainError> {
+    component_hash_with_outputs(definition, derived, &[])
+}
+fn component_hash_with_outputs(
+    definition: &ComponentDef,
+    derived: bool,
+    outputs: &[outputs::OutputReplay],
+) -> Result<[u8; 32], DomainError> {
     let view = ComponentView {
         id: definition.id,
         name: &definition.name,
@@ -57,7 +67,10 @@ fn component_hash(definition: &ComponentDef, derived: bool) -> Result<[u8; 32], 
         sketch_visibility: &definition.sketch_visibility,
         datum_planes: &definition.datum_planes,
         timeline: TimelineView {
-            records: definition.timeline.records(),
+            records: outputs::RecordsView {
+                records: definition.timeline.records(),
+                outputs,
+            },
             cursor: definition.timeline.cursor(),
         },
         named_selections: &definition.named_selections,
@@ -150,16 +163,18 @@ impl DocumentSession {
                 .filter(|(id, _)| !after.elements.contains(id))
                 .map(|(id, _)| id.clone())
                 .collect();
-            if !upsert.is_empty() || !removed.is_empty() {
+            let outputs = outputs::capture(before, after, txn);
+            if !upsert.is_empty() || !removed.is_empty() || !outputs.is_empty() {
                 states.push(ComponentRedoState {
                     id,
-                    inputs: component_hash(after, false)?,
+                    inputs: component_hash_with_outputs(after, false, &outputs)?,
                     baseline: before
                         .map(|definition| component_hash(definition, true))
                         .transpose()?,
                     lifecycle: lifecycle_hash(after)?,
                     upsert,
                     removed,
+                    outputs,
                 });
             }
         }
@@ -201,6 +216,7 @@ impl DocumentSession {
                     "redo component inputs changed before identity restoration".into(),
                 ));
             }
+            outputs::validate(definition, &state.outputs)?;
             // A copied definition may inherit newer replay identities from its source.
             // Never combine those with evidence captured before the copy was undone.
             if state.baseline.is_none()
@@ -217,13 +233,14 @@ impl DocumentSession {
                 ));
             }
         }
-        // Only topology evidence is restored; authored fields and opaque metadata remain current.
+        // Only verified derived evidence/output writeback is restored; authored fields remain current.
         for state in states {
             let definition = self
                 .document
                 .definitions
                 .get_mut(&state.id)
                 .expect("preflighted component");
+            outputs::restore(definition, &state.outputs);
             for id in &state.removed {
                 definition.elements.remove(id);
             }
@@ -231,6 +248,7 @@ impl DocumentSession {
                 definition.elements.insert(id.clone(), entry.clone());
             }
         }
+        self.rebuild_graph();
         Ok(())
     }
 }

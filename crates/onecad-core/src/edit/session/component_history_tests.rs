@@ -232,3 +232,135 @@ fn copied_definition_change_refuses(change_body: bool) {
     assert!(!s.document().definitions.contains_key(&copied));
     assert_eq!((s.undo_depth(), s.redo_depth()), (1, 1));
 }
+
+fn appended_translation_with_replay_outputs() -> DocumentSession {
+    use crate::document::record::{
+        KnownOperation, OpaqueOperation, Operation, TransformBodyParams,
+    };
+    use crate::document::variables::Scalar;
+    let mut s = session();
+    let id = ComponentDefId(Uuid::from_u128(10));
+    let body = BodyId(Uuid::from_u128(110));
+    let mut part = s.document().definitions[&id].clone();
+    let mut producer = OperationRecord::new(
+        RecordId(Uuid::from_u128(210)),
+        0,
+        "Frozen producer",
+        Operation::Opaque(OpaqueOperation {
+            raw: serde_json::from_value(
+                serde_json::json!({"opType":"FutureSolid","future":{"keep":7}}),
+            )
+            .unwrap(),
+        }),
+    );
+    producer.outputs = vec![body];
+    part.timeline = crate::history::Timeline::from_records(vec![producer]);
+    assert!(s.adopt_component_replay(id, part));
+    let record = OperationRecord::new(
+        RecordId(Uuid::from_u128(211)),
+        1,
+        "Translate",
+        Operation::Known(KnownOperation::TransformBody(TransformBodyParams {
+            targets: vec![body],
+            translate: [Scalar::new(1.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+            copy: false,
+            extra: Default::default(),
+        })),
+    );
+    s.apply(EditCommand::Assembly {
+        edit: Box::new(AssemblyEdit::EditDefinition {
+            id,
+            command: Box::new(EditCommand::AddOperation {
+                record,
+                at_cursor: true,
+            }),
+        }),
+    })
+    .unwrap();
+    let mut replay = s.document().definitions[&id].clone();
+    replay.timeline.set_record_outputs(1, vec![body]);
+    replay.elements.insert(
+        ElementId::new("el_output_test"),
+        ElementEntry::new(body, ElementKind::Face),
+    );
+    assert!(s.adopt_component_replay(id, replay));
+    s
+}
+
+#[test]
+fn redo_restores_observed_transform_outputs_and_opaque_prefix() {
+    let mut s = appended_translation_with_replay_outputs();
+    let expected = serde_json::to_value(s.document()).unwrap();
+    s.undo().unwrap();
+    s.redo().unwrap().unwrap();
+    assert_eq!(serde_json::to_value(s.document()).unwrap(), expected);
+    for _ in 0..2 {
+        s.undo().unwrap();
+        s.redo().unwrap().unwrap();
+        assert_eq!(serde_json::to_value(s.document()).unwrap(), expected);
+    }
+}
+
+#[test]
+fn transform_output_redo_restores_without_an_element_delta() {
+    let mut s = appended_translation_with_replay_outputs();
+    let id = ComponentDefId(Uuid::from_u128(10));
+    let mut part = s.document().definitions[&id].clone();
+    part.elements = ElementIndex::new();
+    assert!(s.adopt_component_replay(id, part));
+    let expected = serde_json::to_vec(s.document()).unwrap();
+    s.undo().unwrap();
+    s.redo().unwrap().unwrap();
+    assert_eq!(serde_json::to_vec(s.document()).unwrap(), expected);
+}
+
+#[test]
+fn transform_output_redo_rejects_changed_forward_outputs_atomically() {
+    let mut s = appended_translation_with_replay_outputs();
+    s.undo().unwrap();
+    let (mut txn, states) = s.undo.pop_redo_with_components().unwrap();
+    let EditCommand::Assembly { edit } = &mut txn.edits[0].forward else {
+        unreachable!()
+    };
+    let AssemblyEdit::EditDefinition { command, .. } = edit.as_mut() else {
+        unreachable!()
+    };
+    let EditCommand::AddOperation { record, .. } = command.as_mut() else {
+        unreachable!()
+    };
+    record.outputs = vec![BodyId(Uuid::from_u128(999))];
+    s.undo.push_undone_with_components(txn, states);
+    let before = serde_json::to_vec(s.document()).unwrap();
+    assert!(s.redo().is_err());
+    assert_eq!(serde_json::to_vec(s.document()).unwrap(), before);
+    assert_eq!((s.undo_depth(), s.redo_depth()), (0, 1));
+}
+
+#[test]
+fn transform_output_redo_rejects_changed_owner_and_opaque_prefix() {
+    for opaque in [false, true] {
+        let mut s = appended_translation_with_replay_outputs();
+        s.undo().unwrap();
+        let id = ComponentDefId(Uuid::from_u128(10));
+        let mut part = s.document().definitions[&id].clone();
+        if opaque {
+            let mut records = part.timeline.records().to_vec();
+            let crate::document::record::Operation::Opaque(op) = &mut records[0].op else {
+                unreachable!()
+            };
+            op.raw
+                .insert("future".into(), serde_json::json!({"keep":99}));
+            part.timeline = crate::history::Timeline::from_records(records);
+        } else {
+            let mut value = serde_json::to_value(&part.bodies).unwrap();
+            value["bodies"][0]["createdBy"] = serde_json::json!(RecordId(Uuid::from_u128(999)));
+            part.bodies = serde_json::from_value(value).unwrap();
+        }
+        assert!(s.adopt_component_replay(id, part));
+        let before = serde_json::to_vec(s.document()).unwrap();
+        assert!(s.redo().is_err());
+        assert_eq!(serde_json::to_vec(s.document()).unwrap(), before);
+        assert_eq!((s.undo_depth(), s.redo_depth()), (0, 1));
+    }
+}
