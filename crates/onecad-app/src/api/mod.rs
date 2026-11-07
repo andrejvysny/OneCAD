@@ -775,10 +775,13 @@ pub async fn save_document(
             lane.clone(),
             &target,
             payload,
-            recovery_root.as_deref(),
-            document_id,
             target_claim,
-            Some((session.clone(), generation)),
+            recovery_root.map(|root| autosave::SavedRecovery {
+                root,
+                document_id,
+                session: session.clone(),
+                generation,
+            }),
             #[cfg(test)]
             hook,
         )

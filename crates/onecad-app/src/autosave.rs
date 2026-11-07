@@ -433,6 +433,13 @@ pub async fn write_save_payload(
 pub(crate) type SaveHook =
     Box<dyn FnMut(onecad_core::io::container::SaveTestStage) -> std::io::Result<()> + Send>;
 
+pub(crate) struct SavedRecovery {
+    pub root: PathBuf,
+    pub document_id: DocumentId,
+    pub session: String,
+    pub generation: u64,
+}
+
 pub(crate) async fn write_save_payload_claimed(
     lane: &Arc<Mutex<()>>,
     path: &Path,
@@ -443,12 +450,18 @@ pub(crate) async fn write_save_payload_claimed(
     saved: Option<(String, u64)>,
 ) -> Result<Option<crate::reservations::Claim>, IoError> {
     let lane = Arc::new(lane.clone().lock_owned().await);
+    let saved = recovery_root
+        .zip(saved)
+        .map(|(root, (session, generation))| SavedRecovery {
+            root: root.to_path_buf(),
+            document_id,
+            session,
+            generation,
+        });
     write_save_payload_admitted(
         lane,
         path,
         payload,
-        recovery_root,
-        document_id,
         claim,
         saved,
         #[cfg(test)]
@@ -461,14 +474,11 @@ pub(crate) async fn write_save_payload_admitted(
     lane: Arc<tokio::sync::OwnedMutexGuard<()>>,
     path: &Path,
     payload: SavePayload,
-    recovery_root: Option<&Path>,
-    document_id: DocumentId,
     claim: Option<crate::reservations::Claim>,
-    saved: Option<(String, u64)>,
+    saved: Option<SavedRecovery>,
     #[cfg(test)] mut hook: Option<SaveHook>,
 ) -> Result<Option<crate::reservations::Claim>, IoError> {
     let target = path.to_path_buf();
-    let recovery_root = recovery_root.map(Path::to_path_buf);
     match tokio::task::spawn_blocking(move || {
         let _lane = lane;
         #[cfg(test)]
@@ -479,8 +489,13 @@ pub(crate) async fn write_save_payload_admitted(
         }
         #[cfg(not(test))]
         DocumentRuntime::write_payload(&target, &payload)?;
-        if let (Some(root), Some((session, generation))) = (recovery_root, saved) {
-            clear_superseded_recovery(&root, document_id, &session, generation);
+        if let Some(saved) = saved {
+            clear_superseded_recovery(
+                &saved.root,
+                saved.document_id,
+                &saved.session,
+                saved.generation,
+            );
         }
         Ok(claim)
     })
