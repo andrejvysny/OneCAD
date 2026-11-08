@@ -1408,3 +1408,6 @@ async fn native_assembly_controls_author_solve_undo_save_reopen() {
 
 #[path = "document_io_tests/repeated_occurrence_repair.rs"]
 mod repeated_occurrence_repair;
+
+#[path = "document_io_tests/deleted_body_repair.rs"]
+mod deleted_body_repair;

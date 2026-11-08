@@ -53,10 +53,14 @@ initial refusal and failure after an accepted scene; stale picks remain blocked.
 
 The service selection (`document_services::tests::home_lifecycle_tests::` and
 `bridge::tests::`, two explicit native assembly document tests and the repeated-
-occurrence source-restoration module, `SERVICE_TESTS`) has seven cases: three
+occurrence source-restoration and whole-body deletion repair modules, `SERVICE_TESTS`)
+has eight cases: three
 no-document Home lifecycle cases and the production bridge actor no-document
 start and explicit New capture, plus assembly capture/save/reopen, native assembly
-controls and source restoration with stale/sibling pick refusal.
+controls, source restoration and whole-body deletion repair with stale/sibling
+pick refusal. The deletion case explicitly repicks a different surviving source
+face, checks joint alignment, Undo/Redo, manual Save and fresh-process reopen/edit.
+This does not qualify deletion of a face-modifying feature on a surviving body.
 These cases emit no required adapter record, so Metal provenance for the run
 comes from the lifecycle selection.
 
