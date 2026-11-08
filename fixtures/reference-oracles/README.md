@@ -42,6 +42,14 @@ agreed on 2002.3754 mm³ and 3197.8774 mm². The four displayed decimal places b
 rounding only; import conversion and healing uncertainty remain unmeasured.
 This observation does not replace an existing oracle or justify widening a
 tolerance. It does not establish native OneCAD history or source equivalence.
+`nist-parasolid-measurement.json` records a separately approved Shapr3D/Parasolid
+Quality-preset import of the pinned FTC09 STEP. Selecting the individual plate
+solid `Imported 01` yielded 136445.1048 mm³ and 96614.2338 mm² in both native
+accessibility values and the visible Measure panel. Four decimal places describe
+display rounding only; import/healing uncertainty remains unmeasured. This
+independent observation does not ratify the existing trial tolerance, establish
+native history, or replace the upstream-authored oracle.
+
 ## Upstream Prusa source tessellations
 
 The separately pinned, unmodified box, cover and lever STLs come from the same

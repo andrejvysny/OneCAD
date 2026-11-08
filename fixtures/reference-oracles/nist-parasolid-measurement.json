@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "path": "fixtures/public-cad/nist/nist_ftc_09_asme1_rd.stp",
+    "sha256": "d12866d3ab0fc260efd0f1a5c54af47950be513486f61f65513877045582afa8",
+    "byteSize": 263934,
+    "attribution": "National Institute of Standards and Technology; public-domain statement and disclaimer retained in fixtures/public-cad/nist/README.txt"
+  },
+  "observation": {
+    "dateUtc": "2026-11-08",
+    "reader": "Shapr3D",
+    "version": "26.202.0",
+    "build": "12281",
+    "kernelFamily": "Siemens Parasolid",
+    "kernelVersion": "not exposed by the observed UI",
+    "os": "macOS 26.6.2 (25G83)",
+    "machine": "Mac16,8 Apple M4 Pro",
+    "input": "OS-injected native Computer Use; not physical input",
+    "authorization": "User explicitly approved this public NIST import and possible Shapr3D sync upload.",
+    "importPreset": "Quality (default); no custom import settings applied",
+    "selectionPath": [
+      "nist_ftc_09_asme1_rd.stp",
+      "Imported 01"
+    ],
+    "selection": "Individual visible plate solid (cube icon), not the Imported 00 folder or Sketch.",
+    "mode": "Measure / Object Measurements",
+    "volumeMm3": 136445.1048,
+    "surfaceAreaMm2": 96614.2338,
+    "displayDecimalPlaces": 4,
+    "displayHalfStep": 5e-05,
+    "accessibilityValues": {
+      "volume": "136 445.1048 mm3",
+      "surfaceArea": "96 614.2338 mm2"
+    },
+    "recordedBy": "Native accessibility values corroborated by visible Measure panel screenshot in execution transcript; no standalone screenshot file exported."
+  },
+  "limits": [
+    "Display half-step describes rounding only, not geometric accuracy.",
+    "Import conversion, healing and kernel version-specific uncertainty were not measured.",
+    "This independent imported-source observation does not establish native OneCAD history or a numerical error bound.",
+    "No existing oracle, trial tolerance, source input or golden was replaced or widened.",
+    "No aggregate imported-item count, source-entity-to-reader mapping or full topology qualification is inferred."
+  ],
+  "references": {
+    "kernel": "https://www.shapr3d.com/product/cad-file-types",
+    "measure": "https://support.shapr3d.com/hc/en-us/articles/7874465678236-Measure"
+  }
+}
