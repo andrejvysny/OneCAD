@@ -361,8 +361,17 @@ impl Scratch {
             // Element-map partition delta: identity is stable, only partition moves.
             // The owning body comes from the delta entry itself (review F19).
             for entry in buf.added.into_iter().chain(buf.relabeled) {
-                self.elements
-                    .insert(entry.element_id, ElementEntry::new(entry.body, entry.kind));
+                // A partition delta carries no replacement durable evidence.
+                let same_partition = self
+                    .elements
+                    .get(&entry.element_id)
+                    .is_some_and(|existing| {
+                        existing.body == entry.body && existing.kind == entry.kind
+                    });
+                if !same_partition {
+                    self.elements
+                        .insert(entry.element_id, ElementEntry::new(entry.body, entry.kind));
+                }
             }
             for id in buf.removed {
                 self.elements.remove(&id);
