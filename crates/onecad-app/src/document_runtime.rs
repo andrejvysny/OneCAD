@@ -5822,6 +5822,13 @@ impl DocumentRuntime {
         snapshot: SnapshotId,
         pending: &[(ElementId, ElementEntry)],
     ) -> Result<(usize, usize), ()> {
+        let by_entry: std::collections::HashMap<&str, &ElementEntry> = pending
+            .iter()
+            .map(|(id, entry)| (id.as_str(), entry))
+            .collect();
+        if by_entry.len() != pending.len() {
+            return Err(());
+        }
         // The ref is authored exactly like a stored op input: last-known identity in
         // `primary`, the frozen worker descriptor in `intent`, and the pick anchor.
         // Passing the anchor alone would be an EMPTY ref for most entries — the
@@ -5872,10 +5879,25 @@ impl DocumentRuntime {
             }
         };
 
-        let by_entry: std::collections::HashMap<&str, &ElementEntry> = pending
-            .iter()
-            .map(|(id, entry)| (id.as_str(), entry))
-            .collect();
+        // Validate the whole reply before installing any identity. A malformed
+        // partial reply is not evidence that the omitted identities resolved.
+        let mut seen = HashSet::new();
+        let revision = resolutions
+            .first()
+            .map_or(0, |resolution| resolution.revision);
+        if resolutions.len() != pending.len()
+            || resolutions.iter().any(|resolution| {
+                !seen.insert(resolution.ref_id.as_str())
+                    || by_entry
+                        .get(resolution.ref_id.as_str())
+                        .is_none_or(|entry| {
+                            !Self::rebind_response_matches(resolution, entry, snapshot, revision)
+                        })
+            })
+        {
+            tracing::warn!("rebind: response identity inventory or provenance is invalid");
+            return Err(());
+        }
         let mut bindings = Vec::new();
         let mut unresolved = 0usize;
         let mut unchanged = 0usize;
@@ -5930,6 +5952,28 @@ impl DocumentRuntime {
             );
         }
         Ok((bound, unresolved))
+    }
+
+    fn rebind_response_matches(
+        resolution: &RefResolution,
+        entry: &ElementEntry,
+        snapshot: SnapshotId,
+        revision: u64,
+    ) -> bool {
+        if resolution.snapshot_id != snapshot || resolution.revision != revision {
+            return false;
+        }
+        if let ResolveOutcome::NeedsRepair(item) = &resolution.outcome {
+            if item.ref_id != resolution.ref_id {
+                return false;
+            }
+        }
+        match resolution.body_id {
+            Some(body) => body == entry.body,
+            None => matches!(&resolution.outcome, ResolveOutcome::NeedsRepair(item)
+                if item.reason == onecad_core::document::repair::RepairReason::NoCandidates
+                    && item.candidates.is_empty()),
+        }
     }
 
     /// A transport failure re-arms [`rebind_persisted_elements`] for the next

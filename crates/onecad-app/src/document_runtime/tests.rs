@@ -43,6 +43,9 @@ use onecad_core::ids::{ElementId, EntityId, RegionId, SketchId, TopoKey};
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
 
+#[path = "rebind_inventory_tests.rs"]
+mod rebind_inventory_tests;
+
 use super::*;
 use crate::dto::{
     BeginGestureDto, DragSolveDto, FinishSketchDto, SketchSolveStatus, SketchUpsertDto,
@@ -113,6 +116,8 @@ struct FakeBackend {
     /// historical `Ok(vec![])`, so every existing test is untouched; the WP-F seed-edge
     /// re-bind (SCHEMA §9) sets it, because that dry run is stage 1 of the answer.
     resolve_outcome: Mutex<Option<onecad_core::regen::ResolveOutcome>>,
+    resolve_responses: Mutex<Option<Vec<RefResolution>>>,
+    bind_calls: AtomicUsize,
     /// CHANGED curve members every `solve_drag`/`end_gesture` echoes (SCHEMA §7.4
     /// `curves`). Set by a test to model a solver that reshaped a curve — the
     /// channel `positions` cannot carry.
@@ -154,6 +159,8 @@ impl Default for FakeBackend {
             bind_fails: false,
             resolve_fails: Mutex::new(false),
             resolve_outcome: Mutex::new(None),
+            resolve_responses: Mutex::new(None),
+            bind_calls: AtomicUsize::new(0),
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
             mate_resolved: Mutex::new(None),
             failing_steps: std::collections::BTreeSet::new(),
@@ -530,6 +537,7 @@ impl GeometryEngine for FakeBackend {
         &self,
         _r: onecad_core::regen::BindElementIdsRequest,
     ) -> Result<(), EngineError> {
+        self.bind_calls.fetch_add(1, Ordering::Relaxed);
         if self.bind_fails {
             return Err(EngineError::OpFailed {
                 code: onecad_core::regen::OpFailureCode::RefUnresolved,
@@ -546,17 +554,20 @@ impl GeometryEngine for FakeBackend {
                 message: "fake transport failure".into(),
             });
         }
+        if let Some(responses) = self.resolve_responses.lock().unwrap().clone() {
+            return Ok(responses);
+        }
         let Some(outcome) = self.resolve_outcome.lock().unwrap().clone() else {
             return Ok(vec![]);
         };
         Ok(r.refs
             .into_iter()
             .map(|one| RefResolution {
+                body_id: one.element.primary.as_ref().map(|primary| primary.body),
                 ref_id: one.ref_id,
                 outcome: outcome.clone(),
                 snapshot_id: r.snapshot_id,
                 revision: 0,
-                body_id: None,
             })
             .collect())
     }
@@ -3834,7 +3845,8 @@ async fn rebind_recovers_after_a_transient_transport_failure() {
         .await;
     let head = SnapshotId(report.snapshot_id);
     let body = BodyId(Uuid::from_u128(0x10));
-    rt.promote_selection(head, body, vec![(TopoKey::new("f:1"), None)])
+    let promoted = rt
+        .promote_selection(head, body, vec![(TopoKey::new("f:1"), None)])
         .await
         .expect("promotion records re-bind evidence");
 
@@ -3844,7 +3856,11 @@ async fn rebind_recovers_after_a_transient_transport_failure() {
 
     // The worker came back; the next pass gets a real answer and is terminal.
     *backend.resolve_fails.lock().unwrap() = false;
-    rt.rebind_persisted_elements().await;
+    *backend.resolve_outcome.lock().unwrap() =
+        Some(onecad_core::regen::ResolveOutcome::Unchanged {
+            element_id: Some(ElementId::new(promoted[0].element_id.clone())),
+        });
+    assert_eq!(rt.rebind_persisted_elements().await, (1, 0));
     assert!(
         !rt.has_unbound_persisted_elements(),
         "an answered pass is terminal — no retry tax on later publishes"
