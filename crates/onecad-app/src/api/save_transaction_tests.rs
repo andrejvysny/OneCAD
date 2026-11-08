@@ -1,3 +1,5 @@
+#[path = "save_transaction_reopen_support.rs"]
+mod reopen_support;
 #[path = "save_transaction_worker_support.rs"]
 mod worker_support;
 
@@ -323,10 +325,7 @@ async fn in_flight_save_cannot_clear_later_persisted_selection_promotion() {
 #[ignore = "requires a production worker"]
 async fn real_worker_in_flight_promotion_survives_save_and_reopen() {
     use crate::worker::{wire::body_id_wire, ElementQuery};
-    use onecad_core::{
-        ids::{ElementId, TopoKey},
-        regen::{CancelToken, Outcome, RegenRequest},
-    };
+    use onecad_core::ids::{ElementId, TopoKey};
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     let area = tempfile::tempdir().unwrap();
     let host = worker_support::host(area.path());
@@ -407,7 +406,8 @@ async fn real_worker_in_flight_promotion_survives_save_and_reopen() {
     close_document(&state, host.clone()).await.unwrap();
     drop(worker);
     drop(state);
-    let host2 = worker_support::host(&area.path().join("reopen"));
+    let mut host2 = worker_support::host(&area.path().join("reopen"));
+    let mut events = reopen_support::capture(&mut host2);
     let reopened = worker_support::real_state(&host2);
     open_document(
         &reopened,
@@ -424,21 +424,14 @@ async fn real_worker_in_flight_promotion_survives_save_and_reopen() {
             .wait_ready(std::time::Duration::from_secs(15))
             .await
     );
-    {
-        let mut guard = reopened.runtime.lock().await;
-        let rt = guard.as_mut().unwrap();
-        assert!(
-            rt.persisted_element_count() > 0,
-            "reopened runtime must contain promoted evidence"
-        );
-        let report = rt
-            .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
-            .await;
-        assert!(
-            matches!(report.outcome, Outcome::Published(_) | Outcome::NoOp),
-            "{report:?}"
-        );
-    }
+    let session = reopened
+        .runtime
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .runtime_session();
+    reopen_support::scheduled_bound(&reopened, &mut events, &session, body, &element).await;
     let mass = query_mass_properties(&reopened, body_id_wire(body), None)
         .await
         .unwrap()
