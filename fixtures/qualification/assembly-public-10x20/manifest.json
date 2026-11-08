@@ -1,0 +1,45 @@
+{
+  "fixture": "native-compact-10x20.onecad",
+  "sha256": "7c39c64fa89618fcb7cf40dcb2a230b0f3f68acd2d09f4fd7c8af58be006ae9d",
+  "bytes": 237916,
+  "captureSource": "e60a3c4f302ceef479064ef6b9c5e45910afee8a",
+  "schemaVersion": 4,
+  "definitions": 10,
+  "occurrences": 20,
+  "purpose": "Authored compact placement and application-publication measurement input; not a geometry, mate, physical-fit or performance oracle.",
+  "generationProcedure": "crates/onecad-app/tests/public_mixed_stress_support/README.md",
+  "imports": [
+    {
+      "entry": "imports/2e780afa05c59f10fb3a8c4acf1cc0c2289d45312dedc0172bc7fa83ecbeffc0.xbf",
+      "sha256": "2e780afa05c59f10fb3a8c4acf1cc0c2289d45312dedc0172bc7fa83ecbeffc0",
+      "source": "fixtures/reference-derivatives/robonine/analytic/part-040.xbf"
+    },
+    {
+      "entry": "imports/932cc0452078850d9059ed6ad0716dd3658d35b8117c5598c2f0699e2b14b21c.xbf",
+      "sha256": "932cc0452078850d9059ed6ad0716dd3658d35b8117c5598c2f0699e2b14b21c",
+      "source": "fixtures/reference-derivatives/robonine/analytic/part-020.xbf"
+    },
+    {
+      "entry": "imports/c8b06ef5271166c367d27be13e9c8f93a7ae07707033e4d23bd1ed5997285cb6.step",
+      "sha256": "c8b06ef5271166c367d27be13e9c8f93a7ae07707033e4d23bd1ed5997285cb6",
+      "source": "fixtures/public-cad/prusa/MINI-fsenzor-box.stp"
+    },
+    {
+      "entry": "imports/d12866d3ab0fc260efd0f1a5c54af47950be513486f61f65513877045582afa8.step",
+      "sha256": "d12866d3ab0fc260efd0f1a5c54af47950be513486f61f65513877045582afa8",
+      "source": "fixtures/public-cad/nist/nist_ftc_09_asme1_rd.stp"
+    },
+    {
+      "entry": "imports/d9880bc3f2d82b2e9cf49919603ada70af7e3f4c7d9d60caeb3f81a26fc28d8e.xbf",
+      "sha256": "d9880bc3f2d82b2e9cf49919603ada70af7e3f4c7d9d60caeb3f81a26fc28d8e",
+      "source": "fixtures/reference-derivatives/robonine/analytic/part-030.xbf"
+    },
+    {
+      "entry": "imports/f643cfdf9ec480a23d14888bf896cad30e02bd05be079a0baf11f7fc88bd1992.xbf",
+      "sha256": "f643cfdf9ec480a23d14888bf896cad30e02bd05be079a0baf11f7fc88bd1992",
+      "source": "fixtures/reference-derivatives/robonine/analytic/part-010.xbf"
+    }
+  ],
+  "nativeDefinitions": "Prusa source-derived cover (32 records) and lever (8 records), plus two synthetic native plate histories.",
+  "originalBytesPreserved": true
+}
