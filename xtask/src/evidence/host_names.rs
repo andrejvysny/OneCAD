@@ -160,6 +160,8 @@ pub(super) const HOST_TESTS: &[&str] = &[
 /// Ignored service and bridge cases outside `app_logic_tests` run as a separate
 /// exact selection. GPU-dependent cases enforce their adapter prerequisite internally.
 pub(super) const SERVICE_TESTS: &[&str] = &[
+    "document_services::tests::document_io_tests::desktop_tests::desktop_real_worker_external_save_reopen_and_step_export",
+    "document_services::tests::document_io_tests::desktop_tests::desktop_startup_recovery_routes_external_restore_open_saved_and_discard",
     "document_services::tests::document_io_tests::native_assembly_controls_author_solve_undo_save_reopen",
     "document_services::tests::document_io_tests::repeated_occurrence_repair::repeated_occurrence_source_repair_rejects_sibling_and_reopens",
     "document_services::tests::document_io_tests::deleted_body_repair::deleted_body_repair_rejects_sibling_and_reopens",

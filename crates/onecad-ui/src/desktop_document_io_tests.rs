@@ -105,7 +105,10 @@ async fn desktop_real_worker_external_save_reopen_and_step_export() {
     let result = intent(&mut backend, Request::Save { save_as: true })
         .await
         .unwrap();
-    assert!(matches!(result, Outcome::Saved(saved) if saved.clean));
+    assert!(
+        matches!(&result, Outcome::Saved(saved) if saved.clean),
+        "{result:?}"
+    );
     desktop_reopen_and_edit(&mut backend, &saved).await;
     let actual = solid_properties(&backend).await;
     assert_eq!(expected.len(), actual.len());
@@ -155,13 +158,17 @@ async fn desktop_reopen_and_edit(backend: &mut Backend, saved: &Path) {
             .document_id,
         identity
     );
-    api::upsert_variable(&backend.state, backend.host.clone(), "Depth".into(), 9.25)
+    let edited = api::upsert_variable(&backend.state, backend.host.clone(), "Depth".into(), 9.25)
         .await
         .unwrap();
+    await_edited_regen(backend, &edited.runtime_session, edited.revision).await;
     let result = intent(backend, Request::Save { save_as: false })
         .await
         .unwrap();
-    assert!(matches!(result, Outcome::Saved(saved) if saved.clean));
+    assert!(
+        matches!(&result, Outcome::Saved(saved) if saved.clean),
+        "{result:?}"
+    );
     let result = intent(backend, Request::Open(Some(saved.to_owned())))
         .await
         .unwrap();
@@ -184,4 +191,24 @@ async fn desktop_reopen_and_edit(backend: &mut Backend, saved: &Path) {
             .value,
         9.25
     );
+}
+
+async fn await_edited_regen(backend: &Backend, session: &str, revision: u64) {
+    // The edit returns before derived geometry is published; that publication is
+    // itself persisted state and must finish before this clean-save assertion.
+    let report = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let BackendEvent::Regen(report) = backend.events.next().await else {
+                panic!("worker failed before the edited document regenerated");
+            };
+            if report.runtime_session == session && report.source_revision == revision {
+                break report;
+            }
+        }
+    })
+    .await
+    .expect("edited document must regenerate before saving");
+    assert_eq!(report.outcome, "published", "{report:?}");
+    assert!(report.failed_steps.is_empty(), "{report:?}");
+    assert!(report.repair_steps.is_empty(), "{report:?}");
 }
