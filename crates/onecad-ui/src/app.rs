@@ -907,6 +907,7 @@ impl App {
         );
         self.doc.bridge.shared.input_trace.observe_window(ctx);
         self.poll(ctx);
+        crate::viewport_loading::repaint(self, ctx);
         if ctx.input(|input| input.viewport().close_requested()) && !self.may_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_prompt = true;

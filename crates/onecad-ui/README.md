@@ -19,6 +19,13 @@ chosen through native dialogs outside `~/Documents`, which is only their initial
 directory. `ONECAD_LOG_DIR` overrides the default log directory; `off` disables
 file logging. Startup does not modify process environment.
 
+Project loading paints the themed canvas immediately and shows indeterminate
+opening or view-preparation feedback until the first drawable scene is ready.
+Visible loading requests bounded repaint checks; hidden windows rely on normal
+service wakes. Errors replace loading feedback, and viewport allocation refusal
+keeps its retry action. These states do not claim a completion percentage or an
+estimated load time.
+
 The [native sketch and extrusion editing contract](../../docs/design/native-sketch-editing.md)
 defines selection, input ownership, dimension authorship and admission behavior.
 The tool pill and sketch visit actions use bounded horizontal scrolling when their

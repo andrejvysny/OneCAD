@@ -21,6 +21,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 )
             });
             crate::automation::name(ui.ctx(), response.id, crate::automation::VIEWPORT);
+            ui.painter().rect_filled(rect, 0.0, app.theme.canvas_model);
             app.doc.navigation.enter_context(
                 ui.ctx(),
                 app.doc.tab,
@@ -28,6 +29,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             );
             let Some(display) = app.doc.display.clone() else {
                 crate::sketch_creation::clear_candidate(ui.ctx());
+                crate::viewport_loading::show(app, ui, rect, false);
                 return;
             };
             let viewport = Viewport {
@@ -60,7 +62,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             // A switched-in document never shows the previous document's image.
-            if let Some(texture) = app.texture.filter(|_| !app.doc.awaiting_scene) {
+            let texture = app.texture.filter(|_| !app.doc.awaiting_scene);
+            if let Some(texture) = texture {
                 ui.painter().image(
                     texture,
                     rect,
@@ -80,6 +83,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     app.draw_dirty = true;
                     ui.ctx().request_repaint();
                 }
+                return;
+            }
+            if texture.is_none() {
+                crate::viewport_loading::show(app, ui, rect, true);
                 return;
             }
             let Some(view) = drawable_capture(app.doc.view, display.scene.identity(), viewport) else {

@@ -125,6 +125,7 @@ mod transform_ui;
 mod ui_state;
 mod viewport;
 mod viewport_capture;
+mod viewport_loading;
 mod viewport_options;
 mod viewport_selection;
 mod viewport_updates;

@@ -18,8 +18,8 @@ The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It runs thre
 explicitly filtered selections, each with its own exact inventory declared in
 `xtask/src/evidence/host_names.rs`, which is the authoritative list.
 
-The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has 147 cases,
-including occluded delivery (one),
+The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has 148 cases,
+including project loading without input (one), occluded delivery (one),
 document lifecycle (three), overlays (one), diagnostics (three), existing
 dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
 routing (one), invalid-profile Finish closing the sketch and reporting the

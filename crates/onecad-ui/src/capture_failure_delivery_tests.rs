@@ -98,6 +98,17 @@ async fn capture_refusal_remains_visible_until_replacement() {
             .iter()
             .any(|(label, _)| label == "Geometry unavailable")
     );
+    assert!(
+        host.widgets
+            .iter()
+            .any(|(label, _)| label == "Model unavailable")
+    );
+    assert!(
+        !host
+            .widgets
+            .iter()
+            .any(|(label, _)| label == "Opening project…")
+    );
     assert!(host.widgets.iter().any(|(label, _)| label == &error));
     assert!(
         !host

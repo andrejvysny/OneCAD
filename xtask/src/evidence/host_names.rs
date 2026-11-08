@@ -10,6 +10,7 @@ pub(super) const BACKEND_TESTS: &[&str] = &[
 pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::capture_failure_delivery_tests::accepted_scene_failure_exposes_error_and_blocks_stale_picks",
     "app_logic_tests::capture_failure_delivery_tests::capture_refusal_remains_visible_until_replacement",
+    "app_logic_tests::loading_delivery_tests::opening_project_paints_loading_and_finishes_without_input",
     "app_logic_tests::extension_refresh_delivery_tests::catalog_refresh_keeps_immediate_modeling_input_available",
     "app_logic_tests::extension_refresh_delivery_tests::management_waits_for_refresh_then_keeps_document_serialization",
     "app_logic_tests::item_delivery_tests::sidebar_viewport_selection_and_delete_share_authority_and_history",
