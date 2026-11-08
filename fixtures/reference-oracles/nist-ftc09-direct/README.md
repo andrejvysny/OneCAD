@@ -28,7 +28,40 @@ The source face levels yield thickness 0.1196 in (3.03784 mm) and pocket depth
 0.0500 in (1.27 mm). The reported closure uncertainty is an asserted connectivity
 quantity, not a manufacturing tolerance or an error bound on mass properties.
 
-This trace does not prove edge-curve agreement, arc trim or face orientation
+`circle_pairs.py` checks the traced pairs using exact rational arithmetic on the
+source decimals. STEP `DIRECTION` values are ratios: the normative
+[`AXIS2_PLACEMENT_3D`](https://www.steptools.com/docs/stp_aim/html/t_axis2_placement_3d.html)
+and [`build_axes`](https://steptools.com/docs/stp_aim/html/t_build_axes.html)
+definitions normalize the axis and project/normalize the reference direction.
+Non-unit raw ratios are not a STEP defect. This bounded checker reports their
+norms, supports positive-collinear axes and requires orthogonal reference
+ratios; a skew reference is outside this checker's supported subset, not
+necessarily invalid STEP.
+
+For 28 of 29 pairs, both distinct shared endpoints lie exactly on both circles
+and the placements and edge senses meet the checker's stated conditions. Under the standard STEP
+directed edge-curve trimming interpretation, reversed endpoints on the same
+oriented circle then select complementary arcs, including non-diametric
+endpoints, provided each edge uses the single directed interval between its
+vertices without extra turns. This remains conditional on that interpretation; it does not
+prove complete face topology or connectivity elsewhere.
+
+Positive-collinear axis support applies to `analyze_pair()`. The full pinned-source
+report retains the original tracer's stricter exact numeric axis and opposite
+reference-ratio matching; these helper checks do not widen source admission.
+
+Loop `#2794` fails exact-radius membership. Its reference direction ratios have squared norm
+`1999999999999731161391129/2000000000000000000000000` before normative
+normalization. Each endpoint has
+exact squared-radius residual `-547042907199/25000000000000000000000000`
+square inches; its plane residual is zero. If those nonzero in-plane vectors
+are radially projected onto their circle, their projected endpoints remain
+distinct and the complementary-arc argument applies conditionally to all 29
+pairs. Projection changes the supplied points; it is not a source-geometry
+proof, a tolerance, or an accuracy qualification. The script emits exact
+numerator and denominator residuals for every endpoint.
+
+The original trace does not prove edge-curve agreement, arc trim or face orientation
 semantics, exact loop closure, containment, or absence of self-intersection. It
 performs no mass-property integration, interval certification, independent
 kernel transfer, or native-history qualification. The preregistered `1e-6`
@@ -42,5 +75,6 @@ environment, with no third-party packages:
 ```sh
 python fixtures/reference-oracles/nist-ftc09-direct/trace.py > /tmp/ftc09-trace.json
 cmp /tmp/ftc09-trace.json fixtures/reference-oracles/nist-ftc09-direct/trace.json
+python fixtures/reference-oracles/nist-ftc09-direct/circle_pairs.py > /tmp/ftc09-circle-pairs.json
 python -m unittest discover -s fixtures/reference-oracles/nist-ftc09-direct -p 'test_*.py' -v
 ```
