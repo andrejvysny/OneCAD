@@ -208,6 +208,8 @@ pub struct Shared {
     pub recovery_flush: Arc<Notify>,
     pub(crate) recovery_requests: Arc<Mutex<Vec<crate::recovery_flush::Ticket>>>,
     pub budget: Mutex<onecad_render::PreparationBudget>,
+    #[cfg(test)]
+    pub(crate) test_cpu_preparation_limit: std::sync::atomic::AtomicU64,
     /// The last preparation's geometry, reused by the next one. Shared so a window can
     /// count and drop a parked document's cache (`display_budget`); a preparation moves
     /// it out and back, never holding the lock while it works.
@@ -265,6 +267,8 @@ impl Shared {
             autosave_status: Mutex::new(Default::default()),
             render_receipt: Mutex::new(None),
             budget: Mutex::new(budget),
+            #[cfg(test)]
+            test_cpu_preparation_limit: std::sync::atomic::AtomicU64::new(u64::MAX),
             preparation_cache: Mutex::new(Default::default()),
             host_budget,
             host: std::sync::atomic::AtomicU64::new(0),
@@ -279,10 +283,16 @@ impl Shared {
         }
     }
     pub fn preparation_budget(&self) -> Result<onecad_render::PreparationBudget, String> {
-        self.budget
+        let budget = *self
+            .budget
             .lock()
-            .map(|budget| *budget)
-            .map_err(|_| "renderer preparation budget poisoned".into())
+            .map_err(|_| "renderer preparation budget poisoned".to_string())?;
+        #[cfg(test)]
+        let budget = budget.limit_cpu_prepared_bytes(
+            self.test_cpu_preparation_limit
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        Ok(budget)
     }
     pub(crate) fn take_preparation_cache(&self) -> onecad_render::PreparationCache {
         self.preparation_cache
@@ -676,7 +686,8 @@ impl EventSink for Sink {
                         .emit(BackendEvent::WorkerFailed)
                         .map_err(|e| e.to_string())?;
                 } else if status.state == "ready" {
-                    self.failed.store(false, Ordering::Release);
+                    self.failed
+                        .store(false, std::sync::atomic::Ordering::Release);
                 }
                 format!("Geometry worker: {}", status.state)
             }

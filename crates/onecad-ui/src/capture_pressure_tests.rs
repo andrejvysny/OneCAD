@@ -346,8 +346,11 @@ async fn failed_capture_preserves_cache_and_document(host: &mut Host) {
     let before = host.app.doc.document_state.clone().unwrap();
     let scene = host.app.doc.display.as_ref().unwrap().scene.identity();
     let cached = cache_bytes(&host.app.doc);
-    let budget = shared.preparation_budget().unwrap();
-    *shared.budget.lock().unwrap() = budget.limit_cpu_prepared_bytes(0);
+    // Viewport frames refresh the renderer budget while capture runs off-thread.
+    shared
+        .test_cpu_preparation_limit
+        .store(0, std::sync::atomic::Ordering::Release);
+    host.ui(vec![]);
     assert!(
         shared
             .host_budget
@@ -366,7 +369,9 @@ async fn failed_capture_preserves_cache_and_document(host: &mut Host) {
         scene
     );
     assert_eq!(cache_bytes(&host.app.doc), cached);
-    *shared.budget.lock().unwrap() = budget;
+    shared
+        .test_cpu_preparation_limit
+        .store(u64::MAX, std::sync::atomic::Ordering::Release);
 }
 
 fn retained_owners_release_only_after_their_final_drop(
