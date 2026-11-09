@@ -32,6 +32,9 @@ use onecad_protocol::mesh::{MeshLimits, MeshView};
 use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
+// Both scenarios require the process-wide component-worker quota exclusively.
+static WORKER_LANE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn open(path: &Path, area: &Path) -> (Harness, String) {
     let h = Harness::new(area).await;
     let opened = api::open_assembly_document(
@@ -148,6 +151,7 @@ async fn child(path: &Path, area: &Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_prusa_revolute_survives_history_and_fresh_worker() {
+    let _worker_lane = WORKER_LANE.lock().await;
     host::required_worker();
     if let Some(area) = std::env::var_os("ONECAD_PRUSA_NATIVE_JOINT_CHILD") {
         let area = Path::new(&area);
@@ -288,5 +292,6 @@ mod repair;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_prusa_hinge_face_deletion_preserves_repair_evidence() {
+    let _worker_lane = WORKER_LANE.lock().await;
     repair::run().await;
 }
