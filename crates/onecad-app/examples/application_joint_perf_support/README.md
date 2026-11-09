@@ -1,6 +1,6 @@
 # Application joint publication timing
 
-Use the checked-in [compact public fixture](../../../../fixtures/qualification/assembly-public-10x20/README.md). The fixture SHA-256 is checked before and after the run. Use a new results path. In a debug build, `ONECAD_WORKER_PATH` selects a compatible worker:
+Use the checked-in [compact public fixture](../../../../fixtures/qualification/assembly-public-10x20/README.md). The fixture SHA-256 is checked before and after the run. The results path must not already exist; it is created exclusively and retained through the run, including partial-report rewrites. Existing paths, symlinks, and hard links are refused. In a debug build, `ONECAD_WORKER_PATH` selects a compatible worker:
 
 ```sh
 ONECAD_WORKER_PATH=/path/to/onecad-worker cargo run -p onecad-app --example application_joint_perf -- /path/to/native-compact-10x20.onecad /new/path/results.json
@@ -11,3 +11,5 @@ Release builds ignore `ONECAD_WORKER_PATH`. Before building, stage the matching 
 This headless application workflow authors one slider and 18 rigid joints with unbound logical frames derived from the original occurrence poses. Slider limits are symbolic, not physical travel limits. Before timing, all ten component definitions replay through the application and every published component mesh is obtained by scoped occurrence and generation. Five warmups precede 100 recorded alternating drives. Each timed await covers the generation-fenced application request through authoritative joint publication; pose and DOF checks run outside the timed interval. Warmups and samples are saved separately and incrementally, with pose errors, fixed validation goals, and request outcomes. The global translation and angular goals are benchmark criteria, not solver contracts. Invalid travel and pre-cancelled requests must leave the projection unchanged.
 
 The measurement does not include GUI or presentation latency and does not establish contact, physical fit, travel, or a performance budget. Use an isolated host and record the host environment separately.
+
+Instrumentation version 1 records input and published occurrence poses, joint frames, kinds, limits, grounded flags, requested drives, generation, and solver report fields for each sample. Quaternions use Hamilton `w,x,y,z` order and map occurrence-local vectors to world space. Capture is outside the application request timer; the timer excludes rendering and presentation. The [independent observer](../../../../fixtures/qualification/joint-publication-observer/README.md) replays the supported tree's constraints and reports its numeric uncertainty separately. It does not establish physical precision. The existing global pose goals and nonzero failure behavior are unchanged.
