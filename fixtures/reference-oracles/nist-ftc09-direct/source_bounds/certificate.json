@@ -1,0 +1,1982 @@
+{
+  "angularTargetRad": "1/10000000000",
+  "certificateScriptSha256": "50e980fb3a6d0de9fb83b175e709aa261f3f4c83dc9667f1cfa9a5eec777cc37",
+  "circlePairsScriptSha256": "0f381752788303b9181c96775334f82c6ea532ced244564dc761e13c15639982",
+  "conditionalLocusLoops": [
+    2794
+  ],
+  "exactComplementaryCircleLocusCount": 28,
+  "globalMaterialProved": false,
+  "globalTopologyProved": false,
+  "massPropertyAccuracyProved": false,
+  "maxPairAxisDirectionErrorRad": "0",
+  "maxPairReferenceAntiparallelErrorRad": "0",
+  "maxProjectedEndpointAntiparallelErrorRad": "0",
+  "maxRadialProjectionUpperMm": "69474449214273/9765625000000000000000000",
+  "nonzeroResidualLoop": 2794,
+  "pairCount": 29,
+  "pairs": [
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2676,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "117/1000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2682,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "117/1000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2688,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "117/1000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2694,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2700,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2706,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2712,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2718,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2724,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2730,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2736,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "117/1000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2742,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "221/2000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2748,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "221/2000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2754,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "3/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2760,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "281/2000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2766,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "281/2000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2772,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "281/2000",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2788,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "5/64",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": false
+      },
+      "circleLocusProofStatus": "conditional_on_endpoint_reconciliation",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1999999999999731161391129/2000000000000000000000000"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1999999999999731161391129/2000000000000000000000000"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "-547042907199/25000000000000000000000000",
+        "-547042907199/25000000000000000000000000"
+      ],
+      "loop": 2794,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "69474449214273/9765625000000000000000000",
+        "69474449214273/9765625000000000000000000"
+      ],
+      "radiusInch": "5/64",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2800,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "5/64",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2836,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2842,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2848,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "1/8",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2888,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "5/64",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2894,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "5/64",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2900,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "5/64",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2906,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "5/64",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2912,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "63/400",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    },
+    {
+      "assumedEntitySemantics": "ISO edge is a connected non-self-intersecting open curve, implicitly vertex-trimmed; face-bound reversal changes orientation, not locus.",
+      "axisReferenceDot": [
+        "0",
+        "0"
+      ],
+      "boundOrientation": ".F.",
+      "checks": {
+        "axis_reference_orthogonal": true,
+        "curve_links": true,
+        "distinct_endpoints": true,
+        "nonzero_axis_and_reference": true,
+        "reversed_vertex_coordinates": true,
+        "reversed_vertex_ids": true,
+        "same_center": true,
+        "same_edge_and_loop_sense": true,
+        "same_oriented_axis": true,
+        "same_positive_radius": true,
+        "vertices_on_circle_exact": true
+      },
+      "circleLocusProofStatus": "exact_complementary_locus_inference",
+      "directionSquaredNorms": [
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        },
+        {
+          "axis": "1",
+          "axis_dot_reference": "0",
+          "reference": "1"
+        }
+      ],
+      "edgeFlags": [
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        },
+        {
+          "orientation": ".T.",
+          "sameSense": ".T."
+        }
+      ],
+      "endpointSquaredRadiusResidualInch2": [
+        "0",
+        "0"
+      ],
+      "loop": 2918,
+      "normalizedReferencePairAngularSeparationFromAntiparallelRad": "0",
+      "projectedEndpointSeparationFromAntiparallelRad": "0",
+      "radialProjectionUpperMm": [
+        "0",
+        "0"
+      ],
+      "radiusInch": "63/400",
+      "traversalConditions": {
+        "both_edge_curves_forward_parameter": true,
+        "both_oriented_edges_forward": true,
+        "edge_curve_links": true,
+        "face_bound_reverses_traversal": true,
+        "reverse_vertex_coordinates": true,
+        "reverse_vertex_ids": true,
+        "same_circle_center": true,
+        "same_oriented_circle_axis": true,
+        "same_positive_circle_radius": true
+      }
+    }
+  ],
+  "primarySemantics": {
+    "editionApplicability": "Source declares 2015 AP203 MIM; exact applicability of the 2021 edition must be reviewed before formal qualification.",
+    "geometry": "https://ap238.org/SMRL_v8_final/data/resource_docs/geometric_and_topological_representation/sys/4_schema.htm",
+    "reference": "ISO 10303-42:2021 sections 5.5.4\u20135.5.6, 5.5.9, 5.5.17, 4.5.14, 4.5.19, 4.5.26",
+    "topology": "https://ap238.org/SMRL_v8_final/data/resource_docs/geometric_and_topological_representation/sys/5_schema.htm"
+  },
+  "radialTargetMm": "1/100000000",
+  "scope": "Exact rational source decimals only. Bounds describe hypothetical radial projection of traced vertices, not source geometry error, CAD transfer error, or a certified mass-property oracle.",
+  "sourcePath": "fixtures/public-cad/nist/nist_ftc_09_asme1_rd.stp",
+  "sourceSha256": "d12866d3ab0fc260efd0f1a5c54af47950be513486f61f65513877045582afa8",
+  "traceScriptSha256": "3e0b432848a0e6edaf0e0019b951ff28569ef07df5410c61e8dd52506aa89043",
+  "trialToleranceRatified": false,
+  "unproved": [
+    "The 28 exact-locus inferences depend on the cited STEP entity constraints and require verification that this standard edition applies to the declared AP203 MIM.",
+    "Loop 2794 endpoints are not exactly on either circle; source does not specify a reconciliation rule and no exact source full-circle locus is inferred.",
+    "Projection changes source vertices; source does not specify projection as its transfer or repair semantics.",
+    "No bound on kernel-evaluated points, transfer, or source measurements; no global coordinate, radius, depth, angle, topology or mass-property error bound.",
+    "Full analytic face domains, containment, all source loops and cone semantics remain outside this certificate."
+  ]
+}
