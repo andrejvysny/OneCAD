@@ -64,7 +64,7 @@ pub(super) fn validate(document: &Document) -> Result<(), String> {
 }
 
 fn unsupported<T>() -> Result<T, String> {
-    Err("quarantined topology requires a closed native Sketch/Extrude/Hole document".into())
+    Err("quarantined topology requires a supported closed native history".into())
 }
 
 fn empty(extra: &Extra) -> Result<(), String> {
@@ -106,6 +106,16 @@ fn validate_record(record: &OperationRecord) -> Result<(), String> {
                 .flatten()
             {
                 validate_reference(reference)?;
+            }
+        }
+        Operation::Known(KnownOperation::Revolve(params)) => {
+            empty(&params.extra)?;
+            if let Some(profile) = &params.profile {
+                empty(&profile.extra)?;
+            }
+            match &params.axis {
+                Some(crate::document::refs::AxisRef::SketchLine { extra, .. }) => empty(extra)?,
+                _ => return unsupported(),
             }
         }
         Operation::Known(KnownOperation::Hole(params)) => {
@@ -185,6 +195,17 @@ fn validate_wire_item(value: &Value, constraint: bool) -> Result<(), String> {
             "construction",
             "referenceLocked",
         ],
+        (false, "Arc") => &[
+            "type",
+            "id",
+            "center",
+            "centerRef",
+            "radius",
+            "startAngle",
+            "endAngle",
+            "construction",
+            "referenceLocked",
+        ],
         (true, "Horizontal" | "Vertical" | "Fixed") => &["type", "id", "entities"],
         (true, "Distance" | "Diameter") => &["type", "id", "entities", "value"],
         _ => return unsupported(),
@@ -200,7 +221,7 @@ fn validate_wire_item(value: &Value, constraint: bool) -> Result<(), String> {
             "at" | "center" => value
                 .as_array()
                 .is_some_and(|items| items.len() == 2 && items.iter().all(finite)),
-            "radius" | "value" => finite(value),
+            "radius" | "startAngle" | "endAngle" | "value" => finite(value),
             "entities" => value
                 .as_array()
                 .is_some_and(|items| items.iter().all(uuid_value)),

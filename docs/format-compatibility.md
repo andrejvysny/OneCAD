@@ -44,8 +44,11 @@ from zero rather than accepting a checkpoint containing old bindings.
 
 Automatic reservation currently requires an actual, complete worker
 `NeedsRepair` answer and a closed consumer proof for the whole batch. The
-implemented proof admits native Sketch/Extrude/Hole histories, known local
-sketch geometry, and ordinary world or face attachments. Unknown operations,
+implemented proof admits native Sketch/Extrude/Hole histories and Revolve
+with a sketch-line axis, known local sketch geometry including arcs, and
+ordinary world or face attachments. Retained synthetic reservations in the
+public Prusa cover/lever histories exercise this admission and replay path;
+they do not prove actual worker-generated face deletion/repair for those parts. Unknown operations,
 module state, extension metadata, unresolved feature repairs, projections and datum attachments refuse
 reservation rather than being discarded or assumed unrelated. Other active
 feature, selection or colour consumers also refuse it. An affected joint must
