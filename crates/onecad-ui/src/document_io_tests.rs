@@ -1406,5 +1406,11 @@ async fn native_assembly_controls_author_solve_undo_save_reopen() {
     backend.state.retire_all();
 }
 
+#[path = "document_io_tests/deleted_body_repair.rs"]
+mod deleted_body_repair;
+#[path = "document_io_tests/deleted_source_repair.rs"]
+mod deleted_source_repair;
+#[path = "document_io_tests/evidence_mirror_probe.rs"]
+mod evidence_mirror_probe;
 #[path = "document_io_tests/repeated_occurrence_repair.rs"]
 mod repeated_occurrence_repair;
