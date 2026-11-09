@@ -4,8 +4,8 @@ use application_joint_perf_support::{open, pose_report, replay_all, stable, tree
 use onecad_app::{api, dto::AssemblyProjectionDto, joint_execution, state::AppState};
 use onecad_assembly::joint::JointId;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
+    fs::File,
     path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc},
     time::Instant,
@@ -20,7 +20,7 @@ struct Campaign<'a> {
     session: &'a str,
     initial: &'a AssemblyProjectionDto,
     slider: JointId,
-    output: &'a Path,
+    output: File,
     worker_path: PathBuf,
     worker_hash: String,
     worker_hello: Value,
@@ -32,16 +32,24 @@ struct Campaign<'a> {
 }
 
 impl Campaign<'_> {
-    fn save(&self, complete: bool, fixture_unchanged: Option<bool>, worker_after: Option<&str>) {
-        let result = json!({"fixtureSha256": EXPECTED_SHA, "fixtureUnchanged": fixture_unchanged,
+    fn save(
+        &mut self,
+        complete: bool,
+        fixture_unchanged: Option<bool>,
+        worker_after: Option<&str>,
+    ) {
+        let result = json!({"instrumentationVersion": 1, "quaternionConvention": "Hamilton w,x,y,z; occurrence local-to-world", "timingScope": "application API request through publication; excludes report capture and rendering", "initialOccurrences": self.initial.occurrences, "fixtureSha256": EXPECTED_SHA, "fixtureUnchanged": fixture_unchanged,
             "workerResolvedPath": self.worker_path, "workerSha256": self.worker_hash, "workerHello": self.worker_hello,
             "workerSha256After": worker_after, "workerUnchanged": worker_after.map(|hash| hash == self.worker_hash), "complete": complete, "replayedDefinitions": self.replay,
             "thresholds": {"linearMm": 1e-6, "angularRad": 1e-9, "linearGoalIsSolverContract": false, "angularGoalIsSolverContract": false},
             "scope": "headless application joint publication; authored unbound logical frames; no GUI, contact, fit, or performance budget",
             "warmups": WARMUPS, "samples": SAMPLES, "validationOrRequestFailures": self.failures,
             "warmupsRaw": self.warmups, "samplesRaw": self.samples, "refusals": self.refusals});
-        std::fs::write(self.output, serde_json::to_vec_pretty(&result).unwrap())
-            .expect("write evidence");
+        application_joint_perf_support::report_file::rewrite(
+            &mut self.output,
+            &serde_json::to_vec_pretty(&result).unwrap(),
+        )
+        .expect("write evidence");
     }
 
     async fn projection(&self) -> AssemblyProjectionDto {
@@ -85,6 +93,10 @@ impl Campaign<'_> {
         result: Result<joint_execution::JointSolveReport, onecad_app::error::ApiError>,
     ) -> Value {
         let poses = pose_report(self.initial, after, value);
+        let input = json!({"occurrences": before.occurrences, "joints": before.joints,
+            "drives": [{"joint": self.slider, "value": value}], "persistedGeneration": before.persisted_generation});
+        let output = json!({"occurrences": after.occurrences, "joints": after.joints,
+            "persistedGeneration": after.persisted_generation});
         match result {
             Ok(report) => {
                 let poses_ok =
@@ -100,12 +112,12 @@ impl Campaign<'_> {
                 if !passed {
                     self.failures += 1;
                 }
-                json!({"index": i, "requestedMm": value, "elapsedMs": elapsed, "status": "published", "validationStatus": if passed { "passed" } else { "failed" }, "remainingDof": report.remaining_dof, "maxResidual": report.max_residual, "poseValidation": poses, "limitsUnchanged": limits_ok, "generationAdvanced": advanced})
+                json!({"index": i, "requestedMm": value, "elapsedMs": elapsed, "status": "published", "validationStatus": if passed { "passed" } else { "failed" }, "remainingDof": report.remaining_dof, "redundantConstraints": report.redundant_constraints, "iterations": report.iterations, "maxResidual": report.max_residual, "input": input, "output": output, "poseValidation": poses, "limitsUnchanged": limits_ok, "generationAdvanced": advanced})
             }
             Err(error) => {
                 self.failures += 1;
                 let cancelled = matches!(&error, onecad_app::error::ApiError::StalePreview(message) if message == "joint solve cancelled");
-                json!({"index": i, "requestedMm": value, "elapsedMs": elapsed, "status": if cancelled { "cancelled" } else { "failed" }, "validationStatus": "not_run", "poseValidation": poses, "stateUnchanged": stable(before) == stable(after), "error": error.to_string()})
+                json!({"index": i, "requestedMm": value, "elapsedMs": elapsed, "status": if cancelled { "cancelled" } else { "failed" }, "validationStatus": "not_run", "input": input, "output": output, "poseValidation": poses, "stateUnchanged": stable(before) == stable(after), "error": error.to_string()})
             }
         }
     }
@@ -146,13 +158,6 @@ impl Campaign<'_> {
     }
 }
 
-fn sha(path: &Path) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(std::fs::read(path).expect("read input"))
-    )
-}
-
 async fn prepare(state: &AppState, session: &str) -> (AssemblyProjectionDto, JointId, Vec<Value>) {
     let opened = api::get_assembly_projection(state, session).await.unwrap();
     let replay = replay_all(state, session, &opened).await;
@@ -191,11 +196,10 @@ async fn main() {
     );
     let source = PathBuf::from(&args[1]);
     let output = PathBuf::from(&args[2]);
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&output)
-        .expect("create output");
+    let output =
+        application_joint_perf_support::report_file::create(&output).expect("create output");
+    let sha =
+        |path: &Path| application_joint_perf_support::report_file::sha(path).expect("read input");
     assert_eq!(sha(&source), EXPECTED_SHA);
     let worker = onecad_app::worker::resolve_worker_path().expect("no resolved worker candidate");
     let worker_hash = sha(&worker);
@@ -217,7 +221,7 @@ async fn main() {
         session: &session,
         initial: &initial,
         slider,
-        output: &output,
+        output,
         worker_path: worker.clone(),
         worker_hash,
         worker_hello: serde_json::to_value(hello).expect("serialize worker handshake"),
@@ -235,9 +239,7 @@ async fn main() {
     c.refusal(0.5, true).await;
     api::shutdown_host(&state, host, None).await.unwrap();
     let unchanged = sha(&source) == EXPECTED_SHA;
-    let worker_after = std::fs::read(&worker)
-        .ok()
-        .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+    let worker_after = application_joint_perf_support::report_file::sha(&worker).ok();
     c.save(true, Some(unchanged), worker_after.as_deref());
     assert!(unchanged, "source fixture changed");
     assert_eq!(

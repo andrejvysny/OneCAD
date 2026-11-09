@@ -1,3 +1,4 @@
+pub mod report_file;
 use async_trait::async_trait;
 use onecad_app::{
     api,
