@@ -282,3 +282,11 @@ async fn native_prusa_revolute_survives_history_and_fresh_worker() {
         .unwrap();
     assert!(status.success(), "fresh process failed: {status}");
 }
+
+#[path = "prusa_native_joint_support/repair.rs"]
+mod repair;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_prusa_hinge_face_deletion_preserves_repair_evidence() {
+    repair::run().await;
+}
