@@ -1,71 +1,61 @@
-# 0021 — Assembly geometry is instanced in the scene, local in MESH1
+# 0021 — Assembly geometry is shared in the scene, local in MESH1
 
-- Status: Proposed (2026-11-04). Delivery and qualification status belongs in
-  Plane (ONECAD-342); this record does not establish implementation or gate
-  completion.
+- Status: Bounded implementation decision (2026-11-09). Delivery and qualification remain in Plane (ONECAD-342); this is not a gate-completion claim.
 - Date: 2026-11-04
 - Related: ADR-0020 (occurrences), ADR-0022 (joint solver hosting).
 
-## Context
+## Decision and current implementation
 
-MESH1 (`protocol/mesh_format.md`) carries geometry Z-up, right-handed, with no
-transforms; "validation introduces no transforms or higher-precision
-coordinates", and Rust must forward the worker's buffer byte-for-byte
-(Invariant 5). ADR-0020 makes the same definition appear in many occurrences.
-Copying a mesh per occurrence would multiply memory and bytes the worker
-produced once. The 500k-triangle admission limit would otherwise be hit by
-repetition, not by model complexity.
+MESH1 remains definition-local, Z-up and right-handed; instance placement is
+host state, not a MESH1 transform section. `crates/onecad-ui/src/capture/assembly.rs`
+captures visible definition/body geometry once and attaches per-occurrence path,
+rigid model transform and display identity. `crates/onecad-scene/src/scene.rs`
+shares checked geometry and its pick indices among instances. Selection uses
+scene/capture fences and returns occurrence identity with the definition-local
+body and topology identity; `crates/onecad-scene/src/picking.rs` transforms rays
+into local coordinates for face picking. Visibility is per occurrence.
 
-## Decision
+The current renderer shares prepared geometry and GPU mesh buffers, but does
+**not** use a per-instance model-matrix vertex buffer for body draws. Each
+rendered body occurrence has a model uniform/bind group and is drawn separately;
+see `crates/onecad-render/src/{mesh.rs,prepared.rs,passes.rs}` and
+`crates/onecad-render/src/shaders/body.wgsl`. This distinguishes shared geometry
+storage from an instanced single draw call. Transform updates still incur host
+capture/preparation and renderer work; no no-worker or latency guarantee follows
+from storage sharing.
 
-1. **MESH1 is unchanged and stays in the definition's local frame.** No
-   transform field, no per-occurrence mesh.
-2. **`onecad-scene` gains an instance table:** `(mesh key, transform,
-   occurrence path)` per instance. Meshes are keyed by definition regen, not by
-   occurrence.
-3. **Renderer** draws instances with a per-instance model matrix supplied
-   through an instance vertex buffer. Normals are transformed with the
-   rotation only; transforms are rigid (ADR-0020), so no inverse-transpose is
-   needed.
-4. **Picking** uses a transformed-AABB broadphase, then transforms the ray into
-   the instance's local frame for the narrowphase and returns
-   `OccurrencePath` + local `ElementRef`.
-5. **Admission.** The 500k-triangle limit applies to **unique** triangles
-   (one count per mesh key). Separate caps: 2000 instances, depth 8. These
-   numbers are provisional until measured.
-6. **Adversarial fixtures are required** before the caps are accepted:
-   deeply nested, widely repeated, and mixed nested-and-repeated assemblies.
+## Admission and limitations
 
-### Rejected alternatives
+`SceneSnapshot` accounts shared geometry once for unique resident geometry and
+also counts **visible** triangles and edge segments per occurrence. Both unique
+and visible counts have 500,000 limits under default scene limits; renderer
+preparation separately checks visible draw work. Component replay applies its
+own aggregate per-definition geometry and residency caps. UI capture also limits
+instance bodies and source/preparation allocations. See
+`crates/onecad-scene/src/scene.rs`, `crates/onecad-render/src/prepared.rs`,
+`crates/onecad-app/src/document_runtime/component_execution.rs`, and
+`crates/onecad-ui/src/{capture/assembly.rs,budget.rs}`.
 
-- **Pre-transformed mesh per occurrence from the worker.** Rejected: N times
-  the bytes and tessellation, breaks "one regen per definition", and ties mesh
-  keys to placement so a drag invalidates caches.
-- **Adding a transform section to MESH1.** Rejected: the format is a
-  wire contract for Rust and C++; placement is host state the worker does not
-  own.
-- **Counting admission over instanced triangles.** Rejected: rejects cheap
-  repeated fasteners while admitting an unrepeated heavy part.
+The shared CPU host budget is 768 MiB, with 192 MiB active preview headroom for
+Mobile. The separate renderer and parked-cache accounting is partial, with its
+own profile allowances; neither value is a measured process-memory ceiling. The
+limits of 2000 occurrence entries and path depth 8 are structural bounds, while
+current embedded assembly authoring is flat. They are not a promise that 2000
+visible instances fit the draw, body, memory or solver budgets.
 
-## Consequences
+Tests cover shared geometry, per-occurrence transforms and selection, as well as
+bounded host capture: see `crates/onecad-render/src/tests/occurrences.rs`,
+`crates/onecad-scene/src/instances.rs`, and
+`crates/onecad-ui/src/capture_pressure_tests.rs`. A 10-definition,
+20-occurrence initial workload is an evidence case, not a general performance
+pass or a guarantee of physical-device behavior.
 
-- A joint drag updates a transform and instance buffer, not geometry: no
-  worker round trip, no mesh bytes change.
-- Per-instance selection, highlight and hidden state need an instance-aware
-  path in `onecad-scene` and the renderer; the existing body-keyed paths are
-  not enough.
-- Unique-triangle admission lets 2000 instances of a heavy mesh overrun
-  draw cost. Draw-call and vertex-shader cost need their own measurement.
-- Nothing here is implemented; no renderer or picking evidence exists.
+Pre-transforming each mesh in the worker, embedding instance transforms in
+MESH1, or counting only unique geometry while ignoring visible work would lose
+these ownership or admission properties.
 
 ## Open questions
 
-- Are 2000 instances and depth 8 right once measured on target GPUs
-  (including iPad, ADR-0019)?
-- Is culling per instance enough, or are indirect draws needed?
-- Do section views and hidden-line modes need per-instance state in
-  `onecad-render`?
-- Mirrored occurrences stay refused (ADR-0020); confirm that holds for
-  fixtures from imported assemblies.
-- Workbench and tree visual designs are supplied by the user; none are
-  assumed here.
+- What draw and memory workloads are qualified on each target GPU and device?
+- When would culling or batched instance draws be justified by measurements?
+- Which additional section, hidden-line and nested-assembly workflows need evidence?

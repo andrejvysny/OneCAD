@@ -1,89 +1,89 @@
 # 0020 — Assemblies are component definitions and occurrences in one document
 
-- Status: Proposed (2026-11-04). Delivery and qualification status belongs in
-  Plane (ONECAD-340); this record does not establish implementation or gate
-  completion.
+- Status: Bounded implementation decision (2026-11-09). Delivery and qualification remain in Plane (ONECAD-340); this is not a gate-completion claim.
 - Date: 2026-11-04
-- Related: ADR-0021 (instanced geometry), ADR-0022 (joint solver hosting).
+- Related: ADR-0021 (scene geometry), ADR-0022 (joint solver hosting).
 
-## Context
+## Context and decision
 
-`Document` (`crates/onecad-core/src/document/mod.rs`) holds one strict-linear
-`Timeline` (`history/timeline.rs`), one `BodyRegistry`, sketches and datum
-planes, mutated only through `DocumentSession`. `DOCUMENT_SCHEMA_VERSION` is 1.
-The OCW1 worker opens exactly one session per document (`OpenSession`,
-protocol/SCHEMA.md: "One session per document (V1)").
+A document contains a root definition and embedded component definitions. Each
+`ComponentDef` owns its local timeline, sketches, datum planes, bodies, element
+index, repair state and named selections. Root fields remain directly available
+on `Document` for existing part operations; root-owned assembly state contains
+occurrences, visibility, joints and joint bindings. Definitions are embedded;
+live external links are not implemented. See
+`crates/onecad-core/src/document/{mod.rs,component.rs}` and
+`crates/onecad-core/src/edit/assembly.rs`.
 
-`PlaceComponent` (`document/record.rs`, with `ComponentMate`/`MateFrame`) is a
-part-level library insert: it bakes a library body into the current timeline
-and mates it in place. It has no instance identity and cannot express a
-repeated, movable, jointed part.
+An occurrence has its own ID, definition, rigid local pose, grounded flag and
+name. Repeated occurrences share a definition and its local topology identities;
+a pick or binding additionally carries an `OccurrencePath`, body and `ElementRef`
+so a sibling occurrence is not silently substituted. Moving or hiding one
+occurrence changes root assembly state. Editing a shared definition changes that
+definition for its occurrences; making an independent copy separates subsequent
+edits. These edits and Undo/Redo remain under `DocumentSession` and the
+application's per-document `DocumentRuntime` single writer.
 
-Assemblies need repeated placement of one definition, per-placement rigid
-transforms, joints, and element identity that survives both. The crate scaffold
-`crates/onecad-assembly` (`math.rs` RigidTransform/Quat/Frame, `occurrence.rs`
-OccurrenceTree with `MAX_DEPTH = 8`, `MAX_OCCURRENCES = 2000`) exists, untested.
+`PlaceComponent` remains a part-timeline library placement that bakes a body; it
+is not converted into an assembly occurrence. Rigid transforms reject reflection.
+The general occurrence tree rejects cycles and bounds paths to depth 8 and count
+to 2000, but the current document assembly validator and authoring slice accept
+**flat embedded occurrences only** and refuse nested assembly state or parented
+occurrences. These storage bounds are not capacity or performance promises.
+Cross-component sketch references and live external links remain outside this
+slice. A definition's feature dependencies remain local to its own history;
+the supported flat model does not admit recursive definition dependencies. See
+`crates/onecad-assembly/src/occurrence.rs` and
+`crates/onecad-core/src/document/component.rs`.
 
-## Decision
+## Persistence and execution
 
-1. **One document holds the assembly.** Each `ComponentDef` owns its own
-   `Timeline`, `BodyRegistry` and sketches. The root component is the assembly.
-   Definitions are embedded copies; live external links are deferred.
-2. **Migration.** A schema-1 document migrates to a root `ComponentDef` holding
-   the existing timeline with zero occurrences, with no semantic change.
-   `DOCUMENT_SCHEMA_VERSION` becomes 2. Newer versions are refused. Source
-   bytes are preserved, and a failed migration leaves the original intact.
-3. **Occurrence** = `{id, def, parent, local rigid transform, grounded, name}`.
-   Placement is assembly state owned by the root, **not** a part-timeline
-   record. Undo/redo goes through the same `DocumentSession` single writer.
-4. **Identity** = `OccurrencePath` + existing `ElementRef`. Repeated
-   occurrences share element ids within their definition.
-5. **Rigid transforms only.** Reflection is refused; a mirror is a new
-   definition.
-6. **`PlaceComponent` stays** as the part-level library insert (baked body),
-   distinct from assembly insert. It is not migrated into occurrences.
-7. **Worker sessions.** One session per `(document, componentDef)`, reusing
-   the `OpenSession` machinery with fencing per component. Each definition
-   regenerates once in its local frame; Rust composes transforms.
-8. **Cross-component sketch references (ONECAD-399)** are deferred past the M3
-   core. v1 uses a frozen projected copy.
-9. **Cycle policy.** The occurrence tree is acyclic; a definition may not
-   contain an occurrence of itself, directly or transitively.
+The current document schema is **5**. `crates/onecad-core/src/io/migrate.rs`
+registers 1→2 root-definition, 2→3 joint-binding, 3→4 import-source identity,
+and 4→5 topology-binding-state migrations. The migration works on decoded
+values; an applied migration opens without adopting the original path as its
+save target, preserving the source until an explicit new save. Container opens
+refuse newer schema versions; incomplete or low-confidence migration policy can
+open read-only. Unknown extension data is preserved where supported, while
+collisions with reserved migration fields and invalid critical identity or
+binding states are refused, not guessed. See
+`crates/onecad-core/src/io/{migrate.rs,container.rs}` and
+`crates/onecad-app/src/document_runtime.rs`.
 
-### Rejected alternatives
+A definition edit marks its root joint bindings as needing repair. Persisted
+identity evidence and occurrence ownership remain explicit. The bounded
+quarantine path handles only the consumer set and worker `NeedsRepair` outcomes
+it can prove safe; unknown or competing consumers refuse that path. Re-picking
+requires the intended occurrence and fresh scene. It does not make arbitrary
+lost or ambiguous references safe. See
+`crates/onecad-app/src/document_runtime/component_execution/quarantine.rs`
+and `crates/onecad-core/src/document/element_index.rs`.
 
-- **One document per part, assembly as a linking file.** Rejected for v1:
-  multi-file consistency, save/reopen atomicity and undo across files cost
-  more than the embed. Kept as the deferred external-link path.
-- **Occurrences as timeline records.** Rejected: dragging would rewrite
-  history and regen parts that did not change. Placement is state, not
-  feature.
-- **Baking each placement into the root body (extend `PlaceComponent`).**
-  Rejected: no shared definition, no edit-once propagation, no instancing
-  (ADR-0021), no joints.
-- **Supporting reflection in transforms.** Rejected: flips winding and
-  handedness through geometry, normals and solver frames for a case a mirrored
-  definition handles.
+Component replay snapshots inputs under the runtime lock, performs worker work
+without that lock, then checks session, revision, worker epoch, definition
+fingerprint and resource admission before committing. Component worker sessions
+use a deterministic document/definition namespace on a checked **transient**
+worker, with one admitted component execution at a time; they are not a
+permanent worker session for every definition. Checked definition meshes are
+cached and invalidated under the owning runtime. Source and destination paths
+and document IDs have process-local claims; duplicate hosts are refused or
+focused, and a failed/cancelled operation releases its staged claims. See
+`crates/onecad-app/src/{api/component_execution.rs,document_runtime/component_execution.rs,reservations.rs}`.
 
-## Consequences
+## Alternatives and consequences
 
-- `Document` gains a component table; existing timeline/body code moves under
-  `ComponentDef` behind the migration. Every consumer of `Document.timeline`
-  needs a root-component accessor. Blast radius is not yet measured.
-- Edits to a definition regenerate that definition once, not per occurrence;
-  the worker holds N sessions and the supervisor must fence each.
-- Schema-2 documents are not readable by older builds (refused, not guessed).
-- Depth 8 and 2000 occurrences are provisional caps (see ADR-0021).
-- No part of this is implemented beyond the crate scaffold; it is untested.
+Multi-file live links, placement as feature records, baking each occurrence into
+the root, and reflected instance transforms were not selected for this bounded
+slice. Shared definitions avoid repeating authoring history, but publication,
+identity repair, memory and draw work still need explicit admission and fences.
+
+The repository contains migration, component, mixed-assembly and repair tests in
+`crates/onecad-app/tests/{assembly_schema_migration.rs,component_instances.rs,prusa_mixed_assembly.rs}`
+and component/occurrence tests in the core crates. Their existence here is not a
+claim that every native workflow or release gate has passed.
 
 ## Open questions
 
-- Occurrence transforms outside the timeline vs captured positions: is
-  undo-by-session enough, or do saved states need captured placements?
-- Solver spike scope (ADR-0022) and whether it blocks the schema bump.
-- Deferring ONECAD-399: is a frozen projected copy acceptable to users, and
-  how is staleness shown?
-- Mirrored occurrences refusal: error text and a "mirror to new definition"
-  affordance.
-- Workbench and tree visual designs are supplied by the user; none are
-  assumed here.
+- What nested assembly and external-link behavior should be admitted later?
+- What evidence is required for imported and ambiguous reference repair beyond the bounded path?
+- Which performance and physical-input qualifications remain for target devices?
