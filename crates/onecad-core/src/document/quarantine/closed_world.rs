@@ -22,14 +22,13 @@ pub(super) fn validate(document: &Document) -> Result<(), String> {
             return unsupported();
         }
     }
-    let records = document.timeline.records().iter().chain(
-        document
-            .definitions
-            .values()
-            .flat_map(|d| d.timeline.records()),
-    );
-    for record in records {
-        validate_record(record)?;
+    for record in document.timeline.records() {
+        validate_record(record, true)?;
+    }
+    for definition in document.definitions.values() {
+        for record in definition.timeline.records() {
+            validate_record(record, !definition.elements.has_quarantined())?;
+        }
     }
     for sketch in document.sketches.values().chain(
         document
@@ -75,7 +74,7 @@ fn empty(extra: &Extra) -> Result<(), String> {
     }
 }
 
-fn validate_record(record: &OperationRecord) -> Result<(), String> {
+fn validate_record(record: &OperationRecord, allow_import: bool) -> Result<(), String> {
     if record.record_schema_version != crate::document::record::RECORD_SCHEMA_VERSION {
         return unsupported();
     }
@@ -117,6 +116,12 @@ fn validate_record(record: &OperationRecord) -> Result<(), String> {
                 Some(crate::document::refs::AxisRef::SketchLine { extra, .. }) => empty(extra)?,
                 _ => return unsupported(),
             }
+        }
+        Operation::Known(KnownOperation::ImportStep(params)) if allow_import => {
+            // Imported source bytes produce new bodies; they cannot consume another
+            // definition's topology. The reservation owner must stay native.
+            empty(&params.extra)?;
+            params.validate()?;
         }
         Operation::Known(KnownOperation::Hole(params)) => {
             empty(&params.extra)?;

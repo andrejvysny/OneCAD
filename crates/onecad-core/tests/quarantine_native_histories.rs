@@ -137,3 +137,97 @@ fn schema5_revolve_ingress_refuses_discarded_data_before_any_reservation() {
     let error = document_from_value(value).unwrap_err();
     assert!(error.to_string().contains("would be discarded"), "{error}");
 }
+
+fn imported_sibling(document: &mut Document) {
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/qualification/assembly-public-10x20/native-compact-10x20.onecad");
+    let loaded = ContainerReader::open(&source).unwrap();
+    let id = ComponentDefId(Uuid::from_u128(0xd200));
+    document
+        .definitions
+        .insert(id, loaded.document().definitions[&id].clone());
+}
+
+#[test]
+fn native_reservation_allows_valid_independent_imported_sibling() {
+    let mut document = standalone(0xd205, true);
+    imported_sibling(&mut document);
+    let value = serde_json::to_value(document).unwrap();
+    let reopened = document_from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(reopened).unwrap(), value);
+}
+
+#[test]
+fn native_reservation_refuses_imports_in_owner_even_when_suppressed() {
+    use onecad_core::document::record::{KnownOperation, Operation};
+    for suppressed in [false, true] {
+        let mut document = standalone(0xd205, true);
+        imported_sibling(&mut document);
+        let import = document
+            .definitions
+            .remove(&ComponentDefId(Uuid::from_u128(0xd200)))
+            .unwrap();
+        let mut record = import
+            .timeline
+            .records()
+            .iter()
+            .find(|record| matches!(record.op, Operation::Known(KnownOperation::ImportStep(_))))
+            .unwrap()
+            .clone();
+        record.suppressed = suppressed;
+        document
+            .definitions
+            .get_mut(&ComponentDefId(Uuid::from_u128(0xd205)))
+            .unwrap()
+            .timeline
+            .insert_at_cursor(record);
+        assert!(document.validate_topology_binding_states().is_err());
+    }
+}
+
+#[test]
+fn imported_sibling_cannot_hide_opaque_or_invalid_parameters() {
+    for bad in [
+        json!({"future":{"encodedRef":"opaque"}}),
+        json!({"sourceSha256":"invalid"}),
+        json!({"unitScale":{"value":0}}),
+    ] {
+        let mut document = standalone(0xd205, true);
+        imported_sibling(&mut document);
+        let mut value = serde_json::to_value(document).unwrap();
+        let sibling =
+            &mut value["definitions"][ComponentDefId(Uuid::from_u128(0xd200)).to_string()];
+        let records = sibling["timeline"]["records"].as_array_mut().unwrap();
+        let import = records
+            .iter_mut()
+            .find(|record| record["opType"] == "ImportStep")
+            .unwrap();
+        import["params"]
+            .as_object_mut()
+            .unwrap()
+            .extend(bad.as_object().unwrap().clone());
+        assert!(document_from_value(value).is_err());
+    }
+    let mut document = standalone(0xd205, true);
+    imported_sibling(&mut document);
+    let mut value = serde_json::to_value(document).unwrap();
+    let sibling = &mut value["definitions"][ComponentDefId(Uuid::from_u128(0xd200)).to_string()];
+    sibling["timeline"]["records"][0]["opType"] = json!("FutureImport");
+    assert!(document_from_value(value).is_err());
+}
+
+#[test]
+fn unreserved_root_import_stays_distinct_from_native_reserved_owner() {
+    let mut document = standalone(0xd205, true);
+    imported_sibling(&mut document);
+    let imported = document
+        .definitions
+        .remove(&ComponentDefId(Uuid::from_u128(0xd200)))
+        .unwrap();
+    document.timeline = imported.timeline;
+    document.bodies = imported.bodies;
+    document.elements = imported.elements;
+    let value = serde_json::to_value(document).unwrap();
+    let reopened = document_from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(reopened).unwrap(), value);
+}

@@ -23,3 +23,17 @@ endpoint, invalid limits and out-of-range refusal, Undo/Redo, explicit save,
 and a fresh OS process with a fresh worker that reopens and drives again. It is
 service-level evidence, not a native UI or physical-input qualification. Full
 ONECAD-533 acceptance remains open.
+
+The separate `native_prusa_hinge_face_deletion_preserves_repair_evidence` case
+removes the native lever's hinge Revolve cut while its body survives. A complete
+worker `NeedsRepair` answer retains the old face as nonbinding evidence; the
+imported box remains an independent definition. The accepted occurrence poses
+stay fixed until explicit repair. An unrepaired fresh process refuses driving,
+selects a supported current face through the checked mesh and exact worker datum
+API, then repairs the binding. That selected replacement is an authored test
+choice, not a claim that the deleted physical hinge has been reconstructed.
+Repair Undo/Redo restores exact bindings and poses. The free joint retains one
+DOF and valid limits; a separate zero-angle drive pins that DOF. A second fresh
+process reopens the repaired file, drives again and saves. Both processes retain
+the old reserved entry exactly. This does not exercise viewport input or prove
+physical mechanism behavior.

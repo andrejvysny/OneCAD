@@ -7,25 +7,30 @@ mod host;
 use onecad_app::api;
 use onecad_core::{
     document::{
-        component::{ComponentDefId, Occurrence, OccurrenceId, OccurrencePath, RigidTransform},
+        component::{
+            ComponentDef, ComponentDefId, Occurrence, OccurrenceId, OccurrencePath, RigidTransform,
+        },
         element_index::{ElementBindingState, ElementEntry},
         refs::ElementKind,
         Document,
     },
     edit::{AssemblyEdit, EditCommand},
     ids::ElementId,
-    io::container::{ContainerCaches, ContainerReader, ContainerWriter, SaveMeta},
+    io::{
+        container::{ContainerCaches, ContainerReader, ContainerWriter, LoadedContainer, SaveMeta},
+        imports::{ImportBlob, ImportBlobs, OwnedSource},
+    },
 };
 use onecad_protocol::mesh::{MeshLimits, MeshView};
 use serde_json::json;
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 const RESERVED: &str = "el_00000000000000000000000000000001";
 const SEEDS: [u128; 2] = [0xd205, 0xd206];
 const TEST: &str = "native_prusa_retained_reservations_replay_and_cold_reopen";
 
-fn write(path: &Path) {
+fn write(path: &Path, mixed: bool) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/qualification/assembly-public-10x20/native-compact-10x20.onecad");
     let loaded = ContainerReader::open(&source).unwrap();
@@ -39,19 +44,7 @@ fn write(path: &Path) {
             .with_evidence(None, Some(json!({"syntheticOrphanEvidence":true})));
         entry.binding_state = Some(ElementBindingState::Quarantined);
         part.elements.insert(element, entry);
-        document.definitions.insert(id, part);
-        document
-            .assembly
-            .occurrences
-            .insert(Occurrence {
-                id: OccurrenceId(Uuid::from_u128(seed)),
-                def: id,
-                parent: None,
-                local: RigidTransform::IDENTITY,
-                grounded: true,
-                name: "Native history".into(),
-            })
-            .unwrap();
+        embed(&mut document, part, seed, "Native history");
     }
     let meta = SaveMeta {
         app_version: "native-reservation-test".into(),
@@ -59,7 +52,55 @@ fn write(path: &Path) {
         created: String::new(),
         modified: String::new(),
     };
-    ContainerWriter::save(path, &document, &ContainerCaches::none(), &meta).unwrap();
+    let imports = if mixed {
+        import_sibling(&mut document, &loaded)
+    } else {
+        ImportBlobs::new()
+    };
+    ContainerWriter::save_with_imports(path, &document, &ContainerCaches::none(), &imports, &meta)
+        .unwrap();
+}
+
+fn embed(document: &mut Document, part: ComponentDef, seed: u128, name: &str) {
+    let id = part.id;
+    document.definitions.insert(id, part);
+    document
+        .assembly
+        .occurrences
+        .insert(Occurrence {
+            id: OccurrenceId(Uuid::from_u128(seed)),
+            def: id,
+            parent: None,
+            local: RigidTransform::IDENTITY,
+            grounded: true,
+            name: name.into(),
+        })
+        .unwrap();
+}
+
+fn import_sibling(document: &mut Document, loaded: &LoadedContainer) -> ImportBlobs {
+    let id = ComponentDefId(Uuid::from_u128(0xd200));
+    embed(
+        document,
+        loaded.document().definitions[&id].clone(),
+        0xd200,
+        "Imported sibling",
+    );
+    loaded
+        .import_blobs()
+        .iter()
+        .map(|blob| {
+            (
+                blob.sha256.clone(),
+                ImportBlob {
+                    codec: blob.codec,
+                    bytes: Arc::new(OwnedSource::untracked(
+                        loaded.read_import_blob(&blob.sha256).unwrap(),
+                    )),
+                },
+            )
+        })
+        .collect()
 }
 
 fn reservations(path: &Path) -> serde_json::Value {
@@ -74,11 +115,28 @@ fn reservations(path: &Path) -> serde_json::Value {
             entry.clone()
         })
         .collect();
-    serde_json::to_value(entries).unwrap()
+    let imports: Vec<_> = loaded
+        .import_blobs()
+        .iter()
+        .map(|blob| {
+            use sha2::{Digest, Sha256};
+            let bytes = loaded.read_import_blob(&blob.sha256).unwrap();
+            assert_eq!(format!("{:x}", Sha256::digest(&bytes)), blob.sha256);
+            json!({"sha256":blob.sha256,"codec":blob.codec,"bytes":bytes.len()})
+        })
+        .collect();
+    json!({"entries":entries,"imports":imports})
 }
 
 async fn replay(h: &host::Harness, session: &str) {
-    for seed in SEEDS {
+    let projection = api::get_assembly_projection(&h.state, session)
+        .await
+        .unwrap();
+    let mixed = projection
+        .definitions
+        .iter()
+        .any(|part| part.id == ComponentDefId(Uuid::from_u128(0xd200)).to_string());
+    for seed in SEEDS.into_iter().chain(mixed.then_some(0xd200)) {
         let id = ComponentDefId(Uuid::from_u128(seed));
         let (_, projection) = api::regenerate_component(&h.state, session, id)
             .await
@@ -196,24 +254,26 @@ async fn native_prusa_retained_reservations_replay_and_cold_reopen() {
         phase(&area.join("assembly.onecad"), &area.join("cold"), true).await;
         return;
     }
-    let area = tempfile::tempdir().unwrap();
-    let path = area.path().join("assembly.onecad");
-    write(&path);
-    phase(&path, &area.path().join("parent"), false).await;
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
-        .env("ONECAD_PRUSA_RESERVATION_CHILD", area.path())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    for line in stdout.lines().chain(stderr.lines()) {
-        eprintln!("fresh-process evidence: {line}");
+    for mixed in [false, true] {
+        let area = tempfile::tempdir().unwrap();
+        let path = area.path().join("assembly.onecad");
+        write(&path, mixed);
+        phase(&path, &area.path().join("parent"), false).await;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env("ONECAD_PRUSA_RESERVATION_CHILD", area.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for line in stdout.lines().chain(stderr.lines()) {
+            eprintln!("fresh-process evidence: {line}");
+        }
+        assert!(
+            output.status.success(),
+            "fresh process failed: {}",
+            output.status
+        );
+        assert_eq!(stdout.matches(&format!("test {TEST} ... ok")).count(), 1);
     }
-    assert!(
-        output.status.success(),
-        "fresh process failed: {}",
-        output.status
-    );
-    assert_eq!(stdout.matches(&format!("test {TEST} ... ok")).count(), 1);
 }

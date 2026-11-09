@@ -48,7 +48,15 @@ implemented proof admits native Sketch/Extrude/Hole histories and Revolve
 with a sketch-line axis, known local sketch geometry including arcs, and
 ordinary world or face attachments. Retained synthetic reservations in the
 public Prusa cover/lever histories exercise this admission and replay path;
-they do not prove actual worker-generated face deletion/repair for those parts. Unknown operations,
+that synthetic coverage alone does not prove worker-generated deletion/repair.
+A separate production-worker regression deletes the native Prusa lever hinge
+cut, retains actual `NeedsRepair` evidence, repairs through an explicit current
+face, and checks Undo/Redo, manual save and fresh-process reopen before and after
+repair. This is backend evidence, not native GUI or physical mechanism evidence. Validated
+imports may coexist in other definitions or the unreserved root; they remain
+source geometry, not native feature history. Any import in a reservation-owning
+definition, even suppressed, refuses reservation. Import blobs and source
+certificates retain their existing integrity checks. Unknown operations,
 module state, extension metadata, unresolved feature repairs, projections and datum attachments refuse
 reservation rather than being discarded or assumed unrelated. Other active
 feature, selection or colour consumers also refuse it. An affected joint must
