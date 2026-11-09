@@ -21,6 +21,7 @@ use onecad_core::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -31,7 +32,17 @@ const INPUT_SHA: &str = "42ed28779aab0a220288ca27c7876c759665fc4659068cb6a2b3677
 const WORKER_SHA: &str = "4272493274b789539a0e731afe0d45084e344ccf646f46bec35af6561a3fcfb0";
 const SOURCE_SHA: &str = "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09";
 fn hash(path: &Path) -> String {
-    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+    let mut file = std::fs::File::open(path).expect("open file for hashing");
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).expect("read file for hashing");
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    format!("{:x}", digest.finalize())
 }
 fn next_uuid(value: &Value, max: &mut u128) {
     match value {
@@ -200,6 +211,7 @@ async fn author(
     original: BodyId,
     next: u128,
     out: PathBuf,
+    input: PathBuf,
     factor_cutter: bool,
 ) -> Result<Value, String> {
     let query = api::query_mass_properties(
@@ -217,7 +229,9 @@ async fn author(
         "nativeFeatureCount":204,"importCount":0,"diagnosticOnly":true}),
     );
     let final_bodies = if factor_cutter {
-        Some(framework_negative_probe_support::factor_cutter(&h, original, next, &out).await)
+        Some(
+            framework_negative_probe_support::factor_cutter(&h, original, next, &out, &input).await,
+        )
     } else {
         framework_negative_probe_support::apply_negative(&h, original, next, &out).await;
         None
@@ -350,8 +364,9 @@ async fn run(input: &Path, out: &Path, factor_cutter: bool) {
             Ok(()) => {
                 let task_h = h.clone();
                 let task_out = out.to_path_buf();
+                let task_input = input.to_path_buf();
                 match tokio::spawn(async move {
-                    author(task_h, original, next, task_out, factor_cutter).await
+                    author(task_h, original, next, task_out, task_input, factor_cutter).await
                 })
                 .await
                 {

@@ -63,3 +63,12 @@ omission in the initial 204-record candidate. Strict cold readiness remains a
 failure when late publication is needed, and the program still exits with
 failure even if diagnostic authoring finishes. Native source equivalence and
 the end-to-end reference qualification remain open.
+
+
+Before the factorized group Cut, `factor-inputs/manifest.json` records accepted
+B, S and nine protector BREP exports in authored order. Each export uses the
+same checked preview context and snapshot; the context is rechecked before each
+export and after the batch. The manifest records codec, format, solid count,
+byte length, SHA-256, session/revision/worker/base-hash fences and file provenance.
+Hashing uses a fixed 64 KiB buffer. File hashes attest selected file bytes; they
+are not independent attestation of a running process or source equivalence.

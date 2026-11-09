@@ -1,4 +1,5 @@
 //! Native editable source-derived cutter. No imported geometry.
+mod factor_capture;
 mod geometry;
 mod negative;
 mod pipes;
@@ -341,6 +342,7 @@ pub async fn factor_cutter(
     original: BodyId,
     next: u128,
     out: &std::path::Path,
+    input: &std::path::Path,
 ) -> Vec<BodyId> {
     let mut builder = Builder::new(h, next);
     let (sharp, bounds) = negative::sharp(&mut builder).await;
@@ -357,6 +359,7 @@ pub async fn factor_cutter(
         9
     );
     capture_factor_bodies(h, &protections, &out.join("canonical-protectors.json")).await;
+    factor_capture::capture(h, original, sharp, &protections, input, out).await;
     let cutters = builder
         .boolean_results(BooleanOp::Cut, sharp, protections, false)
         .await;
