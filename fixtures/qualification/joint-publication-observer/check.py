@@ -102,8 +102,8 @@ def occurrences(rows: Any) -> dict[str, dict[str, Any]]:
     if any(type(row['grounded']) is not bool for row in rows):
         raise ValueError('invalid ground flag')
     for row in rows:
-        if row['parent'] is not None:
-            raise ValueError('nested occurrences unsupported')
+        if row['path'] != [row['id']]:
+            raise ValueError('nested or invalid occurrence path')
         vec(row['local']['translation'])
         rotate(row['local']['rotation'], (1., 0., 0.))
     return result

@@ -18,7 +18,7 @@ def example(scale: float = 1., offset: float = 0.) -> dict:
     bodies = []
     for index in range(20):
         p = point(offset + index * scale, offset / 2, -offset / 3)
-        bodies.append({'id': str(index), 'parent': None, 'grounded': index == 0,
+        bodies.append({'id': str(index), 'definition': 'definition-' + str(index), 'name': 'occurrence-' + str(index), 'visible': True, 'path': [str(index)], 'grounded': index == 0,
                        'local': {'translation': p, 'rotation': {'w': 1., 'x': 0., 'y': 0., 'z': 0.}}})
     joints = []
     for index in range(1, 20):
@@ -27,7 +27,7 @@ def example(scale: float = 1., offset: float = 0.) -> dict:
             p = bodies[n]['local']['translation']
             return {'occurrence': str(n), 'frame': {'origin': point(-p['x'], -p['y'], -p['z']),
                     'x': point(0., 1., 0.), 'z': point(1., 0., 0.)}}
-        joints.append({'id': str(index), 'kind': 'slider' if index == 1 else 'rigid',
+        joints.append({'id': str(index), 'name': 'joint-' + str(index), 'kind': 'slider' if index == 1 else 'rigid',
                        'a': origin(parent), 'b': origin(index), 'suppressed': False,
                        'limits': {'min': -2., 'max': 2.} if index == 1 else None, 'value': 0.})
     after = copy.deepcopy(bodies)
@@ -85,8 +85,17 @@ class ObserverTests(unittest.TestCase):
         row['maxResidual'] = position['x'] - previous
         self.assertEqual(check.sample(row)['status'], 'inconclusive_numeric_replay')
 
+    def test_actual_projection_shape_and_nested_path_refusal(self) -> None:
+        row = example()
+        self.assertEqual(set(row['input']['occurrences'][0]),
+                         {'id', 'definition', 'grounded', 'local', 'name', 'path', 'visible'})
+        self.assertEqual(check.sample(row)['status'], 'passed')
+        row['input']['occurrences'][1]['path'] = ['parent', '1']
+        with self.assertRaisesRegex(ValueError, 'occurrence path'):
+            check.sample(row)
+
     def test_occurrence_ownership_mutations_refused(self) -> None:
-        for field in ('def', 'name', 'unknownAuthored'):
+        for field in ('definition', 'name', 'unknownAuthored'):
             row = example()
             row['input']['occurrences'][1][field] = 'original'
             row['output']['occurrences'][1][field] = 'replacement'
