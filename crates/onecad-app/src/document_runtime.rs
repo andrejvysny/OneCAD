@@ -2024,7 +2024,11 @@ impl DocumentRuntime {
         let graph = DependencyGraph::new(); // linear timeline: order is authoritative.
                                             // Hand the checkpoint metadata to the planner (SCHEMA §7.7): a compatible
                                             // checkpoint at/below the dirty floor accelerates the base (incremental regen).
-        let checkpoint_metas = self.checkpoints.list();
+        let checkpoint_metas = if self.regen.elements.has_quarantined() {
+            Vec::new()
+        } else {
+            self.checkpoints.list()
+        };
         // SCHEMA §7.3 `TransformBody` edit-safety gate: a seeded NeedsRepair step's
         // refs may only re-resolve through the repair flow, so the plan stops
         // strictly BELOW the lowest seeded step (publish ≤ m−1, Invariant 6).
@@ -2991,6 +2995,14 @@ impl DocumentRuntime {
         merge_body_metadata_for_save(&self.regen.bodies, &self.session.document().bodies)
     }
 
+    fn document_for_persistence(&self) -> Document {
+        let mut document = self.session.document().clone();
+        document.bodies = self.saved_bodies();
+        document.elements = self.regen.elements.clone();
+        document.repair = self.regen.repair.clone();
+        document
+    }
+
     /// Deep-clones the regen session so the executor drives on a copy (lock-free).
     fn clone_regen_session(&self) -> RegenSession {
         RegenSession {
@@ -3159,11 +3171,7 @@ impl DocumentRuntime {
     /// LRU (no recency perturbation, no IO).
     #[must_use]
     pub fn build_save_payload(&mut self, meta: SaveMeta, caches: SaveCaches) -> SavePayload {
-        let mut doc = self.session.document().clone();
-        // Merge regen-derived outputs so a reopen shows the tree before regen.
-        doc.bodies = self.saved_bodies();
-        doc.elements = self.regen.elements.clone();
-        doc.repair = self.regen.repair.clone();
+        let mut doc = self.document_for_persistence();
         // `none()` (the autosave lane) writes NO cache section at all; any other
         // lane writes the preview it has, fresh capture or carried forward.
         let persists = caches.persists_caches();
@@ -5403,6 +5411,7 @@ impl DocumentRuntime {
             self.validate_import_evidence(item)?;
         }
         let minted = mint_element_ids(evidence);
+        self.ensure_promotions_not_quarantined(&minted)?;
         self.validate_minted_import_identities(&minted)?;
         let bindings = minted
             .iter()
@@ -5568,6 +5577,10 @@ impl DocumentRuntime {
         let mut local: Vec<(usize, RefResolution)> = Vec::new();
         let mut forwarded: Vec<(usize, ResolveRef)> = Vec::new();
         for (i, mut r) in req.refs.into_iter().enumerate() {
+            if let Some(answer) = self.quarantined_resolution(snapshot, &r)? {
+                local.push((i, answer));
+                continue;
+            }
             // WP-I: the two op-built `PlaceComponent` items are answered LOCALLY
             // and UNCONDITIONALLY — never forwarded, hydrated ref or not.
             // Forwarding one is not merely wasteful, it is WRONG: the ladder
@@ -5740,6 +5753,8 @@ impl DocumentRuntime {
         if self.instance != result.instance
             || self.head_snapshot_id() != Some(result.snapshot)
             || self.head_epoch != result.epoch
+            || self.fencing.get().1 != result.epoch
+            || self.engine.current_epoch() != result.epoch
         {
             self.rebind_attempted = false;
             return (0, 0);
@@ -5822,11 +5837,23 @@ impl DocumentRuntime {
         snapshot: SnapshotId,
         pending: &[(ElementId, ElementEntry)],
     ) -> Result<(usize, usize), ()> {
+        Self::rebind_entries_report(engine, snapshot, pending)
+            .await
+            .map(|report| (report.bound, report.unresolved.len()))
+    }
+
+    async fn rebind_entries_report(
+        engine: &Arc<dyn GeometryEngine>,
+        snapshot: SnapshotId,
+        pending: &[(ElementId, ElementEntry)],
+    ) -> Result<RebindReport, ()> {
         let by_entry: std::collections::HashMap<&str, &ElementEntry> = pending
             .iter()
             .map(|(id, entry)| (id.as_str(), entry))
             .collect();
-        if by_entry.len() != pending.len() {
+        if by_entry.len() != pending.len()
+            || pending.iter().any(|(_, entry)| entry.is_quarantined())
+        {
             return Err(());
         }
         // The ref is authored exactly like a stored op input: last-known identity in
@@ -5899,7 +5926,7 @@ impl DocumentRuntime {
             return Err(());
         }
         let mut bindings = Vec::new();
-        let mut unresolved = 0usize;
+        let mut unresolved = Vec::new();
         let mut unchanged = 0usize;
         for res in &resolutions {
             let Some(entry) = by_entry.get(res.ref_id.as_str()) else {
@@ -5923,7 +5950,7 @@ impl DocumentRuntime {
                 ResolveOutcome::Unchanged {
                     element_id: Some(id),
                 } if id.as_str() == res.ref_id => unchanged += 1,
-                _ => unresolved += 1,
+                _ => unresolved.push(res.clone()),
             }
         }
         let bound = bindings.len() + unchanged;
@@ -5943,15 +5970,15 @@ impl DocumentRuntime {
                 return Err(());
             }
         }
-        if unresolved > 0 {
+        if !unresolved.is_empty() {
             tracing::info!(
                 target: "onecad_lib::document_runtime",
                 bound,
-                unresolved,
+                unresolved = unresolved.len(),
                 "rebind: some persisted element ids did not resolve confidently and stay unbound"
             );
         }
-        Ok((bound, unresolved))
+        Ok(RebindReport { bound, unresolved })
     }
 
     fn rebind_response_matches(
@@ -5964,7 +5991,12 @@ impl DocumentRuntime {
             return false;
         }
         if let ResolveOutcome::NeedsRepair(item) = &resolution.outcome {
-            if item.ref_id != resolution.ref_id {
+            if item.ref_id != resolution.ref_id
+                || item
+                    .element_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() != resolution.ref_id)
+            {
                 return false;
             }
         }
@@ -6892,7 +6924,7 @@ fn drive_clear(
         return Outcome::Cancelled;
     }
     scratch.bodies = BodyRegistry::new();
-    scratch.elements = onecad_core::document::element_index::ElementIndex::new();
+    scratch.elements.retain_quarantined();
     scratch.repair.clear();
     let step_states: Vec<(usize, StepState)> = (0..target)
         .filter_map(|s| scratch.timeline.state(s).map(|st| (s, st.clone())))
@@ -7052,14 +7084,21 @@ impl PersistedRebind {
     /// Runs the resolution/binding worker round trips without a document guard.
     pub(crate) async fn drive(self) -> PersistedRebindResult {
         let pending = self.pending.len();
-        let counts =
-            DocumentRuntime::rebind_entries_with(&self.engine, self.snapshot, &self.pending).await;
+        let report =
+            DocumentRuntime::rebind_entries_report(&self.engine, self.snapshot, &self.pending)
+                .await;
+        let counts = report
+            .as_ref()
+            .map(|report| (report.bound, report.unresolved.len()))
+            .map_err(|_| ());
+        let unresolved = report.map(|report| report.unresolved).unwrap_or_default();
         PersistedRebindResult {
             instance: self.instance,
             snapshot: self.snapshot,
             epoch: self.epoch,
             pending,
             counts,
+            unresolved,
         }
     }
 }
@@ -7071,6 +7110,12 @@ pub(crate) struct PersistedRebindResult {
     epoch: WorkerEpoch,
     pending: usize,
     counts: Result<(usize, usize), ()>,
+    unresolved: Vec<RefResolution>,
+}
+
+struct RebindReport {
+    bound: usize,
+    unresolved: Vec<RefResolution>,
 }
 
 /// One sketch's projection re-check request (WP-P B4).
@@ -7715,6 +7760,7 @@ mod face_entry;
 mod gestures;
 mod import_identity;
 pub mod joint_execution;
+mod quarantined_elements;
 mod staged_elements;
 mod timeline_states;
 pub use face_entry::FaceEntryTicket;

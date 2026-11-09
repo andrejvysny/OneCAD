@@ -78,6 +78,7 @@ impl DocumentRuntime {
         }
         self.validate_import_evidence(&evidence)?;
         let mut minted = mint_element_ids(vec![evidence]);
+        self.ensure_promotions_not_quarantined(&minted)?;
         self.validate_minted_import_identities(&minted)?;
         minted.pop().ok_or_else(face_entry_stale)
     }
@@ -90,6 +91,9 @@ impl DocumentRuntime {
     ) -> Result<CommandOutcome, crate::error::ApiError> {
         if !self.face_entry_is_current(ticket) {
             return Err(face_entry_stale().into());
+        }
+        if let Some((id, _)) = &identity {
+            self.ensure_element_not_quarantined(id)?;
         }
         let staged = identity.as_ref().and_then(|(id, evidence)| {
             if self.regen.elements.contains(id) {

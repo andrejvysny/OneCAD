@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[path = "desktop_document_io_tests.rs"]
 mod desktop_tests;
 
+#[path = "document_io_tests/deleted_source_repair.rs"]
+mod deleted_source_repair;
+
 #[derive(Default)]
 struct Events {
     mailbox: Arc<EventMailbox>,

@@ -2282,7 +2282,12 @@ fn session_snapshot_after_scripted_sequence() {
     })
     .unwrap();
 
-    insta::assert_json_snapshot!("session_after_sequence_schema4", sess.document());
+    let frozen = include_str!("snapshots/edit_session__session_after_sequence_schema4.snap");
+    let mut expected: serde_json::Value =
+        serde_json::from_str(frozen.splitn(3, "---\n").nth(2).unwrap()).unwrap();
+    assert_eq!(expected["schemaVersion"], 4);
+    expected["schemaVersion"] = serde_json::Value::from(5);
+    assert_eq!(serde_json::to_value(sess.document()).unwrap(), expected);
 }
 
 #[test]

@@ -19,6 +19,9 @@ use super::{IoError, IoResult};
 /// [`IoError::Corrupt`] if serialization fails (should not happen for a valid
 /// in-memory document; surfaced rather than panicking).
 pub fn serialize_document(document: &Document) -> IoResult<Vec<u8>> {
+    document
+        .validate_topology_binding_states()
+        .map_err(IoError::Corrupt)?;
     serde_json::to_vec_pretty(document)
         .map_err(|e| IoError::Corrupt(format!("document.json serialize: {e}")))
 }
@@ -40,6 +43,12 @@ pub fn parse_value(bytes: &[u8]) -> IoResult<Value> {
 /// # Errors
 /// [`IoError::Corrupt`] if the value does not match the document schema.
 pub fn document_from_value(value: Value) -> IoResult<Document> {
+    // A later repair must not trust absence of fields an earlier load discarded.
+    let source = value
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .is_some_and(|version| version >= 5)
+        .then(|| value.clone());
     if value.get("rootDefinition").is_some() {
         for key in [
             "variables",
@@ -59,11 +68,22 @@ pub fn document_from_value(value: Value) -> IoResult<Document> {
             }
         }
     }
-    if value.get("schemaVersion").and_then(Value::as_u64) == Some(4) {
+    if value
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .is_some_and(|version| {
+            version >= 4 && version <= u64::from(crate::document::DOCUMENT_SCHEMA_VERSION)
+        })
+    {
         super::import_identity::validate(&value).map_err(IoError::Corrupt)?;
     }
     let document: Document = serde_json::from_value(value)
         .map_err(|e| IoError::Corrupt(format!("document.json decode: {e}")))?;
+    if let Some(source) = source {
+        let decoded = serde_json::to_value(&document)
+            .map_err(|error| IoError::Corrupt(format!("document field validation: {error}")))?;
+        super::preserved_fields::validate(&source, &decoded).map_err(IoError::Corrupt)?;
+    }
     for sketch in document.sketches.values().chain(
         document
             .definitions

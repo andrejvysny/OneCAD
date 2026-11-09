@@ -374,7 +374,13 @@ impl Scratch {
                 }
             }
             for id in buf.removed {
-                self.elements.remove(&id);
+                if !self
+                    .elements
+                    .get(&id)
+                    .is_some_and(ElementEntry::is_quarantined)
+                {
+                    self.elements.remove(&id);
+                }
             }
         }
     }
@@ -455,6 +461,11 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         cancel: &CancelToken,
         publisher: &SnapshotPublisher,
     ) -> Outcome {
+        if request.base_checkpoint.is_some() && session.elements.has_quarantined() {
+            return Outcome::EngineFailed(EngineError::Protocol {
+                message: "quarantined identities require replay from zero".into(),
+            });
+        }
         if self.require_checkpoint && request.base_checkpoint.is_none() {
             return Outcome::EngineFailed(EngineError::Protocol {
                 message: "checkpoint required but not selected".into(),
@@ -618,6 +629,21 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             };
             match event {
                 Some(PlanEvent::Step(e)) => {
+                    if e.element_map_delta
+                        .added
+                        .iter()
+                        .chain(&e.element_map_delta.relabeled)
+                        .any(|entry| {
+                            scratch
+                                .elements
+                                .get(&entry.element_id)
+                                .is_some_and(ElementEntry::is_quarantined)
+                        })
+                    {
+                        break Terminal::Failed(EngineError::Protocol {
+                            message: "worker attempted to bind a quarantined identity".into(),
+                        });
+                    }
                     saw_step = true;
                     streamed_steps.push(e.step_index);
                     let by = step_records

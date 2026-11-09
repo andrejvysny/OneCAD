@@ -185,7 +185,12 @@ fn insta_snapshot_container_shape() {
     for entry in manifest["entries"].as_array_mut().unwrap() {
         entry["sha256"] = Value::from("[sha256]");
     }
-    insta::assert_json_snapshot!("container_manifest_shape_schema4", manifest);
+    let frozen = include_str!("snapshots/container_io__container_manifest_shape_schema4.snap");
+    let mut expected: Value =
+        serde_json::from_str(frozen.splitn(3, "---\n").nth(2).unwrap()).unwrap();
+    assert_eq!(expected["globalSchemaVersion"], 4);
+    expected["globalSchemaVersion"] = Value::from(5);
+    assert_eq!(manifest, expected);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -460,9 +465,9 @@ fn schema_two_container_migrates_without_rewriting_source_or_extensions() {
             .iter()
             .map(|step| (step.from_version, step.to_version))
             .collect::<Vec<_>>(),
-        vec![(2, 3), (3, 4)]
+        vec![(2, 3), (3, 4), (4, 5)]
     );
-    assert_eq!(loaded.document().schema_version, 4);
+    assert_eq!(loaded.document().schema_version, 5);
     assert_eq!(
         loaded.document().id.to_string(),
         document["id"].as_str().unwrap()
@@ -524,10 +529,10 @@ fn frozen_schema_three_container_migrates_without_changing_model_or_source() {
             .iter()
             .map(|step| (step.from_version, step.to_version))
             .collect::<Vec<_>>(),
-        vec![(3, 4)]
+        vec![(3, 4), (4, 5)]
     );
     let mut expected = original;
-    expected["schemaVersion"] = Value::from(4);
+    expected["schemaVersion"] = Value::from(5);
     // Existing open policy clears legacy non-normative region placeholders;
     // no other source field or identity may change.
     let mut normalized_regions = 0;

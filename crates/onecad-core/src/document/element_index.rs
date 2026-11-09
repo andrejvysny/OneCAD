@@ -25,6 +25,19 @@ use serde::{Deserialize, Serialize};
 use crate::document::refs::{AnchorIntent, ElementKind};
 use crate::ids::{BodyId, ElementId};
 
+/// A reserved identity remains non-binding even after its last consumer is repaired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ElementBindingState {
+    Quarantined,
+}
+
+fn deserialize_binding_state<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ElementBindingState>, D::Error> {
+    ElementBindingState::deserialize(deserializer).map(Some)
+}
+
 /// The current partition membership of a minted element, plus the durable
 /// evidence needed to find that element again in a FRESH session (DI-4).
 ///
@@ -46,6 +59,14 @@ use crate::ids::{BodyId, ElementId};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ElementEntry {
+    /// Critical schema-5 state; absence retains ordinary legacy binding behavior.
+    #[serde(
+        rename = "topologyBindingState",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_binding_state"
+    )]
+    pub binding_state: Option<ElementBindingState>,
     /// A critical, source-addressed imported-face certificate.
     #[serde(
         default,
@@ -73,6 +94,7 @@ impl ElementEntry {
     #[must_use]
     pub fn new(body: BodyId, kind: ElementKind) -> Self {
         Self {
+            binding_state: None,
             import_source_identity: None,
             body,
             kind,
@@ -107,6 +129,15 @@ impl ElementEntry {
     /// Whether this entry can be re-bound in a fresh session at all.
     #[must_use]
     pub fn has_rebind_evidence(&self) -> bool {
+        !self.is_quarantined() && self.has_stored_evidence()
+    }
+
+    #[must_use]
+    pub fn is_quarantined(&self) -> bool {
+        self.binding_state == Some(ElementBindingState::Quarantined)
+    }
+
+    fn has_stored_evidence(&self) -> bool {
         self.anchor.is_some() || self.descriptor.is_some() || self.import_source_identity.is_some()
     }
 }
@@ -124,6 +155,32 @@ pub struct ElementIndex {
 }
 
 impl ElementIndex {
+    #[must_use]
+    pub fn has_quarantined(&self) -> bool {
+        self.map.values().any(ElementEntry::is_quarantined)
+    }
+
+    /// Clearing geometry must not free identities reserved against future reuse.
+    pub fn retain_quarantined(&mut self) {
+        self.map.retain(|_, entry| entry.is_quarantined());
+    }
+
+    /// Rejects critical state that an older schema could silently reinterpret.
+    pub fn validate_binding_states(&self, schema: u32) -> Result<(), String> {
+        for (_, entry) in self.iter().filter(|(_, entry)| entry.is_quarantined()) {
+            if schema < 5 {
+                return Err("topologyBindingState requires document schema 5".into());
+            }
+            if entry.kind != ElementKind::Face
+                || entry.import_source_identity.is_some()
+                || !entry.has_stored_evidence()
+            {
+                return Err("quarantined identity must retain uncertified face evidence".into());
+            }
+        }
+        Ok(())
+    }
+
     /// An empty index.
     #[must_use]
     pub fn new() -> Self {

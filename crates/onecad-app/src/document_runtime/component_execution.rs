@@ -3,6 +3,7 @@ use super::*;
 use onecad_core::document::component::{ComponentDef, ComponentDefId, OccurrencePath};
 use onecad_protocol::mesh::{MeshLimits, MeshView};
 mod preflight;
+mod quarantine;
 mod translation;
 
 const MAX_TRIANGLES: usize = 500_000;
@@ -86,6 +87,7 @@ pub(crate) struct ComponentReplayInput {
     pub revision_fence: Arc<AtomicU64>,
     pub read_only: bool,
     pub archive_budget: crate::resource_admission::ArchiveBudget,
+    quarantine: Option<quarantine::QuarantineInput>,
     pub(crate) _retention: crate::resource_admission::Retention,
 }
 
@@ -102,6 +104,7 @@ pub(crate) struct ComponentReplayOutput {
     pub minted: bool,
     replay_context: [u8; 32],
     identity_signature: Option<BTreeMap<BodyId, Vec<u8>>>,
+    quarantine: Option<quarantine::QuarantineCommit>,
     pub(crate) _retention: crate::resource_admission::Retention,
 }
 
@@ -152,6 +155,12 @@ impl DocumentRuntime {
             .archive_budget
             .reserve(retained, crate::resource_admission::ArchiveUse::Scratch)
             .map_err(ApiError::Io)?;
+        let quarantine = self.prepare_component_quarantine(id)?;
+        let translation_prefix = if def.elements.has_quarantined() || quarantine.is_some() {
+            None
+        } else {
+            self.component_translation_prefix(id, def)
+        };
         Ok(ComponentReplayInput {
             id,
             namespace: namespace(doc.id, id),
@@ -159,12 +168,13 @@ impl DocumentRuntime {
             revision: self.revision(),
             source_fingerprint: fingerprint(def)?,
             definition: def.clone(),
-            translation_prefix: self.component_translation_prefix(id, def),
+            translation_prefix,
             settings: doc.settings.clone(),
             imports: self.imports.clone(),
             revision_fence: self.fencing.revision.clone(),
             read_only: self.read_only,
             archive_budget: self.archive_budget.clone(),
+            quarantine,
             _retention: retention,
         })
     }
@@ -197,6 +207,9 @@ impl DocumentRuntime {
             ));
         }
         self.check_component_budget(output.id, output.budget)?;
+        if let Some(quarantine) = &output.quarantine {
+            self.check_quarantine_commit(quarantine)?;
+        }
         let generation = self
             .component_generation
             .checked_add(1)
@@ -216,14 +229,8 @@ impl DocumentRuntime {
                 ));
             }
         }
-        if !self
-            .session
-            .adopt_component_replay(output.id, output.definition)
-        {
-            return Err(ApiError::InvalidCommand(
-                "component definition was removed".into(),
-            ));
-        }
+        self.session
+            .adopt_component_replay(output.id, output.definition)?;
         if persisted_changed {
             self.persisted_generation += 1;
             self.dirty = true;
@@ -350,7 +357,9 @@ impl DocumentRuntime {
             .definitions
             .get(&id)
             .and_then(|definition| definition.elements.get(&element_id))
-            .filter(|entry| entry.body == body && entry.kind == ElementKind::Face)
+            .filter(|entry| {
+                entry.body == body && entry.kind == ElementKind::Face && !entry.is_quarantined()
+            })
             .ok_or_else(|| {
                 ApiError::UnresolvedTopology("joint face identity is unavailable".into())
             })?;

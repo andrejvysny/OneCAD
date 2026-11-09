@@ -1,5 +1,6 @@
 //! Isolated component replay and checked mesh verification.
 use super::*;
+mod promotion;
 
 struct AbortReplayTask(tokio::task::AbortHandle);
 impl Drop for AbortReplayTask {
@@ -43,7 +44,7 @@ impl ComponentReplayInput {
     }
 
     async fn drive_inner(
-        self,
+        mut self,
         worker: crate::worker::WorkerManager,
         epoch: WorkerEpoch,
         promote: bool,
@@ -127,21 +128,15 @@ impl ComponentReplayInput {
                 "component worker epoch changed during replay".into(),
             ));
         }
-        if working.has_unbound_persisted_elements() {
-            let (_, unresolved) = working.rebind_persisted_elements().await;
-            if unresolved != 0 || working.has_unbound_persisted_elements() {
-                return Err(ApiError::UnresolvedTopology(
-                    "component topology identities could not be rebound".into(),
-                ));
-            }
-        }
+        let quarantine = self.rebind_component(&mut working).await?;
         let (meshes, _) = collect_fresh_meshes(&working).await?;
         let snapshot = working
             .latest_snapshot
             .as_ref()
             .map_or(SnapshotId(0), |s| s.id);
         let minted = if promote {
-            promote_anchored(&mut working, snapshot, &meshes, self.read_only).await?
+            promotion::promote_anchored(&mut working, &worker, snapshot, &meshes, self.read_only)
+                .await?
         } else {
             false
         };
@@ -186,11 +181,63 @@ impl ComponentReplayInput {
             meshes,
             budget,
             snapshot,
-            minted: minted || translated,
+            minted: minted || translated || quarantine.is_some(),
             replay_context,
             identity_signature,
+            quarantine,
             _retention: self._retention,
         })
+    }
+
+    async fn rebind_component(
+        &mut self,
+        working: &mut DocumentRuntime,
+    ) -> Result<Option<quarantine::QuarantineCommit>, ApiError> {
+        if !working.has_unbound_persisted_elements() {
+            return Ok(None);
+        }
+        let Some(ticket) = working.prepare_persisted_rebind() else {
+            // Whole-body deletion retains ordinary intent for Undo. It cannot
+            // bind to a surviving partition and is not a face-quarantine answer.
+            if working.regen.elements.iter().all(|(_, entry)| {
+                !entry.has_rebind_evidence() || !working.regen.bodies.contains(entry.body)
+            }) {
+                return Ok(None);
+            }
+            return Err(ApiError::UnresolvedTopology(
+                "missing component rebind head".into(),
+            ));
+        };
+        let mut result = ticket.drive().await;
+        let expected = result
+            .counts
+            .map_err(|()| ApiError::UnresolvedTopology("component rebind failed".into()))?;
+        let rows = std::mem::take(&mut result.unresolved);
+        if working.adopt_persisted_rebind(result) != expected {
+            return Err(ApiError::StalePreview(
+                "component rebind head changed".into(),
+            ));
+        }
+        let proof = if rows.is_empty() {
+            None
+        } else {
+            Some(
+                self.quarantine
+                    .take()
+                    .ok_or_else(|| {
+                        ApiError::UnresolvedTopology(
+                            "component topology identities could not be rebound".into(),
+                        )
+                    })?
+                    .apply(self.id, working, &rows)?,
+            )
+        };
+        if working.has_unbound_persisted_elements() {
+            return Err(ApiError::UnresolvedTopology(
+                "component topology identities could not be rebound".into(),
+            ));
+        }
+        Ok(proof)
     }
 
     fn working_runtime(
@@ -207,7 +254,15 @@ impl ComponentReplayInput {
         document.datum_planes = def.datum_planes.clone();
         document.timeline = def.timeline.clone();
         document.bodies = def.bodies.clone();
-        document.elements = def.elements.clone();
+        // This temporary root document contains geometry inputs only. Durable
+        // reservations stay in the owned definition and the guarded regen mirror.
+        for (id, entry) in def
+            .elements
+            .iter()
+            .filter(|(_, entry)| !entry.is_quarantined())
+        {
+            document.elements.insert(id.clone(), entry.clone());
+        }
         document.repair = def.repair.clone();
         document.named_selections = def.named_selections.clone();
         let engine = Arc::new(worker);
@@ -224,6 +279,7 @@ impl ComponentReplayInput {
             revision: self.revision_fence.clone(),
             epoch: AtomicU64::new(epoch.0),
         });
+        runtime.regen.elements = def.elements.clone();
         for (sha, blob) in &self.imports {
             runtime
                 .import_workspace
@@ -251,95 +307,11 @@ pub(super) async fn collect_fresh_meshes(
                 .map_err(|e| ApiError::Worker(e.to_string()))?;
             budget.add(mesh_budget(&bytes)?);
             budget.validate()?;
+            runtime.reject_quarantined_mesh(&bytes)?;
             meshes.insert(body.body, Arc::new(bytes));
         }
     }
     Ok((meshes, budget))
-}
-
-fn anchor(point: [f64; 3]) -> Result<AnchorIntent, ApiError> {
-    Ok(AnchorIntent {
-        world_point: Vec3::try_from(point).map_err(|e| ApiError::InvalidCommand(e.into()))?,
-        surface_uv: None,
-        local_frame: None,
-        adjacency_hint: None,
-        extra: Default::default(),
-    })
-}
-
-fn sample_face(mesh: &MeshView<'_>, index: usize) -> Option<[f64; 3]> {
-    let range = mesh.face_range(index)?;
-    let mut best = None;
-    for triangle in range.first..range.first.checked_add(range.count)? {
-        let tri = mesh.triangle(triangle as usize)?;
-        let a = mesh.position(tri[0] as usize)?.map(f64::from);
-        let b = mesh.position(tri[1] as usize)?.map(f64::from);
-        let c = mesh.position(tri[2] as usize)?.map(f64::from);
-        let u = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
-        let v = std::array::from_fn::<_, 3, _>(|i| c[i] - a[i]);
-        let cross = [
-            u[1] * v[2] - u[2] * v[1],
-            u[2] * v[0] - u[0] * v[2],
-            u[0] * v[1] - u[1] * v[0],
-        ];
-        let area2 = cross.into_iter().map(|x| x * x).sum::<f64>();
-        if area2.is_finite() && area2 > 0.0 && best.as_ref().is_none_or(|(old, _)| area2 > *old) {
-            best = Some((area2, std::array::from_fn(|i| (a[i] + b[i] + c[i]) / 3.0)));
-        }
-    }
-    best.map(|(_, point)| point)
-}
-
-async fn promote_anchored(
-    runtime: &mut DocumentRuntime,
-    snapshot: SnapshotId,
-    meshes: &BTreeMap<BodyId, Arc<Vec<u8>>>,
-    read_only: bool,
-) -> Result<bool, ApiError> {
-    let mut rows = Vec::new();
-    for (body, bytes) in meshes {
-        let mesh = MeshView::decode(bytes, MeshLimits::default())
-            .map_err(|e| ApiError::InvalidCommand(e.to_string()))?;
-        let mut picks = Vec::new();
-        for index in 0..mesh.header().face_count as usize {
-            let key = mesh
-                .face_id(index)
-                .ok_or_else(|| ApiError::InvalidCommand("missing face identity".into()))?;
-            if TopoKey::new(key).is_valid() {
-                picks.push((
-                    TopoKey::new(key),
-                    Some(anchor(sample_face(&mesh, index).ok_or_else(|| {
-                        ApiError::InvalidCommand("missing face sample".into())
-                    })?)?),
-                ));
-            } else if runtime.regen.elements.body_of(&ElementId::new(key)) != Some(*body) {
-                return Err(ApiError::InvalidCommand(
-                    "component face identity has no matching evidence".into(),
-                ));
-            }
-        }
-        rows.push((*body, picks));
-    }
-    let count = rows.iter().map(|(_, p)| p.len()).sum::<usize>();
-    if count != 0 && read_only {
-        return Err(ApiError::InvalidCommand(
-            "read-only component cannot persist topology identities".into(),
-        ));
-    }
-    if runtime.regen.elements.len().saturating_add(count) > 4096 {
-        return Err(ApiError::InvalidCommand(
-            "component topology budget exceeded".into(),
-        ));
-    }
-    for (body, picks) in rows {
-        for chunk in picks.chunks(128) {
-            runtime
-                .promote_selection(snapshot, body, chunk.to_vec())
-                .await
-                .map_err(|e| ApiError::Worker(e.to_string()))?;
-        }
-    }
-    Ok(count != 0)
 }
 
 impl ComponentReplayOutput {

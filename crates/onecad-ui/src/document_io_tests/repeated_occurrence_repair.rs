@@ -279,14 +279,23 @@ async fn repeated_occurrence_source_repair_rejects_sibling_and_reopens() {
         .unwrap()
         .clone();
     assert_eq!(fresh_a.selection.scene, accepted_scene.scene.identity());
-    let refused_capture = command(&mut backend, &session, source_edit(true))
+    let changed_capture = command(&mut backend, &session, source_edit(true))
         .await
         .unwrap();
-    assert_eq!(
-        refused_capture.capture_error.as_deref(),
-        Some("unresolved topology: component topology identities could not be rebound")
+    assert!(changed_capture.capture_error.is_none());
+    let changed_scene = backend
+        .shared
+        .display
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert_ne!(
+        changed_scene.scene.identity(),
+        accepted_scene.scene.identity()
     );
-    assert!(backend.shared.display.lock().unwrap().is_none());
+    assert!(!changed_scene.scene.bodies().is_empty());
     let damaged = api::get_assembly_projection(&backend.state, &session)
         .await
         .unwrap();

@@ -60,6 +60,76 @@ fn count(counter: &mut Counter, value: &impl serde::Serialize) -> Result<(), Api
         .map_err(|e| ApiError::InvalidCommand(format!("component replay preflight: {e}")))
 }
 
+pub(super) fn runtime_clone(runtime: &super::DocumentRuntime) -> Result<usize, ApiError> {
+    let doc = runtime.session.document();
+    let mut c = Counter::default();
+    count(&mut c, &doc.root_definition_name)?;
+    count(&mut c, &doc.settings)?;
+    count(&mut c, &doc.variables)?;
+    count_sketches(&mut c, doc.sketches.values())?;
+    count_records(&mut c, doc.timeline.records())?;
+    count(&mut c, &doc.sketch_visibility)?;
+    count(&mut c, &doc.datum_planes)?;
+    count(&mut c, &doc.bodies)?;
+    count(&mut c, &runtime.regen.bodies)?;
+    count(&mut c, &doc.elements)?;
+    count(&mut c, &runtime.regen.elements)?;
+    count(&mut c, &doc.repair)?;
+    count(&mut c, &runtime.regen.repair)?;
+    count(&mut c, &doc.named_selections)?;
+    count(&mut c, &doc.root_definition_extra)?;
+    count(&mut c, &doc.extra)?;
+    count(&mut c, &doc.modules)?;
+    count(&mut c, &doc.assembly)?;
+    let mut estimate = c.bytes.saturating_mul(32);
+    for definition in doc.definitions.values() {
+        estimate = estimate
+            .checked_add(component_clone(
+                definition,
+                &doc.settings,
+                &ImportBlobs::new(),
+            )?)
+            .filter(|size| *size <= MAX_ESTIMATED_CLONE)
+            .ok_or_else(|| {
+                ApiError::InvalidCommand("quarantine document clone exceeds admission".into())
+            })?;
+    }
+    Ok(estimate)
+}
+
+fn count_sketches<'a>(
+    c: &mut Counter,
+    sketches: impl Iterator<Item = &'a onecad_core::sketch::Sketch>,
+) -> Result<(), ApiError> {
+    for sketch in sketches {
+        count(c, &sketch.name)?;
+        count(c, &sketch.plane)?;
+        count(c, &sketch.attachment)?;
+        count(c, &sketch.regions)?;
+        count(c, &sketch.projections)?;
+        count(c, &sketch.resolved_plane)?;
+        count(c, &sketch.extra)?;
+        count(c, &sketch.entities())?;
+        count(c, &sketch.constraints())?;
+    }
+    Ok(())
+}
+
+fn count_records(
+    c: &mut Counter,
+    records: &[onecad_core::document::record::OperationRecord],
+) -> Result<(), ApiError> {
+    for record in records {
+        count(c, &record.name)?;
+        count(c, &record.op)?;
+        count(c, &record.inputs)?;
+        count(c, &record.outputs)?;
+        count(c, &record.determinism)?;
+        count(c, &record.extra)?;
+    }
+    Ok(())
+}
+
 pub(super) fn component_clone(
     def: &ComponentDef,
     settings: &DocumentSettings,

@@ -30,7 +30,7 @@ pub const CONTAINER_VERSION: u32 = 2;
 
 /// The global document-schema version this build authors. Older values trigger a
 /// migration chain; newer values open read-only (see [`super::migrate`]).
-pub const GLOBAL_SCHEMA_VERSION: u32 = 4;
+pub const GLOBAL_SCHEMA_VERSION: u32 = 5;
 
 /// The authoritative section path. A hash mismatch on it is [`IoError::Corrupt`]
 /// (the payload is untrustworthy).

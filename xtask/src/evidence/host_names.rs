@@ -165,6 +165,7 @@ pub(super) const SERVICE_TESTS: &[&str] = &[
     "document_services::tests::document_io_tests::native_assembly_controls_author_solve_undo_save_reopen",
     "document_services::tests::document_io_tests::repeated_occurrence_repair::repeated_occurrence_source_repair_rejects_sibling_and_reopens",
     "document_services::tests::document_io_tests::deleted_body_repair::deleted_body_repair_rejects_sibling_and_reopens",
+    "document_services::tests::document_io_tests::deleted_source_repair::deleted_source_repair_rejects_sibling_and_reopens",
     "document_services::tests::document_io_tests::native_assembly_capture_save_close_reopen_keeps_occurrences",
     "document_services::tests::home_lifecycle_tests::startup_and_cancelled_failed_file_actions_leave_no_document",
     "document_services::tests::home_lifecycle_tests::explicit_new_establishes_one_empty_unsaved_session_and_failure_preserves_it",
