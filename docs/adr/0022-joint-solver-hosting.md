@@ -13,18 +13,21 @@ needs a solve per frame. ADR-0016 keeps OCCT/PlaneGCS in a sidecar behind
 OCW1, where each request pays IPC and a fenced round trip. PlaneGCS is a 2D
 sketch solver and is not a 3D rigid-body joint solver.
 
-The pure solver, bounded application service, native joint authoring and persistent
-picked-origin bindings are integrated in the quality branch. Imported-reference
-replay, final native qualification and physical-input evidence remain open.
+The pure `crates/onecad-assembly` solver, bounded application service, native
+joint authoring and persistent picked-origin bindings are present in this source
+tree. Imported-reference replay, final native qualification and physical-input
+evidence remain open.
 
 ## Decision
 
 1. **The joint solver is pure Rust in `onecad-assembly`, in the host process.**
-2. **The worker resolves joint origin frames once per regen** (per definition,
-   in its local frame). **Drag solves frames in Rust with no IPC.**
-3. **Algorithm.** Levenberg-Marquardt with a finite-difference Jacobian
-   initially. Numerical rank of the Jacobian reports remaining DOF and
-   redundancy.
+2. **Origin frames are resolved against checked definition-local geometry.**
+   Picked origins can require a transient component-worker replay and are fenced
+   by session, occurrence path and mesh generation. The numerical solve itself
+   runs in Rust off the document lock; this does not establish a no-IPC drag path.
+3. **Algorithm.** The solver uses Levenberg-Marquardt with a finite-difference
+   Jacobian. A grounded-forest certificate or numerical rank reports remaining
+   DOF and redundancy; uncertain outcomes refuse publication.
 4. **Failure is atomic.** A failed or non-converged solve never partially moves
    the assembly; the previous transforms stay.
 5. **Publish is fenced** on runtime, epoch and base hash, like other worker-
@@ -55,14 +58,14 @@ replay, final native qualification and physical-input evidence remain open.
 
 ## Consequences
 
-- Drag latency depends on host CPU only; worker crash or wedge does not stop
-  interactive positioning.
+- Frame acquisition and geometry readiness remain worker-dependent; no
+  end-to-end drag latency or worker-failure independence is claimed.
 - The solver is deterministic Rust, testable without OCCT, but we own
   conditioning, rank decisions and redundancy semantics.
 - Finite-difference Jacobians cost O(variables) residual evaluations per
   iteration; analytic Jacobians may be needed if the target is missed.
-- Joint frames go stale across regen; consumers must re-resolve and re-solve
-  under the fencing in item 5.
+- Definition edits can mark picked-origin bindings `NeedsRepair`; consumers
+  must resolve or explicitly re-pick under the current fencing and ownership.
 - The application captures explicit local joint frames and solves at most 20
   occurrences off the document lock. It accepts grounded acyclic components,
   fences publication by runtime session, persisted generation, accepted snapshot,
@@ -72,9 +75,9 @@ replay, final native qualification and physical-input evidence remain open.
   blocking solver work terminates, even if its caller is cancelled.
 - Rack-and-pinion and other couplings, loops and ungrounded components are
   unsupported. Persistent picked-origin resolution remains under qualification.
-  Rigid, revolute and
-  slider joints support independent drives and limits; reported DOF is the
-  solver's numerical estimate, and uncertain rank refuses publication.
+  Rigid, revolute and slider joints are supported. Revolute and slider joints
+  admit independent drives and limits; rigid joints do not admit drives.
+  Reported DOF is the solver's estimate, and uncertain rank refuses publication.
 - A single 20-occurrence debug-run sample does not qualify the 8 ms p95 target;
   native and iPad timing, full workflow integration and broader numerical
   qualification remain open.
