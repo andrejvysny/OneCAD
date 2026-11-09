@@ -72,3 +72,27 @@ export and after the batch. The manifest records codec, format, solid count,
 byte length, SHA-256, session/revision/worker/base-hash fences and file provenance.
 Hashing uses a fixed 64 KiB buffer. File hashes attest selected file bytes; they
 are not independent attestation of a running process or source equivalence.
+
+## Direct quarter-circle cylinder protectors
+
+`--profile-cutter` keeps the factorized nine-protector flow and replaces only
+its five box-minus-cylinder constructions. The profile frame has local X along
+world +X, local Y equal to axis × X, and normal along the source cylinder axis.
+For each existing negative-side cylinder spec, the code checks the original box
+bounds, cylinder origin, axis and length against this frame using the existing
+`128 * f64::EPSILON * max(|a|, |b|, 1)` replay comparison. It refuses unsupported
+axes, inverted boxes, mismatched bounds and heights below the unchanged 0.3 mm
+radius. Residuals include the binary64 quarter-arc endpoints; no geometry is
+shifted to force equality.
+
+The closed sketch uses one quarter-circle arc and three lines. It describes the
+rectangle of width `r` and height `H` outside the quadrant of a radius-`r`
+circle, extruded along the original cylinder axis through its original length.
+The five source specs select local negative Y for indices 0 and 3, and positive Y
+for 1, 2 and 4. Before each construction, `profile-plans.jsonl` records the
+inputs, residuals and independent analytic volume `(r*H - π*r²/4)*length`.
+`profile-observations.jsonl` records the resulting body ID and public mass query.
+The resulting residual is observational: the public mass query does not expose
+an integration-error estimate. The snapshot-fenced `factor-inputs` exports let
+an independent native diagnostic assess achieved integration error, bounds and
+tolerances; no volume accuracy or source equivalence is asserted here.

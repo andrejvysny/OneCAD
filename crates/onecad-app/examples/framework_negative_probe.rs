@@ -1,5 +1,6 @@
 //! Native negative retention experiment; cold 30-second timeout remains a failure.
 //! Optional `--factor-cutter` constructs the complete nine-protector cutter.
+//! `--profile-cutter` replaces five cylinder complements with native quarter profiles.
 //! This is diagnostic only and does not establish source equivalence.
 #[allow(dead_code)]
 mod framework_negative_probe_support;
@@ -213,6 +214,7 @@ async fn author(
     out: PathBuf,
     input: PathBuf,
     factor_cutter: bool,
+    profile_cutter: bool,
 ) -> Result<Value, String> {
     let query = api::query_mass_properties(
         &h.state,
@@ -230,7 +232,15 @@ async fn author(
     );
     let final_bodies = if factor_cutter {
         Some(
-            framework_negative_probe_support::factor_cutter(&h, original, next, &out, &input).await,
+            framework_negative_probe_support::factor_cutter(
+                &h,
+                original,
+                next,
+                &out,
+                &input,
+                profile_cutter,
+            )
+            .await,
         )
     } else {
         framework_negative_probe_support::apply_negative(&h, original, next, &out).await;
@@ -329,7 +339,7 @@ async fn cleanup(h: &Harness) -> Value {
     };
     json!({"close":format!("{close:?}"),"workerTornDown":torn_down})
 }
-async fn run(input: &Path, out: &Path, factor_cutter: bool) {
+async fn run(input: &Path, out: &Path, factor_cutter: bool, profile_cutter: bool) {
     assert!(
         std::env::vars_os().all(|(key, _)| !key.to_string_lossy().starts_with("ONECAD_FRAMEWORK_")),
         "framework recipe overrides are not allowed"
@@ -366,7 +376,16 @@ async fn run(input: &Path, out: &Path, factor_cutter: bool) {
                 let task_out = out.to_path_buf();
                 let task_input = input.to_path_buf();
                 match tokio::spawn(async move {
-                    author(task_h, original, next, task_out, task_input, factor_cutter).await
+                    author(
+                        task_h,
+                        original,
+                        next,
+                        task_out,
+                        task_input,
+                        factor_cutter,
+                        profile_cutter,
+                    )
+                    .await
                 })
                 .await
                 {
@@ -383,7 +402,7 @@ async fn run(input: &Path, out: &Path, factor_cutter: bool) {
     summary(
         &status,
         &json!({"strictCold":strict,"diagnosticOnly":true,"result":result,
-        "cleanup":cleanup_result,"mode":if factor_cutter {"factor-cutter"} else {"retention"},"eventRecordsDropped":h.events.dropped(),
+        "cleanup":cleanup_result,"mode":if profile_cutter {"profile-cutter"} else if factor_cutter {"factor-cutter"} else {"retention"},"eventRecordsDropped":h.events.dropped(),
         "priorUncachedEditFailure":"/private/tmp/onecad-resume-evidence/framework-native-negative-restricted-v1/status.json","inputSha256After":hash(input),"workerPath":worker,
         "workerSha256After":hash(&worker),"sourceSha256":SOURCE_SHA,"acceptance":false}),
     );
@@ -392,8 +411,8 @@ async fn run(input: &Path, out: &Path, factor_cutter: bool) {
 async fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
     assert!(
-        args.len() == 3 || (args.len() == 4 && args[3] == "--factor-cutter"),
-        "usage: framework_negative_probe INPUT.onecad NEW_OUTPUT_DIR [--factor-cutter]"
+        args.len() == 3 || (args.len() == 4 && (args[3] == "--factor-cutter" || args[3] == "--profile-cutter")),
+        "usage: framework_negative_probe INPUT.onecad NEW_OUTPUT_DIR [--factor-cutter|--profile-cutter]"
     );
     let input = PathBuf::from(&args[1]);
     let out = PathBuf::from(&args[2]);
@@ -404,6 +423,7 @@ async fn main() -> std::process::ExitCode {
     std::env::set_var("ONECAD_LIBRARY_ROOT", out.join("library"));
     std::env::set_var("ONECAD_LOG_DIR", out.join("logs"));
     let _guard = onecad_app::logging::init().expect("diagnostic logs");
-    run(&input, &out, args.len() == 4).await;
+    let profile_cutter = args.len() == 4 && args[3] == "--profile-cutter";
+    run(&input, &out, args.len() == 4, profile_cutter).await;
     std::process::ExitCode::FAILURE
 }

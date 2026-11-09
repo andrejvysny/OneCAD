@@ -3,6 +3,7 @@ mod factor_capture;
 mod geometry;
 mod negative;
 mod pipes;
+mod profile_cylinders;
 mod solids;
 
 use crate::host::Harness;
@@ -343,12 +344,18 @@ pub async fn factor_cutter(
     next: u128,
     out: &std::path::Path,
     input: &std::path::Path,
+    profile_cutter: bool,
 ) -> Vec<BodyId> {
     let mut builder = Builder::new(h, next);
     let (sharp, bounds) = negative::sharp(&mut builder).await;
     let mut protections = pipes::build_negative_nine(&mut builder).await;
     for index in 0..7 {
-        protections.push(negative::protection(&mut builder, bounds, index).await);
+        let protection = if profile_cutter && index < 5 {
+            profile_cylinders::build(&mut builder, bounds, index, out).await
+        } else {
+            negative::protection(&mut builder, bounds, index).await
+        };
+        protections.push(protection);
     }
     assert_eq!(protections.len(), 9);
     assert_eq!(

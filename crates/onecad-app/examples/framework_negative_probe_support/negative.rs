@@ -21,7 +21,7 @@ pub async fn sharp(b: &mut Builder<'_>) -> (BodyId, Bounds) {
     (target, source_bounds())
 }
 
-fn source_bounds() -> Bounds {
+pub(super) fn source_bounds() -> Bounds {
     let p = geometry::source_planes();
     let critical = geometry::triple_intersection(p[&65], p[&41], p[&72]);
     assert!(critical[0] < -13.2 && critical[0] > -16.);
@@ -52,9 +52,9 @@ fn source_bounds() -> Bounds {
     (lo.map(|v| v - diagonal), hi.map(|v| v + diagonal))
 }
 
-type CylinderSpec = ([f64; 3], [f64; 3], [f64; 3], [f64; 3], f64);
+pub(super) type CylinderSpec = ([f64; 3], [f64; 3], [f64; 3], [f64; 3], f64);
 
-fn spec(bounds: Bounds, index: usize) -> CylinderSpec {
+pub(super) fn spec(bounds: Bounds, index: usize) -> CylinderSpec {
     let (lo, hi) = bounds;
     // Source face 64 gives y1; faces 56, 62, 68, 69 and 70 give the axes.
     let (y0, y1, ys) = (28.07688212905, 31.00916730869, 30.29998857648);
