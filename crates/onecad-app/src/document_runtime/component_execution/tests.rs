@@ -51,6 +51,7 @@ fn output(input: ComponentReplayInput, epoch: WorkerEpoch) -> ComponentReplayOut
         minted: false,
         replay_context: translation::replay_context(&input.settings, &input.imports).unwrap(),
         identity_signature: Some(BTreeMap::new()),
+        quarantine: None,
         _retention: input._retention,
     }
 }

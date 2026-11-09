@@ -29,6 +29,7 @@ pub mod element_index;
 pub mod hole_placement;
 pub mod import_source_identity;
 pub mod modules;
+pub mod quarantine;
 pub mod record;
 pub mod refs;
 pub mod repair;
@@ -54,7 +55,7 @@ use crate::sketch::Sketch;
 
 /// The document-schema version stamped on freshly authored documents (V1/V2 §2.1
 /// `GlobalSchemaVersion`).
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 4;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 5;
 
 /// Document-wide settings (V1/V2 §2.1: units, tolerance policy, OCCT fingerprint).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +151,29 @@ pub struct Document {
 }
 
 impl Document {
+    #[must_use]
+    pub fn has_quarantined_elements(&self) -> bool {
+        self.elements.has_quarantined()
+            || self
+                .definitions
+                .values()
+                .any(|definition| definition.elements.has_quarantined())
+    }
+
+    /// Validates critical identity state before persistence or runtime adoption.
+    pub fn validate_topology_binding_states(&self) -> Result<(), String> {
+        self.elements.validate_binding_states(self.schema_version)?;
+        if self.elements.has_quarantined() {
+            return Err("topologyBindingState is supported only in embedded definitions".into());
+        }
+        for definition in self.definitions.values() {
+            definition
+                .elements
+                .validate_binding_states(self.schema_version)?;
+        }
+        quarantine::validate_consumers(self)
+    }
+
     /// A fresh, empty document with the current schema version.
     #[must_use]
     pub fn new(id: DocumentId) -> Self {
@@ -413,9 +437,13 @@ impl TryFrom<DocumentData> for Document {
         }
         w.assembly.validate(root.id, &w.definitions)?;
         import_source_identity::validate_definition(&mut root)?;
+        root.elements.validate_binding_states(schema_version)?;
         let mut definitions = w.definitions;
         for definition in definitions.values_mut() {
             import_source_identity::validate_definition(definition)?;
+            definition
+                .elements
+                .validate_binding_states(schema_version)?;
         }
         for binding in &w.assembly.joint_bindings {
             if let Some(definition) = definitions.get(&binding.definition) {
@@ -429,7 +457,7 @@ impl TryFrom<DocumentData> for Document {
                     .mark_state(item.step_index, StepState::NeedsRepair);
             }
         }
-        Ok(Self {
+        let document = Self {
             id: w.id,
             schema_version,
             settings: w.settings,
@@ -449,7 +477,9 @@ impl TryFrom<DocumentData> for Document {
             definitions,
             assembly: w.assembly,
             extra: w.extra,
-        })
+        };
+        document.validate_topology_binding_states()?;
+        Ok(document)
     }
 }
 

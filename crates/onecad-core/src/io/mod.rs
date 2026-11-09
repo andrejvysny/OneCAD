@@ -59,6 +59,7 @@ pub mod imports;
 pub mod library;
 pub mod manifest;
 pub mod migrate;
+mod preserved_fields;
 pub mod project_import;
 pub mod recovery;
 pub mod sketch_io;

@@ -146,6 +146,7 @@ impl DocumentRuntime {
         if !self.stage_ticket_is_current(ticket) {
             return Err(stage_stale());
         }
+        self.ensure_element_not_quarantined(id)?;
         let Some(query) = self.read_query.clone() else {
             return Err(stage_refused("element lookup is unavailable"));
         };
@@ -204,6 +205,10 @@ impl DocumentRuntime {
     pub(crate) fn adopt_staged(&mut self, ids: Vec<ElementId>) -> bool {
         let mut changed = false;
         for id in ids {
+            if self.ensure_element_not_quarantined(&id).is_err() {
+                self.staged.remove(&id);
+                continue;
+            }
             if let Some(entry) = self.staged.remove(&id) {
                 changed |= self.regen.elements.get(&id) != Some(&entry);
                 self.regen.elements.insert(id, entry);

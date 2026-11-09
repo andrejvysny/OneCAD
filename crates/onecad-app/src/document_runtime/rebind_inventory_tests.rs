@@ -105,3 +105,24 @@ async fn duplicate_pending_identity_is_refused_without_binding() {
     assert_eq!(result, Err(()));
     assert_eq!(backend.bind_calls.load(Ordering::Relaxed), 0);
 }
+
+#[tokio::test]
+async fn repair_item_cannot_name_another_identity_in_a_valid_batch() {
+    let backend = Arc::new(FakeBackend::new());
+    let mut refusal = resolved("el_second", 5);
+    refusal.outcome = ResolveOutcome::NeedsRepair(
+        serde_json::from_value(serde_json::json!({
+            "stepIndex": 0, "refId": "el_second", "elementId": "el_foreign",
+            "ladderFailed": "descriptor", "reason": "no-candidates", "candidates": []
+        }))
+        .unwrap(),
+    );
+    *backend.resolve_responses.lock().unwrap() = Some(vec![resolved("el_first", 5), refusal]);
+    let engine: Arc<dyn GeometryEngine> = backend.clone();
+    assert!(
+        DocumentRuntime::rebind_entries_with(&engine, SnapshotId(5), &pending())
+            .await
+            .is_err()
+    );
+    assert_eq!(backend.bind_calls.load(Ordering::Relaxed), 0);
+}

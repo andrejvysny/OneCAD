@@ -41,7 +41,7 @@ fn enrich(s: &mut DocumentSession, index: u128) {
         ElementId::new(format!("el_{index}")),
         ElementEntry::new(BodyId(Uuid::from_u128(index + 100)), ElementKind::Face),
     );
-    assert!(s.adopt_component_replay(id, part));
+    s.adopt_component_replay(id, part).unwrap();
 }
 fn has_id(s: &DocumentSession, index: u128) -> bool {
     s.document().definitions[&ComponentDefId(Uuid::from_u128(index))]
@@ -72,7 +72,7 @@ fn changed_inputs_refuse_redo_atomically_and_preserve_new_opaque_state() {
     let mut part = s.document().definitions[&id].clone();
     part.extra
         .insert("opaque".into(), serde_json::json!({"newer":true}));
-    assert!(s.adopt_component_replay(id, part));
+    s.adopt_component_replay(id, part).unwrap();
     let before = serde_json::to_vec(s.document()).unwrap();
     assert!(s
         .redo()
@@ -102,7 +102,7 @@ fn replay_cannot_be_adopted_between_open_transaction_edits() {
     let mut s = session();
     s.begin_transaction("open");
     let part = s.document().definitions[&ComponentDefId(Uuid::from_u128(10))].clone();
-    assert!(!s.adopt_component_replay(part.id, part));
+    assert!(s.adopt_component_replay(part.id, part).is_err());
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn replay_minting_while_undone_refuses_redo_without_duplicate_identity() {
         ElementId::new("el_newer"),
         ElementEntry::new(BodyId(Uuid::from_u128(110)), ElementKind::Face),
     );
-    assert!(s.adopt_component_replay(id, part));
+    s.adopt_component_replay(id, part).unwrap();
     let before = serde_json::to_vec(s.document()).unwrap();
     assert!(s
         .redo()
@@ -140,7 +140,7 @@ fn retained_delta_does_not_clone_unchanged_identity_entries() {
             ElementEntry::new(BodyId(Uuid::from_u128(110)), ElementKind::Face),
         );
     }
-    assert!(s.adopt_component_replay(id, part));
+    s.adopt_component_replay(id, part).unwrap();
     edit(&mut s, 10);
     enrich(&mut s, 10);
     let states = s
@@ -160,7 +160,7 @@ fn changed_body_registry_while_undone_refuses_redo_atomically() {
     let id = ComponentDefId(Uuid::from_u128(10));
     let mut part = s.document().definitions[&id].clone();
     part.bodies = BodyRegistry::new();
-    assert!(s.adopt_component_replay(id, part));
+    s.adopt_component_replay(id, part).unwrap();
     let before = serde_json::to_vec(s.document()).unwrap();
     assert!(s
         .redo()
@@ -221,7 +221,7 @@ fn copied_definition_change_refuses(change_body: bool) {
             ElementEntry::new(BodyId(Uuid::from_u128(110)), ElementKind::Face),
         );
     }
-    assert!(s.adopt_component_replay(source, part));
+    s.adopt_component_replay(source, part).unwrap();
     let before = serde_json::to_vec(s.document()).unwrap();
     assert!(s
         .redo()
@@ -255,7 +255,7 @@ fn appended_translation_with_replay_outputs() -> DocumentSession {
     );
     producer.outputs = vec![body];
     part.timeline = crate::history::Timeline::from_records(vec![producer]);
-    assert!(s.adopt_component_replay(id, part));
+    s.adopt_component_replay(id, part).unwrap();
     let record = OperationRecord::new(
         RecordId(Uuid::from_u128(211)),
         1,
@@ -284,7 +284,7 @@ fn appended_translation_with_replay_outputs() -> DocumentSession {
         ElementId::new("el_output_test"),
         ElementEntry::new(body, ElementKind::Face),
     );
-    assert!(s.adopt_component_replay(id, replay));
+    s.adopt_component_replay(id, replay).unwrap();
     s
 }
 
@@ -308,7 +308,7 @@ fn transform_output_redo_restores_without_an_element_delta() {
     let id = ComponentDefId(Uuid::from_u128(10));
     let mut part = s.document().definitions[&id].clone();
     part.elements = ElementIndex::new();
-    assert!(s.adopt_component_replay(id, part));
+    s.adopt_component_replay(id, part).unwrap();
     let expected = serde_json::to_vec(s.document()).unwrap();
     s.undo().unwrap();
     s.redo().unwrap().unwrap();
@@ -357,7 +357,7 @@ fn transform_output_redo_rejects_changed_owner_and_opaque_prefix() {
             value["bodies"][0]["createdBy"] = serde_json::json!(RecordId(Uuid::from_u128(999)));
             part.bodies = serde_json::from_value(value).unwrap();
         }
-        assert!(s.adopt_component_replay(id, part));
+        s.adopt_component_replay(id, part).unwrap();
         let before = serde_json::to_vec(s.document()).unwrap();
         assert!(s.redo().is_err());
         assert_eq!(serde_json::to_vec(s.document()).unwrap(), before);

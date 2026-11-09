@@ -166,6 +166,41 @@ struct JointBindingMigration;
 
 struct ImportIdentityMigration;
 
+struct ElementBindingMigration;
+
+impl MigrationStep for ElementBindingMigration {
+    fn from_version(&self) -> u32 {
+        4
+    }
+    fn to_version(&self) -> u32 {
+        5
+    }
+    fn confidence(&self) -> MigrationConfidence {
+        MigrationConfidence::High
+    }
+
+    fn migrate_document(&self, document: &mut Value) -> Result<(), String> {
+        let mut pending = vec![&*document];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Object(fields) => {
+                    if fields.contains_key("topologyBindingState") {
+                        return Err("schema 4 extension conflicts with topologyBindingState".into());
+                    }
+                    pending.extend(fields.values());
+                }
+                Value::Array(items) => pending.extend(items),
+                _ => {}
+            }
+        }
+        document
+            .as_object_mut()
+            .ok_or("document must be an object")?
+            .insert("schemaVersion".into(), Value::from(5));
+        Ok(())
+    }
+}
+
 impl MigrationStep for ImportIdentityMigration {
     fn from_version(&self) -> u32 {
         3
@@ -300,6 +335,7 @@ impl MigrationRegistry {
         registry.register(Box::new(RootDefinitionMigration));
         registry.register(Box::new(JointBindingMigration));
         registry.register(Box::new(ImportIdentityMigration));
+        registry.register(Box::new(ElementBindingMigration));
         registry
     }
 

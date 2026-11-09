@@ -343,7 +343,12 @@ fn edit_definition(
     part.datum_planes = definition.datum_planes;
     part.timeline = definition.timeline;
     part.bodies = definition.bodies;
+    let mut reserved = definition.elements.clone();
+    reserved.retain_quarantined();
     part.elements = definition.elements;
+    for (id, _) in reserved.iter() {
+        part.elements.remove(id);
+    }
     part.repair = definition.repair;
     part.named_selections = definition.named_selections;
     let mut session = DocumentSession::new(part);
@@ -351,7 +356,17 @@ fn edit_definition(
     if !changed {
         return Ok(false);
     }
-    let part = session.into_document();
+    let mut part = session.into_document();
+    // The temporary root document is an edit adapter, not a persisted root part.
+    // Restore reservations before the outer session validates consumers atomically.
+    for (element, entry) in reserved.iter() {
+        if part.elements.contains(element) {
+            return Err(invalid(
+                "definition edit attempted to replace a reserved identity",
+            ));
+        }
+        part.elements.insert(element.clone(), entry.clone());
+    }
     let target = doc
         .definitions
         .get_mut(&id)

@@ -43,7 +43,7 @@ fn legacy_fixture_migrates_without_rewriting_source_and_reopens_new_file() {
         reopened_json["rootDefinition"],
         migrated_json["rootDefinition"]
     );
-    assert_eq!(reopened.document().schema_version, 4);
+    assert_eq!(reopened.document().schema_version, 5);
     assert_eq!(
         reopened.document().id.to_string(),
         "92a6ebf3-9192-447a-86ad-8e72521118cc"

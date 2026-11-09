@@ -148,15 +148,24 @@ impl DocumentSession {
         &mut self,
         id: onecad_assembly::occurrence::ComponentDefId,
         component: crate::document::component::ComponentDef,
-    ) -> bool {
+    ) -> Result<(), DomainError> {
         if self.open_txn.is_some()
             || component.id != id
             || !self.document.definitions.contains_key(&id)
         {
-            return false;
+            return Err(DomainError::Validation(
+                "component replay target is unavailable".into(),
+            ));
+        }
+        if component.elements.has_quarantined() || self.document.has_quarantined_elements() {
+            let mut candidate = self.document.clone();
+            candidate.definitions.insert(id, component.clone());
+            candidate
+                .validate_topology_binding_states()
+                .map_err(DomainError::Validation)?;
         }
         self.document.definitions.insert(id, component);
-        true
+        Ok(())
     }
 
     /// The derived dependency graph.
@@ -276,6 +285,15 @@ impl DocumentSession {
                 return Err(e);
             }
         };
+        if let Err(error) = self.document.validate_topology_binding_states() {
+            inverse.apply(&mut self.document);
+            if self.open_txn.is_some() {
+                self.cancel_transaction();
+            } else {
+                self.rebuild_graph();
+            }
+            return Err(DomainError::Validation(error));
+        }
         let edit = AppliedEdit {
             forward: cmd,
             inverse,
@@ -772,12 +790,16 @@ impl DocumentSession {
         let component_redo = self
             .capture_component_identities(self.undo.history_txn(HistoryDirection::Undo)?)
             .ok()?;
-        let txn = self.undo.pop_for_undo()?;
+        let txn = self.undo.history_txn(HistoryDirection::Undo)?;
+        let mut candidate = self.document.clone();
         let mut dirty_floor: Option<usize> = None;
         for edit in txn.edits.iter().rev() {
-            dirty_floor = fold_floor(dirty_floor, edit.inverse.dirty_floor(&self.document));
-            edit.inverse.clone().apply(&mut self.document);
+            dirty_floor = fold_floor(dirty_floor, edit.inverse.dirty_floor(&candidate));
+            edit.inverse.clone().apply(&mut candidate);
         }
+        candidate.validate_topology_binding_states().ok()?;
+        let txn = self.undo.pop_for_undo()?;
+        self.document = candidate;
         self.rebuild_graph();
         self.undo.push_undone_with_components(txn, component_redo);
         Some(UndoOutcome { dirty_floor })
@@ -805,6 +827,7 @@ impl DocumentSession {
             self.undo.push_undone_with_components(txn, component_redo);
             return Err(error);
         }
+        let prior = self.document.clone();
         let mut new_edits: Vec<AppliedEdit> = Vec::with_capacity(txn.edits.len());
         let mut dirty_floor: Option<usize> = None;
         for edit in &txn.edits {
@@ -817,19 +840,22 @@ impl DocumentSession {
                     });
                 }
                 Err(e) => {
-                    for done in new_edits.into_iter().rev() {
-                        done.inverse.apply(&mut self.document);
-                    }
+                    self.document = prior;
                     self.rebuild_graph();
                     self.undo.push_undone_with_components(txn, component_redo);
                     return Err(e);
                 }
             }
         }
-        if let Err(error) = self.restore_component_identities(&component_redo) {
-            for done in new_edits.into_iter().rev() {
-                done.inverse.apply(&mut self.document);
-            }
+        if let Err(error) = self
+            .restore_component_identities(&component_redo)
+            .and_then(|()| {
+                self.document
+                    .validate_topology_binding_states()
+                    .map_err(DomainError::Validation)
+            })
+        {
+            self.document = prior;
             self.rebuild_graph();
             self.undo.push_undone_with_components(txn, component_redo);
             return Err(error);

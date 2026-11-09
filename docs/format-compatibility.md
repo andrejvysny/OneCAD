@@ -6,7 +6,7 @@ ONECAD-520; acceptance evidence belongs in Plane.
 
 ## Documents
 
-The current writer emits document schema 4. Explicit schema-1, schema-2 and schema-3 migrations
+The current writer emits document schema 5. Explicit schema-1 through schema-4 migrations
 retain immutable compatibility fixtures. The schema-1 migration places the existing part history, sketches, bodies, datum
 planes and topology identities in the root definition without reauthoring them.
 Existing baked `PlaceComponent` operations retain their part-timeline meaning.
@@ -30,6 +30,41 @@ addresses; replay TopoKey ordinals are not source identity. BREP source
 addresses and nested occurrence paths are not admitted by this version.
 End-to-end certified replay still requires worker-side production and
 fail-closed enforcement; schema support alone does not qualify that workflow.
+
+Schema 5 reserves `topologyBindingState` on element-index entries. Its only
+present value is `"quarantined"`; null and unknown values are refused. Schema-4
+migration refuses any pre-existing key with this name. A quarantined native
+face retains its ID, body, kind, anchor and descriptor but cannot bind again.
+This slice admits the marker only in embedded definitions; root-definition
+markers refuse decode, edits and save until their separate runtime paths qualify.
+Repair chooses a current identity explicitly. Reserved rows remain after their
+last binding is repaired and count against the existing 4,096-identity cap.
+They are not evicted or reused. Worker deltas cannot revive them; replay starts
+from zero rather than accepting a checkpoint containing old bindings.
+
+Automatic reservation currently requires an actual, complete worker
+`NeedsRepair` answer and a closed consumer proof for the whole batch. The
+implemented proof admits native Sketch/Extrude/Hole histories, known local
+sketch geometry, and ordinary world or face attachments. Unknown operations,
+module state, extension metadata, unresolved feature repairs, projections and datum attachments refuse
+reservation rather than being discarded or assumed unrelated. Other active
+feature, selection or colour consumers also refuse it. An affected joint must
+already retain the exact old reference as `needsRepair`; its accepted pose is
+unchanged until an explicit repair solve succeeds. This conservative subset
+does not establish general reference-repair qualification.
+
+Reservation and its geometry publish through the existing runtime/session,
+revision, source, worker-epoch and head fences, with an additional persisted
+generation and inactive-staging/gesture fence. Owned consumer snapshots are
+admitted against the existing shared scratch budget before cloning. Manual
+saves retain the marker and evidence. Current-schema decoding, including
+migrated files before any reservation exists, refuses unsupported fields that
+typed decoding would discard. Recognized canonical omissions are checked by
+typed location and exact default value; arbitrary null or empty unknown fields
+are not exempt. Immutable legacy fixtures qualify the supported normalizations.
+Untrusted files must enter through `ContainerReader` and the migration/document
+IO pipeline. Direct serde decoding of `Document` is a lower-level model codec;
+it does not establish the raw-field preservation proof required for admission.
 
 Unknown operations, module state and extension fields must survive unchanged
 where their existing opaque contracts permit editing. If their meaning cannot
