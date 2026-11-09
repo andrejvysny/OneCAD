@@ -1,6 +1,7 @@
 # Native Framework negative-retention diagnostic
 
-Run `framework_negative_probe INPUT.onecad NEW_OUTPUT_DIR` through the shared
+Run `framework_negative_probe INPUT.onecad NEW_OUTPUT_DIR [--factor-cutter]`
+through the shared
 application services and the pinned production worker. The command is a diagnostic
 and always exits with failure; a late or partial publication cannot qualify the
 strict 30-second cold-open check. Output must be a new directory. The input is
@@ -33,8 +34,32 @@ These are ideal set identities, not proofs of
 OCCT boundary equivalence, source agreement or final union validity. Existing
 publication checks remain authoritative. Tiny children are recorded and retained.
 
-The inherited eight-retention experiment still omits one protector explicitly.
+The default negative-side retention experiment still omits one protector
+explicitly. The initial positive-side candidate also omits a protector.
 Full source equivalence, protector coverage, cold readiness, Undo/Redo and fresh
 reopen of the final candidate, native GUI authoring, transfer uncertainty and
 ratified tolerances remain open. No production fallback, tolerance increase,
 body-size deletion, imported substitute or frozen-oracle replacement is supplied.
+
+
+## Factorized cutter mode
+
+`--factor-cutter` constructs the negative sharp domain `S`, two declared
+source-derived Sweep pipes and seven box-minus-primitive protectors. It first
+applies one ordinary group Cut `S minus union(protectors)`, then cuts `B` with
+all published cutter children. No retention body is cut against the approximate
+native part before that final operation. The set identity does not establish
+OCCT boundary equivalence or source coverage.
+
+`canonical-protectors.json` journals the nine distinct declared input IDs and
+masses. It is not independent proof of source completeness. If the first Cut
+publishes, `published-cutter-bodies.json` records every returned child; a final
+success also records checked MESH1 hashes, mass and a fresh native-only save.
+A normal refusal stops authoring. This mode does not omit an unused tool or
+skip a no-effect or failed operation.
+
+The negative nine-input construction does not repair the separate positive-side
+omission in the initial 204-record candidate. Strict cold readiness remains a
+failure when late publication is needed, and the program still exits with
+failure even if diagnostic authoring finishes. Native source equivalence and
+the end-to-end reference qualification remain open.

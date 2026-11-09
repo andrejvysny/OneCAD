@@ -1,4 +1,6 @@
 //! Native negative retention experiment; cold 30-second timeout remains a failure.
+//! Optional `--factor-cutter` constructs the complete nine-protector cutter.
+//! This is diagnostic only and does not establish source equivalence.
 #[allow(dead_code)]
 mod framework_negative_probe_support;
 #[allow(dead_code)]
@@ -198,6 +200,7 @@ async fn author(
     original: BodyId,
     next: u128,
     out: PathBuf,
+    factor_cutter: bool,
 ) -> Result<Value, String> {
     let query = api::query_mass_properties(
         &h.state,
@@ -213,12 +216,46 @@ async fn author(
         &json!({"bodyId":original.to_string(),"mass":initial_mass,
         "nativeFeatureCount":204,"importCount":0,"diagnosticOnly":true}),
     );
-    framework_negative_probe_support::apply_negative(&h, original, next, &out).await;
+    let final_bodies = if factor_cutter {
+        Some(framework_negative_probe_support::factor_cutter(&h, original, next, &out).await)
+    } else {
+        framework_negative_probe_support::apply_negative(&h, original, next, &out).await;
+        None
+    };
     let p = tokio::time::timeout(Duration::from_secs(5), api::get_projection(&h.state))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     let mut mass = Vec::new();
+    let mut meshes = Vec::new();
+    if let Some(ref expected) = final_bodies {
+        for body in expected {
+            let id = body.to_string();
+            if !p.bodies.contains_key(&id) {
+                return Err(format!("reported final body missing: {id}"));
+            }
+            let request = api::get_mesh(
+                &h.state,
+                id.clone(),
+                "fine".into(),
+                None,
+                Some(p.runtime_session.clone()),
+            );
+            let blob = tokio::time::timeout(Duration::from_secs(10), request)
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            let mesh = onecad_protocol::mesh::MeshView::decode(
+                &blob,
+                onecad_protocol::mesh::MeshLimits::default(),
+            )
+            .map_err(|e| format!("mesh: {e:?}"))?;
+            if mesh.header().triangle_count == 0 {
+                return Err(format!("empty final mesh for {id}"));
+            }
+            meshes.push(json!({"bodyId":id,"sha256":format!("{:x}",Sha256::digest(&blob)),"triangles":mesh.header().triangle_count}));
+        }
+    }
     for id in p.bodies.keys() {
         let body: BodyId = id.parse().map_err(|e| format!("body id: {e}"))?;
         let query = api::query_mass_properties(
@@ -259,7 +296,7 @@ async fn author(
         return Err("saved history contains imports".into());
     }
     Ok(
-        json!({"stage":"saved","mass":mass,"bodyIds":p.bodies.keys().collect::<Vec<_>>(),
+        json!({"stage":"saved","mass":mass,"checkedMeshes":meshes,"bodyIds":p.bodies.keys().collect::<Vec<_>>(),
         "nativeFeatureCount":saved_doc.document().timeline.records().len(),"importCount":import_count,
         "outputSha256":hash(&save_path)}),
     )
@@ -278,7 +315,7 @@ async fn cleanup(h: &Harness) -> Value {
     };
     json!({"close":format!("{close:?}"),"workerTornDown":torn_down})
 }
-async fn run(input: &Path, out: &Path) {
+async fn run(input: &Path, out: &Path, factor_cutter: bool) {
     assert!(
         std::env::vars_os().all(|(key, _)| !key.to_string_lossy().starts_with("ONECAD_FRAMEWORK_")),
         "framework recipe overrides are not allowed"
@@ -313,8 +350,10 @@ async fn run(input: &Path, out: &Path) {
             Ok(()) => {
                 let task_h = h.clone();
                 let task_out = out.to_path_buf();
-                match tokio::spawn(async move { author(task_h, original, next, task_out).await })
-                    .await
+                match tokio::spawn(async move {
+                    author(task_h, original, next, task_out, factor_cutter).await
+                })
+                .await
                 {
                     Ok(Ok(result)) => result,
                     Ok(Err(error)) => json!({"stage":"authoring_error","error":error}),
@@ -329,7 +368,7 @@ async fn run(input: &Path, out: &Path) {
     summary(
         &status,
         &json!({"strictCold":strict,"diagnosticOnly":true,"result":result,
-        "cleanup":cleanup_result,"eventRecordsDropped":h.events.dropped(),
+        "cleanup":cleanup_result,"mode":if factor_cutter {"factor-cutter"} else {"retention"},"eventRecordsDropped":h.events.dropped(),
         "priorUncachedEditFailure":"/private/tmp/onecad-resume-evidence/framework-native-negative-restricted-v1/status.json","inputSha256After":hash(input),"workerPath":worker,
         "workerSha256After":hash(&worker),"sourceSha256":SOURCE_SHA,"acceptance":false}),
     );
@@ -337,10 +376,9 @@ async fn run(input: &Path, out: &Path) {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
-    assert_eq!(
-        args.len(),
-        3,
-        "usage: framework_negative_probe INPUT.onecad NEW_OUTPUT_DIR"
+    assert!(
+        args.len() == 3 || (args.len() == 4 && args[3] == "--factor-cutter"),
+        "usage: framework_negative_probe INPUT.onecad NEW_OUTPUT_DIR [--factor-cutter]"
     );
     let input = PathBuf::from(&args[1]);
     let out = PathBuf::from(&args[2]);
@@ -351,6 +389,6 @@ async fn main() -> std::process::ExitCode {
     std::env::set_var("ONECAD_LIBRARY_ROOT", out.join("library"));
     std::env::set_var("ONECAD_LOG_DIR", out.join("logs"));
     let _guard = onecad_app::logging::init().expect("diagnostic logs");
-    run(&input, &out).await;
+    run(&input, &out, args.len() == 4).await;
     std::process::ExitCode::FAILURE
 }

@@ -91,3 +91,19 @@ pub async fn build_negative_eight(b: &mut Builder<'_>) -> Vec<BodyId> {
     assert_eq!(pipes.len(), 2);
     vec![pipe(b, &pipes[0]).await]
 }
+
+// Both negative-side paths are required for the full canonical cutter.
+pub async fn build_negative_nine(b: &mut Builder<'_>) -> Vec<BodyId> {
+    let data: Value = serde_json::from_slice(include_bytes!("negative_pipes.json")).unwrap();
+    assert_eq!(
+        data["sourceSha256"],
+        "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09"
+    );
+    let paths = data["pipes"].as_array().unwrap();
+    assert_eq!(paths.len(), 2);
+    let mut result = Vec::new();
+    for path in paths {
+        result.push(pipe(b, path).await);
+    }
+    result
+}

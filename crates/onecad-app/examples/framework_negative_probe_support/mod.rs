@@ -313,3 +313,55 @@ pub async fn apply_negative(h: &Harness, original: BodyId, next: u128, out: &std
         .await;
     eprintln!("final restoration bodies: {results:?}");
 }
+
+async fn capture_factor_bodies(h: &Harness, bodies: &[BodyId], path: &std::path::Path) {
+    let mut rows = Vec::new();
+    for body in bodies {
+        let query = api::query_mass_properties(
+            &h.state,
+            onecad_app::worker::wire::body_id_wire(*body),
+            None,
+        );
+        let mass = tokio::time::timeout(std::time::Duration::from_secs(10), query)
+            .await
+            .unwrap()
+            .unwrap();
+        rows.push(serde_json::json!({"bodyId":body.to_string(),"mass":mass}));
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .unwrap();
+    serde_json::to_writer_pretty(file, &rows).unwrap();
+}
+
+pub async fn factor_cutter(
+    h: &Harness,
+    original: BodyId,
+    next: u128,
+    out: &std::path::Path,
+) -> Vec<BodyId> {
+    let mut builder = Builder::new(h, next);
+    let (sharp, bounds) = negative::sharp(&mut builder).await;
+    let mut protections = pipes::build_negative_nine(&mut builder).await;
+    for index in 0..7 {
+        protections.push(negative::protection(&mut builder, bounds, index).await);
+    }
+    assert_eq!(protections.len(), 9);
+    assert_eq!(
+        protections
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        9
+    );
+    capture_factor_bodies(h, &protections, &out.join("canonical-protectors.json")).await;
+    let cutters = builder
+        .boolean_results(BooleanOp::Cut, sharp, protections, false)
+        .await;
+    capture_factor_bodies(h, &cutters, &out.join("published-cutter-bodies.json")).await;
+    builder
+        .boolean_results(BooleanOp::Cut, original, cutters, false)
+        .await
+}
