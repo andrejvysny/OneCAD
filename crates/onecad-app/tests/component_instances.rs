@@ -184,6 +184,10 @@ fn text(v: &str) -> ComponentParamValue {
 /// v1.0.0 declares `thread` (M3..M8), `length` and `thread_detail`; v1.1.0 narrows
 /// `thread` to M3..M6 and drops `thread_detail` as a free parameter.
 fn write_version(root: &Path, version: &str) {
+    write_version_with_length(root, version, 20);
+}
+
+fn write_version_with_length(root: &Path, version: &str, length: u32) {
     let v11 = version == "1.1.0";
     let (domain, detail) = if v11 {
         (r#"["M3", "M4", "M5", "M6"]"#, "")
@@ -213,7 +217,7 @@ generator_version = 1
 
 [parameters]
 thread = {{ role = "free", value = "M6", domain = {domain} }}
-length = {{ role = "free", value = 20, min = 2 }}
+length = {{ role = "free", value = {length}, min = 2 }}
 {detail}
 "#,
         rev = if v11 { "1" } else { "0" }.repeat(64)
@@ -520,4 +524,88 @@ async fn reset_overrides_is_one_undo_step_and_effective_equals_defaults() {
     );
     d.wm.shutdown().await;
     d.wm.retire();
+}
+
+async fn assert_screw_length(worker: &WorkerManager, snapshot: &ModelSnapshot, length: f64) {
+    let [body] = snapshot.bodies.as_slice() else {
+        panic!("one screw")
+    };
+    let bytes = worker
+        .fetch_mesh(body.body, body.mesh_key.lod, snapshot.id)
+        .await
+        .unwrap();
+    let mesh = onecad_protocol::mesh::MeshView::decode(&bytes, Default::default()).unwrap();
+    let z: Vec<_> = mesh.positions().iter().skip(2).step_by(3).collect();
+    let low = z.iter().copied().fold(f32::INFINITY, f32::min);
+    let high = z.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        ((high - low) as f64 - length - 6.0).abs() < 0.001,
+        "M6 screw must span shank {length} mm plus 6 mm head; got {}",
+        high - low
+    );
+}
+
+#[tokio::test]
+async fn nonfallback_defaults_drive_reset_upgrade_and_offline_fresh_reopen() {
+    let Some(bin) = real_worker() else { return };
+    let library = tempfile::tempdir().unwrap();
+    write_version_with_length(library.path(), "1.0.0", 37);
+    reindex_library_at(library.path()).unwrap();
+    let worker = spawn_worker(bin.clone()).await;
+    let state = app_state_over(&worker);
+    open_blank(&state).await;
+    let id = place(
+        library.path(),
+        &state,
+        0.0,
+        Params::from([("length".into(), num(29.0))]),
+    )
+    .await;
+    assert_screw_length(&worker, regen(&state).await.as_ref(), 29.0).await;
+    reset_component_overrides_at(library.path(), &state, id.clone(), None)
+        .await
+        .unwrap();
+    assert!(placed(&state, &id).await.params.is_empty());
+    assert_screw_length(&worker, regen(&state).await.as_ref(), 37.0).await;
+    write_version_with_length(library.path(), "1.1.0", 47);
+    reindex_library_at(library.path()).unwrap();
+    let plan = plan_component_upgrades_at(library.path(), &state, vec![id], None)
+        .await
+        .unwrap();
+    apply_component_upgrades_at(library.path(), &state, plan)
+        .await
+        .unwrap();
+    assert_screw_length(&worker, regen(&state).await.as_ref(), 47.0).await;
+    api::undo(&state, host()).await.unwrap();
+    assert_screw_length(&worker, regen(&state).await.as_ref(), 37.0).await;
+    api::redo(&state, host()).await.unwrap();
+    assert_screw_length(&worker, regen(&state).await.as_ref(), 47.0).await;
+    let files = tempfile::tempdir().unwrap();
+    let path = files.path().join("defaults.onecad");
+    state
+        .runtime
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .save(&path, save_meta())
+        .unwrap();
+    drop(library);
+    worker.shutdown().await;
+    worker.retire();
+    let fresh = spawn_worker(bin).await;
+    let mut reopened = open_over(&fresh, &path);
+    assert!(
+        !reopened.is_dirty(),
+        "consistent inputs need no reopen correction"
+    );
+    let report = reopened
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let Outcome::Published(snapshot) = report.outcome else {
+        panic!("fresh replay must publish")
+    };
+    assert_screw_length(&fresh, &snapshot, 47.0).await;
+    fresh.shutdown().await;
+    fresh.retire();
 }

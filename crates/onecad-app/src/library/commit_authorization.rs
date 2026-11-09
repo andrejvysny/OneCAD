@@ -59,7 +59,16 @@ pub(super) fn preview_source_matches(
                 params,
                 extra: be,
             },
-        ) => a == b && av == bv && ae == be && params == requested,
+        ) => {
+            a == b && av == bv && ae == be && {
+                let mut effective = match base {
+                    ComponentSourceRef::Generator { params, .. } => params.clone(),
+                    _ => unreachable!(),
+                };
+                effective.extend(requested.clone());
+                params == &effective
+            }
+        }
         (
             ComponentSourceRef::Profile {
                 sha256: a,
@@ -101,6 +110,34 @@ pub(crate) fn reject_generic_add(command: &EditCommand) -> Result<(), ApiError> 
         ));
     }
     Ok(())
+}
+
+pub(crate) fn reject_unauthenticated_definition_edit<'a>(
+    command: &EditCommand,
+    current: impl Fn(RecordId) -> Option<&'a Operation>,
+) -> Result<(), ApiError> {
+    reject_generic_add(command)?;
+    let component = |operation: &Operation| {
+        matches!(
+            operation,
+            Operation::Known(
+                KnownOperation::PlaceComponent(_) | KnownOperation::DetachComponent(_)
+            )
+        )
+    };
+    match command {
+        EditCommand::UpdateOperationParams { record, op }
+            if component(op) || current(*record).is_some_and(component) =>
+        {
+            Err(ApiError::InvalidCommand(
+                "embedded component edits require authenticated library services".into(),
+            ))
+        }
+        EditCommand::ImportProject { .. } => Err(ApiError::InvalidCommand(
+            "project import requires source admission".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) struct UpdateAuthorization {
@@ -302,7 +339,9 @@ fn check_source(
                     .collect()
             };
             validate_component_params("placeComponent", package, component_id, &free)?;
-            if source_with_free_params(base.clone(), &free, component_id)? != *candidate {
+            if effective_parameters::source(package, component_id, base.clone(), &free)?
+                != *candidate
+            {
                 return Err(ApiError::InvalidCommand(
                     "component source changed outside permitted parameters".into(),
                 ));
@@ -445,6 +484,18 @@ pub(crate) fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_loaded_generator_identity_cannot_authorize_parameter_edits() {
+        let package = package();
+        let mut base = generated("M3");
+        if let ComponentSourceRef::Generator { generator_id, .. } = &mut base {
+            *generator_id = "other".into();
+        }
+        let free = BTreeMap::from([("thread".into(), ComponentParamValue::Text("M6".into()))]);
+        let candidate = base.clone().with_free_params(&free).unwrap();
+        assert!(check_source(&package, "acme.part", &base, &candidate, Some(&free)).is_err());
+    }
 
     fn package() -> ComponentPackage {
         let manifest = format!(

@@ -40,7 +40,7 @@ pub(super) fn replay_context(
     Some(hash.finalize().into())
 }
 
-fn context(def: &ComponentDef) -> Option<[u8; 32]> {
+pub(super) fn context(def: &ComponentDef) -> Option<[u8; 32]> {
     digest(&(
         &def.id,
         &def.name,
@@ -90,7 +90,7 @@ fn translations(def: &ComponentDef, from: usize) -> Option<BTreeMap<BodyId, [f64
     Some(offsets)
 }
 
-fn native_definition(def: &ComponentDef) -> bool {
+pub(super) fn native_definition(def: &ComponentDef) -> bool {
     !def.elements
         .iter()
         .any(|(_, entry)| entry.import_source_identity.is_some())
@@ -200,7 +200,7 @@ async fn face_ids(
     Ok(all)
 }
 
-fn translated_anchor(
+pub(super) fn translated_anchor(
     entry: &ElementEntry,
     offset: [f64; 3],
 ) -> Result<Option<AnchorIntent>, ApiError> {
@@ -220,7 +220,7 @@ fn translated_point(point: Vec3, offset: [f64; 3]) -> Result<Vec3, ApiError> {
         .map_err(|_| invalid("component translated anchor is not finite"))
 }
 
-async fn refresh_entry(
+pub(super) async fn refresh_entry(
     runtime: &mut DocumentRuntime,
     worker: &WorkerManager,
     snapshot: SnapshotId,

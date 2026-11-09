@@ -4,6 +4,8 @@ mod checks;
 #[allow(dead_code)]
 #[path = "prusa_native_cover_support/mod.rs"]
 mod cover;
+#[path = "public_mixed_stress_support/evidence_translation.rs"]
+mod evidence_translation;
 #[path = "public_mixed_stress_support/fixture.rs"]
 mod fixture;
 #[path = "public_mixed_stress_support/framework_refusal.rs"]
@@ -18,6 +20,8 @@ mod lever;
 mod mesh_compare;
 #[path = "public_mixed_stress_support/native.rs"]
 mod native;
+#[path = "public_mixed_stress_support/performance.rs"]
+mod performance;
 #[allow(dead_code)]
 #[path = "native_plate_support/profile.rs"]
 mod profile;
@@ -206,7 +210,9 @@ async fn verify_scene(state: &AppState, session: &str) {
             );
         }
     }
-    eprintln!("public mixed 10 definitions, 20 occurrences: bodies={total_bodies} visible_triangles={total_triangles} visible_segments={total_segments} unique_mesh_payload_bytes={total_bytes}; scene metadata/BVH not measured");
+    eprintln!(
+        "public mixed 10 definitions, 20 occurrences: bodies={total_bodies} visible_triangles={total_triangles} visible_segments={total_segments} unique_mesh_payload_bytes={total_bytes}; scene metadata/BVH not measured"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -216,6 +222,10 @@ async fn public_mixed_ten_definitions_twenty_occurrences_cold_reopen() {
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     if let Some(area) = std::env::var_os("ONECAD_PUBLIC_MIXED_CHILD") {
         child(Path::new(&area)).await;
+        return;
+    }
+    if std::env::var_os("ONECAD_PERF_OUT").is_some() {
+        performance::run().await;
         return;
     }
     let area = tempfile::tempdir().unwrap();
@@ -254,7 +264,12 @@ async fn public_mixed_ten_definitions_twenty_occurrences_cold_reopen() {
     );
     h.close().await;
     fixture::verify_saved(&path);
-    public_assembly_artifacts::retain(&path, "public-mixed-10x20", include_bytes!("public_mixed_stress.rs"), "Six byte-pinned public imports: four Robonine analytic leaves, Prusa box and NIST FTC09 STEP; native histories: Prusa cover, Prusa lever, constrained plate and plate with hole. Authored placements are stress inputs, not a physical assembly.");
+    public_assembly_artifacts::retain(
+        &path,
+        "public-mixed-10x20",
+        include_bytes!("public_mixed_stress.rs"),
+        "Six byte-pinned public imports: four Robonine analytic leaves, Prusa box and NIST FTC09 STEP; native histories: Prusa cover, Prusa lever, constrained plate and plate with hole. Authored placements are stress inputs, not a physical assembly.",
+    );
     fixture::retain_manifest();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([

@@ -5,6 +5,8 @@ mod export_reimport;
 mod joint_support;
 mod public_assembly_artifacts;
 mod robonine_analytic_support;
+#[path = "robonine_analytic_support/suppressed.rs"]
+mod suppressed;
 use async_trait::async_trait;
 use joint_support::{fixtures, pose};
 use onecad_app::{
@@ -61,6 +63,7 @@ const HASHES: [&str; 4] = [
 const FACES: [u32; 4] = [181, 168, 108, 96];
 const SIZES: [usize; 4] = [118968, 154964, 58366, 85170];
 const MAP: [usize; 6] = [0, 1, 2, 3, 1, 2];
+static WORKER_LANE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 struct Quiet;
 impl EventSink for Quiet {
     fn emit(&self, _: AppEvent) -> Result<(), String> {
@@ -234,6 +237,7 @@ async fn child(path: &Path, area: &Path) {
 }
 #[tokio::test]
 async fn source_qualified_analytic_joints_cold_reopen() {
+    let _worker_lane = WORKER_LANE.lock().await;
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     if let Some(area) = std::env::var_os("ONECAD_ROBONINE_JOINT_CHILD") {
         let area = Path::new(&area);

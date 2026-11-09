@@ -13,6 +13,7 @@ use crate::error::ApiError;
 
 const MODULE: &str = "onecad.library";
 const LIMIT: u64 = 32 * 1024 * 1024;
+mod reference_knowledge;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,27 +226,11 @@ pub(crate) fn metadata_command(
     })
 }
 
-/// Prune known unreferenced revisions only when no opaque module may refer to them.
+/// Prune only when every reference consumer is understood.
 pub(crate) fn prune_metadata(document: &mut Document) {
-    if !references(document).is_ok_and(|refs| refs.values().all(|entry| entry.extra.is_empty())) {
+    let knowledge = reference_knowledge::assess(document);
+    if !knowledge.complete {
         return;
-    }
-    if document.modules.keys().any(|id| id != &module_id()) {
-        return;
-    }
-    let mut used = BTreeSet::new();
-    for record in document.timeline.records().iter().chain(
-        document
-            .definitions
-            .values()
-            .flat_map(|definition| definition.timeline.records()),
-    ) {
-        if let onecad_core::document::record::Operation::Known(
-            onecad_core::document::record::KnownOperation::PlaceComponent(params),
-        ) = &record.op
-        {
-            used.insert(params.component_revision.clone());
-        }
     }
     let Some(module) = document.modules.get_mut(&module_id()) else {
         return;
@@ -265,7 +250,7 @@ pub(crate) fn prune_metadata(document: &mut Document) {
     else {
         return;
     };
-    entries.retain(|revision, _| used.contains(revision));
+    entries.retain(|revision, _| knowledge.used.contains(revision));
     if entries.is_empty() {
         document.modules.remove(&module_id());
     }
@@ -276,23 +261,15 @@ pub(crate) fn snapshot_for_save(
     archives: &LibraryArchives,
     known: &BTreeSet<String>,
 ) -> LibraryArchives {
-    let has_opaque = document.modules.iter().any(|(id, state)| {
-        id != &module_id()
-            || state.schema_version != 1
-            || state
-                .payload
-                .as_object()
-                .is_none_or(|object| object.keys().any(|key| key != "snapshots"))
-    });
-    if has_opaque
-        || !references(document).is_ok_and(|refs| refs.values().all(|entry| entry.extra.is_empty()))
-    {
+    let knowledge = reference_knowledge::assess(document);
+    if !knowledge.complete {
         return archives.clone();
     }
     let refs = references(document).unwrap_or_default();
     let current: BTreeSet<_> = refs
-        .values()
-        .map(|entry| entry.archive_sha256.as_str())
+        .iter()
+        .filter(|(revision, _)| knowledge.used.contains(*revision))
+        .map(|(_, entry)| entry.archive_sha256.as_str())
         .collect();
     archives
         .iter()
@@ -300,6 +277,9 @@ pub(crate) fn snapshot_for_save(
         .map(|(sha, bytes)| (sha.clone(), Arc::clone(bytes)))
         .collect()
 }
+
+#[cfg(test)]
+mod preservation_tests;
 
 pub(crate) fn require_complete(
     document: &Document,
@@ -324,6 +304,42 @@ pub(crate) fn require_complete(
 mod tests {
     use super::*;
     use onecad_core::ids::DocumentId;
+
+    #[test]
+    fn opaque_root_operation_preserves_snapshot_metadata_and_bytes() {
+        let mut document = Document::new(DocumentId::new());
+        let sha = "a".repeat(64);
+        let payload = serde_json::json!({"snapshots": {"sha256:revision": {
+            "componentId": "example.part", "componentVersion": "1.0.0", "archiveSha256": sha
+        }}});
+        document
+            .modules
+            .insert(module_id(), ModuleState::new(1, payload.clone()));
+        let record = onecad_core::document::record::OperationRecord::new(
+            onecad_core::ids::RecordId::new(), 0, "Future consumer",
+            serde_json::from_value(serde_json::json!({"opType":"FutureComponent", "params": {"revision":"sha256:revision"}})).unwrap(),
+        );
+        document.timeline = onecad_core::history::Timeline::from_records(vec![record]);
+        let known = BTreeSet::from([sha.clone()]);
+        let archives = LibraryArchives::from([(
+            sha.clone(),
+            Arc::new(onecad_core::io::library::ArchiveBytes::untracked(
+                b"opaque".to_vec(),
+            )),
+        )]);
+        prune_metadata(&mut document);
+        assert_eq!(
+            document
+                .modules
+                .get(&module_id())
+                .map(|state| &state.payload),
+            Some(&payload)
+        );
+        assert_eq!(
+            snapshot_for_save(&document, &archives, &known)[&sha].as_slice(),
+            b"opaque"
+        );
+    }
 
     #[test]
     fn future_nested_archive_metadata_is_preserved_conservatively() {

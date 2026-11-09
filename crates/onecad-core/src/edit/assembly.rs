@@ -124,6 +124,14 @@ pub(crate) fn apply(doc: &mut Document, edit: &AssemblyEdit) -> Result<bool, Dom
             if old.local == *pose {
                 return Ok(false);
             }
+            if doc.assembly.joints.iter().any(|joint| {
+                !joint.suppressed
+                    && (joint.a.occurrence == *occurrence || joint.b.occurrence == *occurrence)
+            }) {
+                return Err(invalid(
+                    "constrained occurrence pose requires a fenced joint solve",
+                ));
+            }
             doc.assembly
                 .occurrences
                 .set_local(*occurrence, *pose)
@@ -325,10 +333,12 @@ fn edit_definition(
 ) -> Result<bool, DomainError> {
     if matches!(
         command,
-        EditCommand::Assembly { .. } | EditCommand::SetModuleState { .. }
+        EditCommand::Assembly { .. }
+            | EditCommand::SetModuleState { .. }
+            | EditCommand::ImportProject { .. }
     ) {
         return Err(invalid(
-            "nested assembly and document-module edits are not definition edits",
+            "nested assembly, project import and document-module edits are not definition edits",
         ));
     }
     let definition = doc

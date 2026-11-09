@@ -278,23 +278,27 @@ async fn validate_bound_origins(
     }
     let head = {
         let guard = state.runtime.lock().await;
-        guard
+        let runtime = guard
             .as_ref()
             .filter(|r| {
                 r.matches_runtime_session(session) && r.persisted_generation() == generation
             })
-            .ok_or_else(|| ApiError::StalePreview("joint origin document changed".into()))?
-            .joint_head()
+            .ok_or_else(|| ApiError::StalePreview("joint origin document changed".into()))?;
+        runtime.validate_joint_binding_structure(joints, bindings)?;
+        runtime.joint_head()
     };
     for binding in bindings {
         require_not_cancelled(cancelled)?;
-        if binding.needs_repair {
-            return Err(ApiError::InvalidCommand("joint origin needs repair".into()));
-        }
         let joint = joints
             .iter()
             .find(|j| j.id == binding.joint)
             .ok_or_else(|| ApiError::InvalidCommand("joint binding has no joint".into()))?;
+        if joint.suppressed {
+            continue;
+        }
+        if binding.needs_repair {
+            return Err(ApiError::InvalidCommand("joint origin needs repair".into()));
+        }
         let origin = match binding.side {
             JointSide::A => &joint.a,
             JointSide::B => &joint.b,

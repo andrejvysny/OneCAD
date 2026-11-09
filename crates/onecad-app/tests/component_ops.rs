@@ -11,8 +11,8 @@
 //!   `PlaceComponent` (P0/WP-0.2's hardcoded M6 SHCS) mints exactly one NewBody
 //!   at the exact analytic volume.
 //! * `place_component_survives_save_and_a_fresh_worker_reopen` — save → reopen
-//!   on a FRESH worker replays to the same volume (P0's "zero library
-//!   dependency" framing starts here: nothing in this op reads a library root).
+//!   on a FRESH worker replays to the same volume from its carried verified
+//!   package snapshot, after the authoring catalog has been removed.
 //!
 //! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing
 //! binary skips cleanly (`ONECAD_REQUIRE_WORKER=1` makes that a hard failure).
@@ -190,6 +190,89 @@ fn detach_component_op() -> Operation {
     }))
 }
 
+fn write_replay_generator_package(root: &std::path::Path) {
+    let directory = root.join("onecad.std.iso4762@1.0.0");
+    let manifest = format!(
+        r#"
+[identity]
+id = "onecad.std.iso4762"
+version = "1.0.0"
+revision = "sha256:{}"
+[metadata]
+name = "M6 socket head cap screw"
+[source]
+kind = "generator"
+generator = "iso4762"
+generator_version = 1
+[parameters]
+thread = {{ role = "free", value = "M6" }}
+length = {{ role = "free", value = 20 }}
+"#,
+        "0".repeat(64)
+    );
+    let package = onecad_library::package::parse(&manifest, &directory).unwrap();
+    onecad_library::package::write_package(&directory, &package).unwrap();
+    onecad_app::library::reindex_library_at(root).unwrap();
+}
+
+struct ComponentTestHost;
+impl onecad_app::host::EventSink for ComponentTestHost {
+    fn emit(&self, _: onecad_app::host::AppEvent) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl onecad_app::host::DialogPort for ComponentTestHost {
+    async fn pick(&self, _: onecad_app::host::FileDialog) -> Vec<String> {
+        panic!("component placement must not request a dialog")
+    }
+}
+
+async fn authenticated_generator_runtime(
+    worker: &WorkerManager,
+    root: &std::path::Path,
+    record_id: RecordId,
+) -> DocumentRuntime {
+    let state = app_state_over(worker);
+    open_blank(&state).await;
+    let request = onecad_app::library::PlaceComponentRequest {
+        component_id: "onecad.std.iso4762".into(),
+        component_version: "1.0.0".into(),
+        translate: [0.0; 3],
+        rotate: None,
+        params: std::collections::BTreeMap::from([(
+            "thread".into(),
+            ComponentParamValue::Text("M6".into()),
+        )]),
+        mate: None,
+        configuration: None,
+    };
+    let params = onecad_app::library::prepare_component_draft_at(root, &state, request)
+        .await
+        .unwrap();
+    let record = OperationRecord::new(
+        record_id,
+        0,
+        "Place Component",
+        Operation::Known(KnownOperation::PlaceComponent(params)),
+    );
+    let host = onecad_app::host::HostContext {
+        paths: Default::default(),
+        events: Arc::new(ComponentTestHost),
+        dialogs: Arc::new(ComponentTestHost),
+    };
+    let command = EditCommand::AddOperation {
+        record,
+        at_cursor: true,
+    };
+    onecad_app::api::apply_operation(&state, host, vec![command], None)
+        .await
+        .expect("authenticated component placement");
+    let runtime = state.runtime.lock().await.take().unwrap();
+    runtime
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The gate
 // ─────────────────────────────────────────────────────────────────────────────
@@ -230,8 +313,10 @@ async fn place_component_survives_save_and_a_fresh_worker_reopen() {
         return;
     };
     let wm1 = spawn_worker(bin.clone()).await;
-    let mut rt = runtime_over(&wm1);
-    add_op(&mut rt, place_component_record(0xc2));
+    let catalog = tempfile::tempdir().expect("catalog");
+    write_replay_generator_package(catalog.path());
+    let record_id = RecordId(Uuid::from_u128(0xc2));
+    let mut rt = authenticated_generator_runtime(&wm1, catalog.path(), record_id).await;
     let report = regen_all(&mut rt).await;
     let body_before = published(&report, "place_component").bodies[0].body;
     let vol_before = exact_volume(&wm1, body_before).await;
@@ -240,6 +325,7 @@ async fn place_component_survives_save_and_a_fresh_worker_reopen() {
     let path = dir.path().join("component.onecad");
     rt.save(&path, save_meta()).expect("save");
     wm1.shutdown().await;
+    drop(catalog);
 
     // A FRESH worker process — proves the op replays from the document alone,
     // with no dependency on anything but the saved container (spec §0
@@ -254,6 +340,11 @@ async fn place_component_survives_save_and_a_fresh_worker_reopen() {
         "reopen still publishes exactly one body"
     );
     let body_after = snap2.bodies[0].body;
+    assert_eq!(
+        body_after, body_before,
+        "cold replay preserves body identity"
+    );
+    assert_eq!(feature_op_type(&rt2, record_id), "PlaceComponent");
     let vol_after = exact_volume(&wm2, body_after).await;
     assert!(
         (vol_after - vol_before).abs() < 1e-6,

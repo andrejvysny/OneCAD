@@ -47,6 +47,10 @@ use crate::sketch::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum EditCommand {
+    /// Installs a prepared project snapshot and its identity authority atomically.
+    ImportProject {
+        project: Box<super::project_import::ProjectImportEdit>,
+    },
     /// Mutates embedded definitions or root-owned occurrences.
     Assembly {
         edit: Box<super::assembly::AssemblyEdit>,
@@ -287,6 +291,7 @@ impl EditCommand {
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
+            Self::ImportProject { .. } => "Import Project",
             Self::Assembly { .. } => "Edit Assembly",
             Self::AddOperation { .. } => "Add Operation",
             Self::UpdateOperationParams { .. } => "Update Operation",

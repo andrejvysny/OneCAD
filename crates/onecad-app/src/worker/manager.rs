@@ -1024,6 +1024,8 @@ impl WorkerManager {
     ///
     /// Returns immediately; the child is reaped in the background.
     pub fn retire(&self) {
+        // Retirement revokes client() access, but teardown still needs its stop channel.
+        let client = self.shared.client();
         if !self.shared.latch_retired() {
             return; // already retired — terminal and idempotent.
         }
@@ -1033,9 +1035,7 @@ impl WorkerManager {
         tracing::info!(epoch = self.epoch().0, "worker retired");
         // Fire-and-forget the polite stop. A caller with no reactor (a Drop-time or
         // sync teardown path) simply skips it and the child is force-killed instead.
-        if let (Some(client), Ok(handle)) =
-            (self.shared.client(), tokio::runtime::Handle::try_current())
-        {
+        if let (Some(client), Ok(handle)) = (client, tokio::runtime::Handle::try_current()) {
             handle.spawn(async move {
                 let _ = client.request("Shutdown", json!({})).await;
             });
@@ -3703,6 +3703,9 @@ mod preview_plan;
 
 #[cfg(test)]
 mod readiness_tests;
+
+#[cfg(test)]
+mod retirement_tests;
 
 mod solver_supervision;
 

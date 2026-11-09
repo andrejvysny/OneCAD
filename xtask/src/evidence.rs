@@ -14,7 +14,7 @@ mod ios_tests;
 mod ios_verify;
 mod ios_xcode;
 mod kernelbench;
-mod process;
+pub(crate) mod process;
 #[cfg(test)]
 mod tests;
 

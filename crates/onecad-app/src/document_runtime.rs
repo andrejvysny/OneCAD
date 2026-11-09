@@ -57,7 +57,7 @@ use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQ
 use onecad_core::document::repair::RepairItem;
 use onecad_core::document::variables::{Variable, VariableTable};
 use onecad_core::document::Document;
-use onecad_core::edit::session::{empty_outcome, merge_outcome, DocumentSession};
+use onecad_core::edit::session::{merge_outcome, DocumentSession};
 use onecad_core::edit::{
     CommandOutcome, EditCommand, InputPath, InputRef, SketchEditOp, SketchSquashOutcome,
     UndoOutcome,
@@ -505,6 +505,8 @@ impl CheckpointTicket {
 /// be released in between. It is `Send + 'static`, so it can be moved onto a
 /// `spawn_blocking` thread.
 pub struct SavePayload {
+    #[cfg(test)]
+    test_limits: Option<onecad_core::io::container::SaveLimits>,
     doc: Document,
     caches: ContainerCaches,
     imports: ImportBlobs,
@@ -715,6 +717,8 @@ pub struct DocumentRuntime {
     /// The undo history as of the last save (see `unsaved.rs`); `None` when that
     /// point is unknown (a recovered autosave).
     saved_history: Option<unsaved::SavedHistory>,
+    #[cfg(test)]
+    test_save_limits: Option<onecad_core::io::container::SaveLimits>,
     read_only: bool,
     transient_joint_repairs: BTreeSet<(
         onecad_assembly::joint::JointId,
@@ -826,6 +830,7 @@ pub struct DocumentRuntime {
     library_archives: onecad_core::io::library::LibraryArchives,
     archive_budget: crate::resource_admission::ArchiveBudget,
     verified_library_archives: std::collections::BTreeSet<(String, String, String, String)>,
+    parameter_repairs: parameter_repair::ParameterRepairs,
     known_library_archives: std::collections::BTreeSet<String>,
     library_archives_incomplete: bool,
     /// The temp directory the blobs are materialized into for the worker. Owned
@@ -1042,6 +1047,7 @@ impl DocumentRuntime {
         // Last-saved geometry + thumbnail. Eager for the same reason: the whole
         // value is being resident BEFORE the open-regen's first publish.
         rt.load_open_caches(&loaded);
+        rt.repair_loaded_parameters()?;
         Ok(rt)
     }
 
@@ -1096,6 +1102,8 @@ impl DocumentRuntime {
             persisted_generation: 0,
             // Opened (or new) means "matches the file": no step since then.
             saved_history: Some(unsaved::SavedHistory::default()),
+            #[cfg(test)]
+            test_save_limits: None,
             read_only,
             transient_joint_repairs: BTreeSet::new(),
             mesh_cache: MeshCache::new(),
@@ -1135,6 +1143,7 @@ impl DocumentRuntime {
             library_archives: Default::default(),
             archive_budget: Default::default(),
             verified_library_archives: Default::default(),
+            parameter_repairs: Default::default(),
             known_library_archives: Default::default(),
             library_archives_incomplete: false,
             import_workspace,
@@ -1373,6 +1382,11 @@ impl DocumentRuntime {
     /// # Errors
     /// [`DomainError`] on validation failure; the document is left unchanged.
     pub fn apply(&mut self, cmd: EditCommand) -> Result<CommandOutcome, DomainError> {
+        if matches!(cmd, EditCommand::ImportProject { .. }) {
+            return Err(DomainError::Validation(
+                "project import requires source admission".into(),
+            ));
+        }
         if matches!(cmd, EditCommand::Assembly { .. }) {
             return Err(DomainError::Validation(
                 "assembly definition execution is not yet available".into(),
@@ -1414,7 +1428,14 @@ impl DocumentRuntime {
         self.validate_edit_import_identities(&mut cmd)?;
         let staged = self.staged_ids_in(std::slice::from_ref(&cmd));
         let is_rollback = matches!(cmd, EditCommand::SetRollback { .. });
+        let imported_elements = match &cmd {
+            EditCommand::ImportProject { project } => Some(project.elements.clone()),
+            _ => None,
+        };
         let (outcome, changed) = self.session.apply_with_change(cmd)?;
+        if let Some(prior) = imported_elements {
+            self.restore_imported_elements(&prior);
+        }
         let staged_changed = self.adopt_staged(staged);
         if !changed && !staged_changed {
             return Ok(outcome);
@@ -1442,6 +1463,14 @@ impl DocumentRuntime {
         label: &str,
         commands: Vec<EditCommand>,
     ) -> Result<CommandOutcome, DomainError> {
+        if commands
+            .iter()
+            .any(|command| matches!(command, EditCommand::ImportProject { .. }))
+        {
+            return Err(DomainError::Validation(
+                "project import requires source admission".into(),
+            ));
+        }
         if commands
             .iter()
             .any(|command| matches!(command, EditCommand::Assembly { .. }))
@@ -1719,7 +1748,29 @@ impl DocumentRuntime {
         if self.read_only || self.revert_blocked_by_gesture("undo") {
             return None;
         }
+        let pending_import_elements = self
+            .session
+            .project_import_history(onecad_core::edit::HistoryDirection::Undo)
+            .map(|project| {
+                project.capture_elements(
+                    self.staged.iter(),
+                    &self.regen.bodies,
+                    &self.session.document().elements,
+                )
+            })
+            .transpose()
+            .ok()?;
+        let imported_elements = self
+            .session
+            .capture_project_import_identities(self.regen.elements.iter(), &self.regen.bodies)
+            .ok()?;
         let outcome = self.session.undo()?;
+        if let Some(elements) = imported_elements {
+            self.remove_imported_elements(&elements);
+        }
+        if let Some(elements) = pending_import_elements {
+            self.discard_pending_import_elements(&elements);
+        }
         let dirty_floor = outcome.dirty_floor;
         if let Some(session) = &mut self.sketch_session {
             session.history_valid = false;
@@ -1739,9 +1790,20 @@ impl DocumentRuntime {
         if self.read_only || self.revert_blocked_by_gesture("redo") {
             return Ok(None);
         }
+        let imported_elements = self
+            .session
+            .project_import_history(onecad_core::edit::HistoryDirection::Redo)
+            .map(|project| {
+                self.validate_import_redo_namespace(project)?;
+                Ok::<_, DomainError>(project.elements.clone())
+            })
+            .transpose()?;
         let Some(outcome) = self.session.redo()? else {
             return Ok(None);
         };
+        if let Some(elements) = imported_elements {
+            self.restore_imported_elements(&elements);
+        }
         let dirty_floor = outcome.dirty_floor;
         if let Some(session) = &mut self.sketch_session {
             session.history_valid = false;
@@ -1913,6 +1975,7 @@ impl DocumentRuntime {
         self.regen.timeline = mirror;
         self.unresolved_variables = unresolved;
         self.feature_pattern_errors = feature_pattern_errors;
+        self.mark_parameter_repair_state();
     }
 
     // ── Regen (the driver body) ──────────────────────────────────────────────
@@ -2040,6 +2103,7 @@ impl DocumentRuntime {
         // `sync_regen_timeline`, and everything after it stays Dirty — the same
         // shape as any other failed step.
         let gate = [
+            self.parameter_repair_gate(None),
             self.regen.repair.first_seeded_step(),
             self.unresolved_variables.keys().next().copied(),
             self.feature_pattern_errors.keys().next().copied(),
@@ -3214,6 +3278,8 @@ impl DocumentRuntime {
             }
         };
         SavePayload {
+            #[cfg(test)]
+            test_limits: self.test_save_limits,
             doc,
             caches: ContainerCaches {
                 geometry: BTreeMap::new(),
@@ -3292,6 +3358,11 @@ impl DocumentRuntime {
         out
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_save_limits(&mut self, limits: onecad_core::io::container::SaveLimits) {
+        self.test_save_limits = Some(limits);
+    }
+
     /// Writes a [`SavePayload`] to `path` atomically. Deliberately **takes no
     /// `self`**: this is the blocking, lock-free half of a save (see
     /// [`build_save_payload`](Self::build_save_payload)) and is meant to be handed
@@ -3306,6 +3377,18 @@ impl DocumentRuntime {
         }
         crate::library_archive::require_complete(&payload.doc, &payload.library_archives)
             .map_err(IoError::Corrupt)?;
+        #[cfg(test)]
+        if let Some(limits) = payload.test_limits {
+            return ContainerWriter::save_with_test_limits(
+                path,
+                &payload.doc,
+                &payload.caches,
+                &payload.imports,
+                &payload.library_archives,
+                &payload.meta,
+                limits,
+            );
+        }
         ContainerWriter::save_with_imports_and_library(
             path,
             &payload.doc,
@@ -3504,6 +3587,7 @@ impl DocumentRuntime {
         };
 
         let imported = read_project_for_import(path).map_err(|e| ApiError::Io(e.to_string()))?;
+        self.validate_project_import_namespace(&imported)?;
 
         if let Some(collision) = find_import_collisions(self.session.document(), &imported) {
             return Err(ApiError::InvalidCommand(match collision {
@@ -3513,10 +3597,32 @@ impl DocumentRuntime {
                 ImportCollisions::SketchId(id) => {
                     format!("cannot import: source sketch id {id} already exists in this document")
                 }
+                ImportCollisions::ElementId(id) => {
+                    format!("cannot import: source element id {id} already exists in this document")
+                }
+                ImportCollisions::BodyId(id) => {
+                    format!("cannot import: source body id {id} already exists in this document")
+                }
             }));
         }
 
-        // Stage every import blob the source timeline references.
+        let project = onecad_core::edit::project_import::ProjectImportEdit {
+            records: imported.records,
+            sketches: imported.sketches,
+            elements: imported.elements,
+        };
+        project.validate()?;
+        if self.read_only
+            || self.active_gesture.is_some()
+            || self.native_gesture.is_some()
+            || self.session.transaction_open()
+        {
+            return Err(ApiError::InvalidCommand(
+                "project import requires an idle writable document".into(),
+            ));
+        }
+        // Temporary ownership releases every staged hold if admission fails.
+        let mut prepared_workspace = crate::imports::ImportWorkspace::new(self.document_uuid());
         for (sha, blob) in &imported.import_blobs {
             if blob.bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
                 return Err(ApiError::Io(format!(
@@ -3524,7 +3630,7 @@ impl DocumentRuntime {
                     blob.bytes.len()
                 )));
             }
-            self.import_workspace
+            prepared_workspace
                 .materialize(sha, blob.codec, &blob.bytes)
                 .map_err(|e| {
                     ApiError::Io(format!(
@@ -3532,25 +3638,10 @@ impl DocumentRuntime {
                     ))
                 })?;
         }
-        let mut commands = Vec::new();
-        for record in imported.records {
-            let name = record.name.clone();
-            let record_id = record.record_id;
-            commands.push(EditCommand::AddOperation {
-                record,
-                at_cursor: true,
-            });
-            tracing::info!(record = %record_id, name = %name, "importProject: appended record");
-        }
-        for (sketch_id, sketch) in imported.sketches {
-            commands.push(EditCommand::AddSketch { sketch });
-            tracing::info!(sketch = %sketch_id, "importProject: added sketch");
-        }
-        let combined = if commands.is_empty() {
-            empty_outcome()
-        } else {
-            self.apply_transaction("Import Project", commands)?
-        };
+        let combined = self.apply_authoritative(EditCommand::ImportProject {
+            project: Box::new(project),
+        })?;
+        self.import_workspace.adopt(prepared_workspace);
         for (sha, blob) in imported.import_blobs {
             self.imports.insert(sha, blob);
         }
@@ -4430,6 +4521,18 @@ impl DocumentRuntime {
             .and_then(|snapshot| snapshot.diagnostics_by_step.get(&index))
             .map(|items| items.iter().take(64).cloned().collect())
             .unwrap_or_default();
+        if matches!(self.regen.timeline.state(index), Some(StepState::Error { reason })
+            if reason == "Component generator inputs require verified parameter repair")
+        {
+            out.push(onecad_core::regen::Diagnostic {
+                severity: onecad_core::regen::Severity::Error,
+                code: "COMPONENT_PARAMETERS_REQUIRE_REPAIR".into(),
+                message: "Component generator inputs require verified parameter repair".into(),
+                stage: None,
+                reason_code: None,
+                evidence: None,
+            });
+        }
         if let Some(item) = self.unresolved_variables.get(&index) {
             out.push(onecad_core::regen::Diagnostic {
                 severity: onecad_core::regen::Severity::Error,
@@ -7760,6 +7863,7 @@ mod face_entry;
 mod gestures;
 mod import_identity;
 pub mod joint_execution;
+mod parameter_repair;
 mod quarantined_elements;
 mod staged_elements;
 mod timeline_states;

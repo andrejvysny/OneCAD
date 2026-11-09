@@ -19,11 +19,14 @@ use super::{IoError, IoResult};
 /// [`IoError::Corrupt`] if serialization fails (should not happen for a valid
 /// in-memory document; surfaced rather than panicking).
 pub fn serialize_document(document: &Document) -> IoResult<Vec<u8>> {
+    serialize_document_bounded(document, super::container::MAX_DOCUMENT_BYTES)
+}
+
+pub(super) fn serialize_document_bounded(document: &Document, cap: u64) -> IoResult<Vec<u8>> {
     document
         .validate_topology_binding_states()
         .map_err(IoError::Corrupt)?;
-    serde_json::to_vec_pretty(document)
-        .map_err(|e| IoError::Corrupt(format!("document.json serialize: {e}")))
+    super::bounded::pretty(document, cap, "document.json")
 }
 
 /// Parses raw `document.json` bytes into a [`serde_json::Value`].

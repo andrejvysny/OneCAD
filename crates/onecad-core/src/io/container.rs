@@ -200,6 +200,59 @@ pub const MAX_PREVIEW_BYTES: u64 = 2 * MB;
 /// Below this size, entries are Stored (deflate framing is not worth it).
 const STORE_THRESHOLD: usize = 64;
 
+/// Shared inclusive section and container admission used before publication.
+struct Admission {
+    entries: usize,
+    total: u64,
+    max_entries: usize,
+    max_total: u64,
+}
+
+impl Admission {
+    fn new(max_entries: usize, max_total: u64) -> Self {
+        Self {
+            entries: 0,
+            total: 0,
+            max_entries,
+            max_total,
+        }
+    }
+
+    fn add(&mut self, path: &str, bytes: u64) -> IoResult<()> {
+        self.add_container(bytes)?;
+        if bytes > section_cap(path) {
+            return Err(IoError::TooLarge(format!("section cap exceeded: {path}")));
+        }
+        Ok(())
+    }
+
+    fn add_container(&mut self, bytes: u64) -> IoResult<()> {
+        self.entries = self
+            .entries
+            .checked_add(1)
+            .ok_or_else(|| IoError::TooLarge("container entry overflow".into()))?;
+        self.total = self
+            .total
+            .checked_add(bytes)
+            .ok_or_else(|| IoError::TooLarge("container size overflow".into()))?;
+        if self.entries > self.max_entries || self.total > self.max_total {
+            return Err(IoError::TooLarge("container admission cap exceeded".into()));
+        }
+        Ok(())
+    }
+}
+
+fn section_cap(path: &str) -> u64 {
+    match path {
+        MANIFEST_PATH => MAX_MANIFEST_BYTES,
+        DOCUMENT_PATH => MAX_DOCUMENT_BYTES,
+        OPS_PATH => MAX_OPS_BYTES,
+        _ if path.starts_with(IMPORTS_DIR) => MAX_IMPORT_BLOB_BYTES,
+        _ if path.starts_with("library/") => super::library::MAX_LIBRARY_ARCHIVE_BYTES,
+        _ => MAX_BLOB_BYTES,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Writer inputs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -305,8 +358,31 @@ enum SaveTestStage {
 
 type SaveHook<'a> = Option<&'a mut dyn FnMut(SaveTestStage) -> std::io::Result<()>>;
 
+/// Per-call save ceilings. Production uses reader-compatible defaults.
+#[derive(Clone, Copy, Debug)]
+pub struct SaveLimits {
+    pub document: u64,
+    pub manifest: u64,
+    pub operations: u64,
+    pub total: u64,
+    pub entries: usize,
+}
+
+impl Default for SaveLimits {
+    fn default() -> Self {
+        Self {
+            document: MAX_DOCUMENT_BYTES,
+            manifest: MAX_MANIFEST_BYTES,
+            operations: MAX_OPS_BYTES,
+            total: MAX_TOTAL_BYTES,
+            entries: MAX_ENTRIES,
+        }
+    }
+}
+
 struct SaveOptions<'a> {
     commit: bool,
+    limits: SaveLimits,
     hook: SaveHook<'a>,
 }
 
@@ -336,6 +412,7 @@ impl ContainerWriter {
             meta,
             SaveOptions {
                 commit: true,
+                limits: SaveLimits::default(),
                 hook: None,
             },
         )
@@ -373,6 +450,7 @@ impl ContainerWriter {
             meta,
             SaveOptions {
                 commit: true,
+                limits: SaveLimits::default(),
                 hook: None,
             },
         )
@@ -398,6 +476,7 @@ impl ContainerWriter {
             meta,
             SaveOptions {
                 commit: true,
+                limits: SaveLimits::default(),
                 hook: None,
             },
         )
@@ -425,7 +504,36 @@ impl ContainerWriter {
             meta,
             SaveOptions {
                 commit: true,
+                limits: SaveLimits::default(),
                 hook: Some(hook),
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Test-only per-call ceilings; values cannot raise production admission limits.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn save_with_test_limits(
+        path: &Path,
+        document: &Document,
+        caches: &ContainerCaches,
+        imports: &ImportBlobs,
+        archives: &super::library::LibraryArchives,
+        meta: &SaveMeta,
+        limits: SaveLimits,
+    ) -> IoResult<()> {
+        Self::save_inner(
+            path,
+            document,
+            caches,
+            imports,
+            archives,
+            meta,
+            SaveOptions {
+                commit: true,
+                limits,
+                hook: None,
             },
         )
         .map(|_| ())
@@ -453,6 +561,7 @@ impl ContainerWriter {
             meta,
             SaveOptions {
                 commit: false,
+                limits: SaveLimits::default(),
                 hook: None,
             },
         )
@@ -480,25 +589,26 @@ impl ContainerWriter {
         if archives.len() > MAX_ENTRIES.saturating_sub(3) {
             return Err(IoError::TooLarge("too many library archives".into()));
         }
-        let sections = build_sections(document, caches, imports, archives)?;
+        let limits = options.limits;
+        let sections = build_sections_bounded(document, caches, imports, archives, limits)?;
         let manifest = build_manifest(document, meta, &sections);
-        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-            .map_err(|e| IoError::Corrupt(format!("manifest serialize: {e}")))?;
+        let manifest_bytes = super::bounded::pretty(
+            &manifest,
+            limits.manifest.min(MAX_MANIFEST_BYTES),
+            MANIFEST_PATH,
+        )?;
 
-        if !archives.is_empty() {
-            let total =
-                sections
-                    .iter()
-                    .try_fold(manifest_bytes.len() as u64, |size, section| {
-                        size.checked_add(section.bytes.len() as u64)
-                            .ok_or_else(|| IoError::TooLarge("container size overflow".into()))
-                    })?;
-            if sections.len() + 1 > MAX_ENTRIES || total > MAX_TOTAL_BYTES {
-                return Err(IoError::TooLarge(
-                    "container entry or size cap exceeded".into(),
-                ));
-            }
+        let mut admission = Admission::new(
+            limits.entries.min(MAX_ENTRIES),
+            limits.total.min(MAX_TOTAL_BYTES),
+        );
+        admission.add(MANIFEST_PATH, manifest_bytes.len() as u64)?;
+        for section in &sections {
+            admission.add(&section.path, section.bytes.len() as u64)?;
         }
+        let value = document_io::parse_value(&sections[0].bytes)?;
+        let decoded = document_io::document_from_value(value)?;
+        validate_persisted_shells(&decoded)?;
 
         let parent = super::parent_directory(path);
         std::fs::create_dir_all(parent)?;
@@ -526,21 +636,36 @@ impl ContainerWriter {
 
 /// Builds the section list (authoritative + derived + imports + caches) with
 /// validated names.
+#[cfg(test)]
 fn build_sections<'a>(
     document: &Document,
     caches: &ContainerCaches,
     imports: &ImportBlobs,
     archives: &'a super::library::LibraryArchives,
 ) -> IoResult<Vec<Section<'a>>> {
+    build_sections_bounded(document, caches, imports, archives, SaveLimits::default())
+}
+
+fn build_sections_bounded<'a>(
+    document: &Document,
+    caches: &ContainerCaches,
+    imports: &ImportBlobs,
+    archives: &'a super::library::LibraryArchives,
+    limits: SaveLimits,
+) -> IoResult<Vec<Section<'a>>> {
     let mut sections = Vec::new();
     sections.push(Section {
         path: DOCUMENT_PATH.to_string(),
-        bytes: std::borrow::Cow::Owned(document_io::serialize_document(document)?),
+        bytes: std::borrow::Cow::Owned(document_io::serialize_document_bounded(
+            document,
+            limits.document.min(MAX_DOCUMENT_BYTES),
+        )?),
     });
     sections.push(Section {
         path: OPS_PATH.to_string(),
-        bytes: std::borrow::Cow::Owned(history_io::serialize_ops_jsonl(
+        bytes: std::borrow::Cow::Owned(history_io::serialize_ops_jsonl_bounded(
             document.timeline.records(),
+            limits.operations.min(MAX_OPS_BYTES),
         )?),
     });
     // Authoritative-for-a-record import blobs, refcounted against live records.
@@ -1152,7 +1277,7 @@ fn guard_directory<R: Read + Seek>(
     }
     let mut imports = Vec::new();
     let mut library_archives = Vec::new();
-    let mut total: u64 = 0;
+    let mut admission = Admission::new(MAX_ENTRIES, MAX_TOTAL_BYTES);
     for i in 0..archive.len() {
         let file = archive
             .by_index(i)
@@ -1168,12 +1293,7 @@ fn guard_directory<R: Read + Seek>(
         if file.name().contains('\\') {
             return Err(IoError::PathTraversal(file.name().to_string()));
         }
-        total = total.saturating_add(file.size());
-        if total > MAX_TOTAL_BYTES {
-            return Err(IoError::TooLarge(format!(
-                "declared uncompressed size exceeds the {MAX_TOTAL_BYTES}-byte cap"
-            )));
-        }
+        admission.add_container(file.size())?;
         if let Some(sha256) = super::library::parse_path(file.name()) {
             if library_archives
                 .iter()
@@ -1292,6 +1412,116 @@ mod tests {
     use crate::document::variables::Scalar;
     use crate::ids::{BodyId, DocumentId, ElementId, RecordId};
     use uuid::Uuid;
+
+    #[test]
+    fn per_call_save_boundaries_reopen_and_rejection_preserves_bytes() {
+        let area = tempfile::tempdir().unwrap();
+        let path = area.path().join("bounded.onecad");
+        let document = doc(1, 10.0);
+        let caches = ContainerCaches::none();
+        let imports = ImportBlobs::new();
+        let archives = Default::default();
+        let sections = build_sections(&document, &caches, &imports, &archives).unwrap();
+        let manifest = build_manifest(&document, &meta(), &sections);
+        let manifest_size = serde_json::to_vec_pretty(&manifest).unwrap().len() as u64;
+        let exact = SaveLimits {
+            document: sections[0].bytes.len() as u64,
+            operations: sections[1].bytes.len() as u64,
+            manifest: manifest_size,
+            total: manifest_size + sections.iter().map(|s| s.bytes.len() as u64).sum::<u64>(),
+            entries: sections.len() + 1,
+        };
+        let save = |limits| {
+            ContainerWriter::save_inner(
+                &path,
+                &document,
+                &caches,
+                &imports,
+                &archives,
+                &meta(),
+                SaveOptions {
+                    commit: true,
+                    limits,
+                    hook: None,
+                },
+            )
+        };
+        save(exact).unwrap();
+        ContainerReader::open(&path).unwrap();
+        let accepted = std::fs::read(&path).unwrap();
+        for limits in [
+            SaveLimits {
+                document: exact.document - 1,
+                ..exact
+            },
+            SaveLimits {
+                operations: exact.operations - 1,
+                ..exact
+            },
+            SaveLimits {
+                manifest: exact.manifest - 1,
+                ..exact
+            },
+            SaveLimits {
+                total: exact.total - 1,
+                ..exact
+            },
+            SaveLimits {
+                entries: exact.entries - 1,
+                ..exact
+            },
+        ] {
+            assert!(matches!(save(limits), Err(IoError::TooLarge(_))));
+            assert_eq!(std::fs::read(&path).unwrap(), accepted);
+            ContainerReader::open(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn admission_inclusive_boundaries_and_overflow() {
+        let mut admission = Admission::new(2, 9);
+        admission.add_container(4).unwrap();
+        admission.add_container(5).unwrap();
+        assert!(admission.add_container(0).is_err());
+        assert!(Admission::new(1, 8).add_container(9).is_err());
+        let mut overflow = Admission::new(usize::MAX, u64::MAX);
+        overflow.add_container(u64::MAX).unwrap();
+        assert!(overflow.add_container(1).is_err());
+        for path in [
+            MANIFEST_PATH,
+            DOCUMENT_PATH,
+            OPS_PATH,
+            "preview.png",
+            "imports/x.step",
+            "library/x.zip",
+        ] {
+            let cap = section_cap(path);
+            Admission::new(1, u64::MAX).add(path, cap).unwrap();
+            assert!(Admission::new(1, u64::MAX).add(path, cap + 1).is_err());
+        }
+    }
+
+    #[test]
+    fn save_without_library_refuses_unreadable_entry_count() {
+        let area = tempfile::tempdir().unwrap();
+        let path = area.path().join("model.onecad");
+        std::fs::write(&path, b"previous usable state").unwrap();
+        let caches = ContainerCaches {
+            checkpoints: (0..MAX_ENTRIES)
+                .map(|step| CheckpointCache {
+                    step,
+                    json: vec![],
+                    bin: None,
+                })
+                .collect(),
+            ..ContainerCaches::none()
+        };
+        assert!(matches!(
+            ContainerWriter::save(&path, &doc(1, 10.0), &caches, &meta()),
+            Err(IoError::TooLarge(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"previous usable state");
+    }
 
     #[test]
     fn archive_sections_borrow_carrier_without_scratch_copy() {
@@ -1465,8 +1695,25 @@ mod tests {
                 "Shell",
                 op,
             ));
-        ContainerWriter::save(&path, &document, &ContainerCaches::none(), &meta()).unwrap();
-
+        let error =
+            ContainerWriter::save(&path, &document, &ContainerCaches::none(), &meta()).unwrap_err();
+        assert!(error.to_string().contains("typed ref body"));
+        assert!(!path.exists());
+        let archives = Default::default();
+        let sections = build_sections(
+            &document,
+            &ContainerCaches::none(),
+            &ImportBlobs::new(),
+            &archives,
+        )
+        .unwrap();
+        let manifest = build_manifest(&document, &meta(), &sections);
+        write_archive(
+            std::fs::File::create(&path).unwrap(),
+            &serde_json::to_vec(&manifest).unwrap(),
+            &sections,
+        )
+        .unwrap();
         let err = ContainerReader::open(&path).unwrap_err();
         assert!(err.to_string().contains("typed ref body"));
     }

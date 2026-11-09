@@ -905,3 +905,6 @@ async fn product_names_label_the_imported_bodies() {
     );
     wm.shutdown().await;
 }
+
+#[path = "step_import/project_import.rs"]
+mod project_import;

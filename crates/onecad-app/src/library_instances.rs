@@ -1113,6 +1113,7 @@ length = {{ role = "free", value = 20, min = 2 }}
             .unwrap();
         let after = placed(&state, &a).await;
         assert_eq!(after.params, Params::from([("thread".into(), text("M8"))]));
+        assert_eq!(source_params(&after.source).get("length"), Some(&num(20.0)));
         reset_component_overrides_at(dir.path(), &state, a.clone(), None)
             .await
             .unwrap();
@@ -1122,6 +1123,10 @@ length = {{ role = "free", value = 20, min = 2 }}
         assert!(list[0].overrides.is_empty());
         assert_eq!(list[0].effective, list[0].defaults);
         assert_eq!(
+            source_params(&placed(&state, &a).await.source),
+            list[0].effective
+        );
+        assert_eq!(
             state.runtime.lock().await.as_ref().unwrap().undo_depth(),
             depth + 2
         );
@@ -1129,6 +1134,114 @@ length = {{ role = "free", value = 20, min = 2 }}
         assert!(again.unwrap_err().to_string().contains("no overrides"));
         let on_copy = reset_component_overrides_at(dir.path(), &state, copy, None).await;
         assert!(on_copy.is_err());
+    }
+
+    #[tokio::test]
+    async fn reopen_corrects_root_and_embedded_generator_inputs_atomically_offline() {
+        use onecad_core::document::component::ComponentDefId;
+        use onecad_core::edit::AssemblyEdit;
+        let (dir, state, [a, _, _]) = fixture().await;
+        let record: RecordId = a.parse().unwrap();
+        let definition = ComponentDefId::new();
+        let files = tempfile::tempdir().unwrap();
+        let path = files.path().join("legacy.onecad");
+        let mut legacy = placed(&state, &a).await;
+        let ComponentSourceRef::Generator { params, .. } = &mut legacy.source else {
+            panic!("generator")
+        };
+        params.clear();
+        {
+            let mut guard = state.runtime.lock().await;
+            let runtime = guard.as_mut().unwrap();
+            runtime
+                .apply(EditCommand::UpdateOperationParams {
+                    record,
+                    op: Operation::Known(KnownOperation::PlaceComponent(legacy.clone())),
+                })
+                .unwrap();
+            runtime
+                .apply_assembly_edit(AssemblyEdit::CopyRoot {
+                    id: definition,
+                    name: "Embedded".into(),
+                })
+                .unwrap();
+            runtime.save(&path, crate::api::save_meta()).unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        let without_evidence = files.path().join("missing-snapshot.onecad");
+        let loaded = onecad_core::io::container::ContainerReader::open(&path).unwrap();
+        onecad_core::io::container::ContainerWriter::save(
+            &without_evidence,
+            loaded.document(),
+            &Default::default(),
+            &crate::api::save_meta(),
+        )
+        .unwrap();
+        drop(dir);
+        let (engine, meshes, solver) = state.make_backend();
+        let mut refused =
+            DocumentRuntime::open_assembly(&without_evidence, engine, meshes, solver).unwrap();
+        assert!(
+            !refused.is_dirty(),
+            "unverified inputs must not be rewritten"
+        );
+        assert_eq!(refused.undo_depth(), 0);
+        assert!(refused
+            .prepare_component_replay(definition, &refused.runtime_session())
+            .is_err());
+        let report = refused
+            .run_regen(
+                onecad_core::regen::RegenRequest::ToEnd { from: 0 },
+                onecad_core::regen::CancelToken::new(),
+            )
+            .await;
+        assert!(matches!(report.outcome, onecad_core::regen::Outcome::NoOp));
+        let (engine, meshes, solver) = state.make_backend();
+        let mut reopened = DocumentRuntime::open_assembly(&path, engine, meshes, solver).unwrap();
+        assert!(reopened.is_dirty());
+        assert_eq!(reopened.path(), Some(path.as_path()));
+        assert_eq!(reopened.undo_depth(), 1);
+        assert!(crate::api::snapshot_of(&reopened).notices[0].contains("corrected"));
+        let corrected: PlaceComponentParams =
+            serde_json::from_value(reopened.operation_params(record).unwrap()).unwrap();
+        assert_eq!(source_params(&corrected.source)["length"], num(30.0));
+        assert_eq!(source_params(&corrected.source)["thread"], text("M8"));
+        reopened
+            .prepare_component_replay(definition, &reopened.runtime_session())
+            .unwrap();
+        reopened.undo().unwrap();
+        assert!(reopened
+            .prepare_component_replay(definition, &reopened.runtime_session())
+            .is_err());
+        let refused = reopened
+            .run_regen(
+                onecad_core::regen::RegenRequest::ToEnd { from: 0 },
+                onecad_core::regen::CancelToken::new(),
+            )
+            .await;
+        assert!(matches!(refused.outcome, onecad_core::regen::Outcome::NoOp));
+        assert_eq!(
+            serde_json::from_value::<PlaceComponentParams>(
+                reopened.operation_params(record).unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
+        reopened.redo().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let corrected_path = files.path().join("corrected.onecad");
+        reopened
+            .save(&corrected_path, crate::api::save_meta())
+            .unwrap();
+        let loaded = onecad_core::io::container::ContainerReader::open(&corrected_path).unwrap();
+        let embedded = loaded.document().definitions[&definition]
+            .timeline
+            .record_by_id(record)
+            .unwrap();
+        assert_eq!(
+            embedded.op,
+            Operation::Known(KnownOperation::PlaceComponent(corrected))
+        );
     }
 
     /// v1.0.0 defaults `thread_detail` to `cosmetic`, v1.1.0 to `simplified`.
@@ -1151,6 +1264,8 @@ generator = "iso4762"
 generator_version = 1
 
 [parameters]
+thread = {{ role = "free", value = "M6" }}
+length = {{ role = "free", value = 20 }}
 thread_detail = {{ role = "free", value = "{default}", domain = ["cosmetic", "simplified", "modeled"] }}
 "#,
             if version == "1.1.0" { "1" } else { "0" }.repeat(64)

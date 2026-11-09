@@ -266,14 +266,14 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
     } else {
         backend.paths.open_source(source)?
     };
-    match replace_from_path(backend, &path, step).await {
+    let notices = match replace_from_path(backend, &path, step).await {
         Err(onecad_app::error::ApiError::AlreadyOpen { host, .. })
         | Err(onecad_app::error::ApiError::DuplicateDocument { host, .. }) => {
             return Ok(Outcome::AlreadyOpen { host });
         }
         Err(error) => return Err(error.to_string()),
-        Ok(()) => {}
-    }
+        Ok(notices) => notices,
+    };
     if path != source {
         // The source is what the user opened: it stays owned while the copy is open.
         backend.state.add_claim(
@@ -287,15 +287,20 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
         onecad_app::recents::relocate(&backend.host, source, &path);
     }
     backend.startup_opened = true;
-    replacement_outcome(backend).await
+    let mut outcome = replacement_outcome(backend).await?;
+    if let Outcome::Replaced { warning } = &mut outcome {
+        let messages: Vec<_> = warning.take().into_iter().chain(notices).collect();
+        *warning = (!messages.is_empty()).then(|| messages.join("; "));
+    }
+    Ok(outcome)
 }
 
 async fn replace_from_path(
     backend: &Backend,
     path: &Path,
     step: bool,
-) -> Result<(), onecad_app::error::ApiError> {
-    if step {
+) -> Result<Vec<String>, onecad_app::error::ApiError> {
+    let snapshot = if step {
         api::import_step(
             &backend.state,
             backend.host.clone(),
@@ -311,7 +316,7 @@ async fn replace_from_path(
         )
         .await
     }?;
-    Ok(())
+    Ok(snapshot.notices)
 }
 
 async fn replacement_outcome(backend: &mut Backend) -> Result<Outcome, String> {

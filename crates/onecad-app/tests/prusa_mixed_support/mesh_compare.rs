@@ -67,7 +67,12 @@ fn mesh_changes(left: &MeshView<'_>, right: &MeshView<'_>) -> String {
             changed.push(section.section_type);
         }
     }
-    format!("headers_equal={}; left header={a:?}; right header={b:?}; differing section types={changed:?}; face IDs {}; edge IDs {}", a == b, id_changes(left, right, true), id_changes(left, right, false))
+    format!(
+        "headers_equal={}; left header={a:?}; right header={b:?}; differing section types={changed:?}; face IDs {}; edge IDs {}",
+        a == b,
+        id_changes(left, right, true),
+        id_changes(left, right, false)
+    )
 }
 
 fn id_changes(left: &MeshView<'_>, right: &MeshView<'_>, faces: bool) -> String {

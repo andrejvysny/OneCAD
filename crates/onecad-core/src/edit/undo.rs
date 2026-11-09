@@ -54,6 +54,10 @@ pub const UNDO_CAP: usize = 200;
 /// reverse.
 #[derive(Debug, Clone)]
 pub enum Inverse {
+    /// Restores all topology authority installed by a prepared project import.
+    RestoreElements {
+        elements: Box<crate::document::element_index::ElementIndex>,
+    },
     /// Restore component and occurrence state as one document undo step.
     RestoreAssembly {
         definition: Option<(
@@ -165,6 +169,7 @@ impl Inverse {
     #[must_use]
     pub fn dirty_floor(&self, doc: &Document) -> Option<usize> {
         match self {
+            Inverse::RestoreElements { .. } => Some(0),
             Inverse::RestoreAssembly { .. } => None,
             // Undo of an add: the record is still present, so its index is exact.
             // A missing record should be impossible (the memento is applied against
@@ -206,6 +211,7 @@ impl Inverse {
     /// Restores the mementoed prior state onto `doc`.
     pub(crate) fn apply(self, doc: &mut Document) {
         match self {
+            Inverse::RestoreElements { elements } => doc.elements = *elements,
             Inverse::RestoreAssembly {
                 definition,
                 assembly,
@@ -387,6 +393,13 @@ impl UndoStack {
         match direction {
             HistoryDirection::Undo => self.undo.last(),
             HistoryDirection::Redo => self.redo.last(),
+        }
+    }
+
+    pub(crate) fn history_txn_mut(&mut self, direction: HistoryDirection) -> Option<&mut Txn> {
+        match direction {
+            HistoryDirection::Undo => self.undo.last_mut(),
+            HistoryDirection::Redo => self.redo.last_mut(),
         }
     }
 

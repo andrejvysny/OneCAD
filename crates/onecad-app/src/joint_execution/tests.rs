@@ -242,3 +242,154 @@ fn cancellation_advances_latest_ticket() {
     cancel_joint_solves(&state).unwrap();
     assert_ne!(state.joint_ticket.load(Ordering::Acquire), first);
 }
+
+#[tokio::test]
+async fn suppressed_repair_binding_skips_resolution_but_checks_ownership() {
+    use onecad_assembly::occurrence::{ComponentDefId, Occurrence};
+    use onecad_core::{
+        document::component::{JointBinding, JointSide, JointSurface, OccurrencePath},
+        edit::AssemblyEdit,
+    };
+    let backend = std::sync::Arc::new(crate::worker::PendingBackend);
+    let mut runtime = crate::document_runtime::DocumentRuntime::new_blank(
+        backend.clone(),
+        backend.clone(),
+        backend,
+    );
+    let definition = ComponentDefId(Uuid::from_u128(30));
+    runtime
+        .apply_assembly_edit(AssemblyEdit::CreateDefinition {
+            id: definition,
+            name: "part".into(),
+        })
+        .unwrap();
+    for n in [1, 2] {
+        runtime
+            .apply_assembly_edit(AssemblyEdit::InsertOccurrence {
+                occurrence: Occurrence {
+                    id: OccurrenceId(Uuid::from_u128(n)),
+                    def: definition,
+                    parent: None,
+                    local: RigidTransform::IDENTITY,
+                    grounded: true,
+                    name: n.to_string(),
+                },
+            })
+            .unwrap();
+    }
+    let mut joint = joint(10, 1, 2);
+    joint.suppressed = true;
+    let body = onecad_core::ids::BodyId(Uuid::from_u128(31));
+    let binding = JointBinding {
+        joint: joint.id,
+        side: JointSide::A,
+        path: OccurrencePath(vec![joint.a.occurrence]),
+        definition,
+        body,
+        element: serde_json::from_value(serde_json::json!({
+            "primary": {"bodyId": body, "elementId": "el_suppressed", "kind": "face"},
+            "intent": {"version": 1, "kind": "face", "descriptor": {}},
+            "anchor": {"worldPoint": [0.0, 0.0, 0.0]}
+        }))
+        .unwrap(),
+        surface: JointSurface::Plane,
+        radius: None,
+        orientation_x: Vec3d::X,
+        needs_repair: true,
+    };
+    let session = runtime.runtime_session();
+    let generation = runtime.persisted_generation();
+    let state = AppState::default();
+    *state.runtime.lock().await = Some(runtime);
+    let joints = [joint.clone()];
+    validate_bound_origins(
+        &state,
+        &session,
+        generation,
+        &joints,
+        std::slice::from_ref(&binding),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+    let foreign = ComponentDefId(Uuid::from_u128(33));
+    let foreign_body = onecad_core::ids::BodyId(Uuid::from_u128(32));
+    {
+        let mut guard = state.runtime.lock().await;
+        let runtime = guard.as_mut().unwrap();
+        runtime
+            .apply_assembly_edit(AssemblyEdit::CreateDefinition {
+                id: foreign,
+                name: "foreign".into(),
+            })
+            .unwrap();
+        runtime
+            .apply_assembly_edit(AssemblyEdit::EditDefinition {
+                id: foreign,
+                command: Box::new(onecad_core::edit::EditCommand::AddBody {
+                    body: onecad_core::document::body::BodyMeta::new(
+                        foreign_body,
+                        "foreign body",
+                        onecad_core::ids::RecordId(Uuid::from_u128(34)),
+                    ),
+                }),
+            })
+            .unwrap();
+    }
+    let generation = state
+        .runtime
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .persisted_generation();
+    let mut foreign_binding = binding.clone();
+    foreign_binding.body = foreign_body;
+    foreign_binding.element.primary.as_mut().unwrap().body = foreign_body;
+    assert!(validate_bound_origins(
+        &state,
+        &session,
+        generation,
+        &joints,
+        &[foreign_binding],
+        None,
+        0
+    )
+    .await
+    .is_err());
+    let mut malformed = binding.clone();
+    malformed.body = onecad_core::ids::BodyId(Uuid::from_u128(32));
+    assert!(
+        validate_bound_origins(&state, &session, generation, &joints, &[malformed], None, 0)
+            .await
+            .is_err()
+    );
+    assert!(validate_bound_origins(
+        &state,
+        &session,
+        generation,
+        &joints,
+        &[binding.clone(), binding.clone()],
+        None,
+        0
+    )
+    .await
+    .is_err());
+    joint.suppressed = false;
+    assert!(
+        validate_bound_origins(&state, &session, generation, &[joint], &[binding], None, 0)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        state
+            .runtime
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .persisted_generation(),
+        generation
+    );
+}

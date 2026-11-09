@@ -128,7 +128,13 @@ impl ComponentReplayInput {
                 "component worker epoch changed during replay".into(),
             ));
         }
+        if let Some(proof) = &self.evidence_translation {
+            proof.apply(&mut working)?;
+        }
         let quarantine = self.rebind_component(&mut working).await?;
+        if let Some(proof) = &self.evidence_translation {
+            proof.refresh(&mut working, &worker).await?;
+        }
         let (meshes, _) = collect_fresh_meshes(&working).await?;
         let snapshot = working
             .latest_snapshot
@@ -140,6 +146,9 @@ impl ComponentReplayInput {
         } else {
             false
         };
+        if let Some(proof) = &self.evidence_translation {
+            proof.validate_inventory(&self.definition.elements, &working.regen.elements)?;
+        }
         drop(meshes);
         let (meshes, budget) = collect_fresh_meshes(&working).await?;
         let head = worker
@@ -163,11 +172,12 @@ impl ComponentReplayInput {
             .ok_or_else(|| {
                 ApiError::InvalidCommand("component replay context serialization failed".into())
             })?;
-        let identity_signature = if promote || continuation_retention.is_some() {
-            Some(mesh_signatures(&meshes)?)
-        } else {
-            None
-        };
+        let identity_signature =
+            if promote || continuation_retention.is_some() || self.evidence_translation.is_some() {
+                Some(mesh_signatures(&meshes)?)
+            } else {
+                None
+            };
         drop(working);
         let translated = continuation_retention.is_some();
         drop(continuation_retention);
@@ -181,10 +191,14 @@ impl ComponentReplayInput {
             meshes,
             budget,
             snapshot,
-            minted: minted || translated || quarantine.is_some(),
+            minted: minted
+                || translated
+                || quarantine.is_some()
+                || self.evidence_translation.is_some(),
             replay_context,
             identity_signature,
             quarantine,
+            evidence_translation: self.evidence_translation,
             _retention: self._retention,
         })
     }

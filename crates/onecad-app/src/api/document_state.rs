@@ -18,6 +18,7 @@ pub async fn get_document_state(state: &AppState) -> Result<DocumentState, ApiEr
             path: runtime
                 .path()
                 .map(|path| bounded_text(&path.to_string_lossy(), MAX_PATH_BYTES)),
+            notices: runtime.parameter_correction_notice().into_iter().collect(),
         },
         None => DocumentState::default(),
     })

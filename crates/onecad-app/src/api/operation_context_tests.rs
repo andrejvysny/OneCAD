@@ -820,6 +820,7 @@ kind = "generator"
 generator = "iso4762"
 generator_version = 1
 [parameters]
+length = {{ role = "free", value = 20 }}
 thread = {{ role = "free", value = "M3", domain = ["M3", "M6"] }}
 "#,
         "0".repeat(64)

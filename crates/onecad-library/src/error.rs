@@ -56,6 +56,15 @@ pub enum LibraryError {
     )]
     AlreadyExists { id: String, version: String },
 
+    #[error("{id}@{version} was published at {path}, but durability is unconfirmed: {message}")]
+    PublishedDurabilityUnconfirmed {
+        id: String,
+        version: String,
+        revision: String,
+        path: PathBuf,
+        message: String,
+    },
+
     #[error("io error: {0}")]
     Io(String),
 }

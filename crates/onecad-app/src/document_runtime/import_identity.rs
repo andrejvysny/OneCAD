@@ -3,6 +3,100 @@ use super::*;
 use onecad_core::regen::WorkerElementEvidence;
 
 impl DocumentRuntime {
+    pub(crate) fn validate_project_import_namespace(
+        &self,
+        imported: &onecad_core::io::project_import::ImportedProject,
+    ) -> Result<(), ApiError> {
+        for (id, entry) in imported.elements.iter() {
+            if self.regen.elements.contains(id) || self.staged.contains_key(id) {
+                return Err(ApiError::InvalidCommand(format!(
+                    "cannot import: source element id {id} already exists in this document"
+                )));
+            }
+            if self.regen.bodies.get(entry.body).is_some()
+                || self
+                    .regen
+                    .elements
+                    .iter()
+                    .any(|(_, other)| other.body == entry.body)
+                || self.staged.values().any(|other| other.body == entry.body)
+            {
+                return Err(ApiError::InvalidCommand(format!(
+                    "cannot import: source body id {} already exists in this document",
+                    entry.body
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_imported_elements(
+        &mut self,
+        elements: &onecad_core::document::element_index::ElementIndex,
+    ) {
+        for (id, entry) in elements.iter() {
+            self.regen.elements.insert(id.clone(), entry.clone());
+        }
+    }
+
+    pub(crate) fn remove_imported_elements(
+        &mut self,
+        elements: &onecad_core::document::element_index::ElementIndex,
+    ) {
+        for (id, _) in elements.iter() {
+            self.regen.elements.remove(id);
+            self.staged.remove(id);
+        }
+        self.promoted
+            .retain(|_, entry| !elements.contains(&entry.element_id));
+    }
+
+    pub(crate) fn discard_pending_import_elements(
+        &mut self,
+        elements: &onecad_core::document::element_index::ElementIndex,
+    ) {
+        for (id, _) in elements.iter() {
+            self.staged.remove(id);
+        }
+        self.promoted
+            .retain(|_, entry| !elements.contains(&entry.element_id));
+    }
+
+    pub(crate) fn validate_import_redo_namespace(
+        &self,
+        project: &onecad_core::edit::project_import::ProjectImportEdit,
+    ) -> Result<(), DomainError> {
+        let producers: std::collections::BTreeSet<_> = project
+            .records
+            .iter()
+            .map(|record| record.record_id)
+            .collect();
+        for (id, entry) in project.elements.iter() {
+            if self.regen.elements.contains(id)
+                || self.staged.contains_key(id)
+                || self
+                    .regen
+                    .elements
+                    .iter()
+                    .any(|(_, existing)| existing.body == entry.body)
+                || self
+                    .staged
+                    .values()
+                    .any(|existing| existing.body == entry.body)
+                || self
+                    .regen
+                    .bodies
+                    .get(entry.body)
+                    .is_some_and(|body| !producers.contains(&body.created_by))
+            {
+                return Err(DomainError::Validation(
+                    "project import redo identity namespace collision".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_import_evidence(
         &self,
         evidence: &WorkerElementEvidence,
@@ -152,6 +246,7 @@ impl DocumentRuntime {
             .map_err(DomainError::Validation)
         };
         match command {
+            EditCommand::ImportProject { project } => project.validate()?,
             EditCommand::AddOperation { record, .. } => {
                 if let Operation::Known(operation) = &mut record.op {
                     for reference in operation.stored_element_refs_mut() {

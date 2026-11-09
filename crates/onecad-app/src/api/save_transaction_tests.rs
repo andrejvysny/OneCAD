@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 use worker_support::add_variable;
 
+#[path = "save_admission_tests.rs"]
+mod admission_tests;
+
 #[tokio::test]
 async fn failed_directory_sync_keeps_old_path_dirty_recovery_and_releases_new_claim() {
     let area = tempfile::tempdir().unwrap();

@@ -54,6 +54,9 @@ use onecad_app::worker::{resolve_worker_path, MeshProvider, SolverEngine, Worker
 
 use onecad_protocol::mesh::validate_mesh_blob;
 
+#[path = "perf_baseline/measurement.rs"]
+mod measurement;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Harness (mirrors breadth_ops.rs)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -446,6 +449,10 @@ fn print_table(rows: &[Row]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn regen_baseline_forty_feature_part() {
+    if let Some(out) = std::env::var_os("ONECAD_PERF_OUT") {
+        measurement::run(std::path::Path::new(&out)).await.unwrap();
+        return;
+    }
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary");
         return;

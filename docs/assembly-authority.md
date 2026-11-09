@@ -42,6 +42,15 @@ instances are refused. The assembly model validates rigid transforms, existing
 definition and occurrence references, joint structure, and the existing
 occurrence limits.
 
+Core `SetPose` refuses a changed pose for either endpoint of any unsuppressed
+joint, including a joint requiring repair. An identical pose is a no-op. Free
+occurrences and occurrences connected only by suppressed joints remain movable.
+Solved poses use the separate fenced publication path. Binding ownership,
+joint/side uniqueness, occurrence path, definition and body association are
+validated before suppression is considered. Suppressed stale bindings retain
+their repair evidence without geometric origin resolution; unsuppressing them
+must resolve that evidence before publishing poses or history.
+
 The default part-only open path refuses nonempty assemblies. An explicit
 assembly-aware backend path exposes edits, projection, and on-demand replay.
 The native host uses this path for open and recovery, captures shared local
@@ -52,6 +61,22 @@ fences commit by runtime session, revision, component inputs, and worker epoch;
 the existing executor validates the base hash. Checked meshes remain local to
 the definition and are shared by occurrences. The worker retires and is reaped
 before its permit becomes available; failures retain the prior accepted scene.
+
+Replacing one trailing literal translation still uses full replay. A separate
+evidence receipt can transport native descriptors and anchors by the exact
+new-minus-old translation when the verified cache, worker head and epoch,
+generation, settings/import context, unchanged history prefix and operands all
+match. Retained prior definitions require their own size admission. This path
+refuses certified or quarantined identities, copies, rotations, expressions,
+unknown descriptor fields and unknown spatial anchor/frame extensions. It keeps
+the existing continuation exclusions and checkpoint policy unchanged.
+
+After replay, normal reference confidence gates must rebind every original
+identity. Worker queries refresh those same IDs, body ownership and kind; they
+cannot mint substitutes. A separate fresh worker then replays the refreshed
+definition without either translation mechanism and verifies the mesh signature
+before fenced adoption. The receipt is not persisted. Save/reopen uses the
+refreshed ordinary evidence.
 
 The scoped element query rehydrates a definition and accepts persisted element
 IDs only. Replay samples an interior triangle point for each unbound face, promotes
@@ -88,6 +113,14 @@ are retained from every embedded definition. Import Project refuses an assembly 
 It also refuses documents carrying component-package metadata or archive entries
 until that source closure can be imported atomically; opening such a document
 directly preserves it. MESH1 and OCW1 remain unchanged.
+
+Supported part-project imports carry records, sketches and their source element
+index in one prepared transaction. Certificate producers, source blobs,
+body/kind ownership and target namespaces are checked before publication.
+Certified identities are preserved, never remapped to resolve a collision.
+Generic edit APIs cannot author this prepared import or nest one inside a
+definition edit. Failed admission releases staged source ownership, while
+Undo/Redo retains the imported authority in the same history entry.
 
 For regular acyclic joint graphs with at most one grounded body per connected
 component, the solver certifies local equality-constraint rank structurally.

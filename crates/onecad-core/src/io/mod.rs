@@ -51,6 +51,7 @@
 //! `hostile_deeply_nested_json_errors`). Hostile STEP is out of scope here — it is
 //! handled in the isolated worker.
 
+mod bounded;
 pub mod container;
 pub mod document_io;
 pub mod history_io;

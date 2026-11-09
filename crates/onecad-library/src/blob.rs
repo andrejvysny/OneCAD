@@ -100,11 +100,11 @@ impl BlobStore {
             let existing = self.get(&sha256)?;
             verify_existing(&sha256, bytes, &existing)?;
             std::fs::File::open(&path)?.sync_all()?;
-            create_durable_directory(&self.root)?;
+            crate::publication::create_durable_directory(&self.root)?;
             std::fs::File::open(&self.root)?.sync_all()?;
             return Ok(sha256);
         }
-        create_durable_directory(&self.root)?;
+        crate::publication::create_durable_directory(&self.root)?;
         let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
         write(temporary.as_file_mut(), bytes)?;
         temporary.as_file().sync_all()?;
@@ -191,33 +191,6 @@ fn verify_existing(key: &str, expected: &[u8], existing: &[u8]) -> LibraryResult
             expected: key.to_string(),
             actual: sha256_hex(existing),
         });
-    }
-    Ok(())
-}
-
-fn create_durable_directory(path: &std::path::Path) -> std::io::Result<()> {
-    if path.is_dir() {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
-        return Ok(());
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    if let Some(parent) = parent {
-        create_durable_directory(parent)?;
-    }
-    match std::fs::create_dir(path) {
-        Ok(()) => (),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => (),
-        Err(error) => return Err(error),
-    }
-    if let Some(parent) = parent {
-        std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
 }

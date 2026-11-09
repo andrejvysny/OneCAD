@@ -243,8 +243,14 @@ async fn late_clean_display_cannot_replace_authoritative_dirty_lifecycle() {
             dirty: true,
             title: "Unsaved replacement".into(),
             path: Some("/replacement.onecad".into()),
+            notices: vec!["Verified component inputs corrected; save to keep changes".into()],
         });
     app.sync_document_state();
+    assert!(app.doc.diagnostics.contains(
+        crate::diagnostics::Source::Application,
+        crate::diagnostics::State::Warning,
+        "component inputs corrected",
+    ));
     app.adopt_display(old);
     assert!(app.document_dirty());
     assert_eq!(

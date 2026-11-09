@@ -2,6 +2,7 @@
 use super::*;
 use onecad_core::document::component::{ComponentDef, ComponentDefId, OccurrencePath};
 use onecad_protocol::mesh::{MeshLimits, MeshView};
+mod evidence_translation;
 mod preflight;
 mod quarantine;
 mod translation;
@@ -82,6 +83,7 @@ pub(crate) struct ComponentReplayInput {
     pub source_fingerprint: String,
     pub definition: ComponentDef,
     pub translation_prefix: Option<translation::TranslationBase>,
+    pub evidence_translation: Option<evidence_translation::EvidenceTranslation>,
     pub settings: onecad_core::document::DocumentSettings,
     pub imports: ImportBlobs,
     pub revision_fence: Arc<AtomicU64>,
@@ -105,6 +107,7 @@ pub(crate) struct ComponentReplayOutput {
     replay_context: [u8; 32],
     identity_signature: Option<BTreeMap<BodyId, Vec<u8>>>,
     quarantine: Option<quarantine::QuarantineCommit>,
+    evidence_translation: Option<evidence_translation::EvidenceTranslation>,
     pub(crate) _retention: crate::resource_admission::Retention,
 }
 
@@ -131,6 +134,11 @@ impl DocumentRuntime {
         id: ComponentDefId,
         session: &str,
     ) -> Result<ComponentReplayInput, ApiError> {
+        if self.parameter_repair_gate(Some(id)).is_some() {
+            return Err(ApiError::InvalidCommand(
+                "component generator inputs require verified parameter repair".into(),
+            ));
+        }
         if !self.matches_runtime_session(session) {
             return Err(ApiError::InvalidCommand(
                 "component replay belongs to a stale runtime".into(),
@@ -161,6 +169,11 @@ impl DocumentRuntime {
         } else {
             self.component_translation_prefix(id, def)
         };
+        let evidence_translation = if translation_prefix.is_none() && quarantine.is_none() {
+            self.component_evidence_translation(id, def)
+        } else {
+            None
+        };
         Ok(ComponentReplayInput {
             id,
             namespace: namespace(doc.id, id),
@@ -169,6 +182,7 @@ impl DocumentRuntime {
             source_fingerprint: fingerprint(def)?,
             definition: def.clone(),
             translation_prefix,
+            evidence_translation,
             settings: doc.settings.clone(),
             imports: self.imports.clone(),
             revision_fence: self.fencing.revision.clone(),
@@ -205,6 +219,9 @@ impl DocumentRuntime {
             return Err(ApiError::InvalidCommand(
                 "component definition changed during replay".into(),
             ));
+        }
+        if let Some(proof) = &output.evidence_translation {
+            self.validate_evidence_translation(output.id, proof)?;
         }
         self.check_component_budget(output.id, output.budget)?;
         if let Some(quarantine) = &output.quarantine {

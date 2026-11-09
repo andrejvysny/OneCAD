@@ -88,6 +88,7 @@ async fn apply_assembly_edit_inner(
             runtime.check_assembly_body_budget(&edit, maximum)?;
         }
         let before = runtime.persisted_generation();
+        runtime.validate_embedded_component_edit(&edit)?;
         runtime.apply_assembly_edit(edit)?;
         (
             runtime.assembly_projection()?,
@@ -406,6 +407,7 @@ async fn regenerate_component_inner(
         let mut verification = input;
         verification.definition = result.definition.clone();
         verification.translation_prefix = None;
+        verification.evidence_translation = None;
         let lease = open_worker(state, &verification).await?;
         let replay = verification
             .drive(lease.worker.clone(), lease.epoch, false)

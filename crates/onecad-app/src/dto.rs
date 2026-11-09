@@ -380,6 +380,8 @@ pub struct DocumentState {
     pub dirty: bool,
     pub title: String,
     pub path: Option<String>,
+    /// Bounded reopen notices, independent of geometry readiness.
+    pub notices: Vec<String>,
 }
 
 /// The full document projection (`documentStore.ts` `DocumentProjection`).
@@ -490,6 +492,8 @@ pub struct DocumentSnapshotDto {
     pub document_id: String,
     pub runtime_session: String,
     pub title: String,
+    /// Reopen corrections and refusal notices; callers should show these to the user.
+    pub notices: Vec<String>,
 }
 
 /// Authoritative state after a completed save (`src/ipc/types.ts` `SaveOutcome`).

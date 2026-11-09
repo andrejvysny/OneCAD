@@ -25,7 +25,81 @@ pub(crate) struct JointHead {
     base: onecad_core::regen::HistoryPrefixHash,
 }
 
+fn definition_owns_body(
+    definition: &onecad_core::document::component::ComponentDef,
+    body: BodyId,
+) -> bool {
+    definition.bodies.get(body).is_some()
+        || definition
+            .elements
+            .iter()
+            .any(|(_, entry)| entry.body == body)
+}
+
 impl DocumentRuntime {
+    pub(crate) fn validate_joint_binding_structure(
+        &self,
+        joints: &[Joint],
+        bindings: &[onecad_core::document::component::JointBinding],
+    ) -> Result<(), ApiError> {
+        let document = self.session.document();
+        let mut assembly = document.assembly.clone();
+        assembly.joints = joints.to_vec();
+        assembly.joint_bindings = bindings.to_vec();
+        assembly
+            .validate(document.root_definition_id, &document.definitions)
+            .map_err(ApiError::InvalidCommand)?;
+        for binding in bindings {
+            self.validate_joint_binding_ownership(binding)?;
+        }
+        Ok(())
+    }
+
+    fn validate_joint_binding_ownership(
+        &self,
+        binding: &onecad_core::document::component::JointBinding,
+    ) -> Result<(), ApiError> {
+        let document = self.session.document();
+        let definition = document
+            .definitions
+            .get(&binding.definition)
+            .ok_or_else(|| {
+                ApiError::InvalidCommand("joint binding definition unavailable".into())
+            })?;
+        let primary =
+            binding.element.primary.as_ref().ok_or_else(|| {
+                ApiError::InvalidCommand("joint binding identity unavailable".into())
+            })?;
+        let local = definition.elements.get(&primary.element);
+        let foreign_element = document.elements.contains(&primary.element)
+            || document.definitions.iter().any(|(id, other)| {
+                *id != binding.definition && other.elements.contains(&primary.element)
+            });
+        let local_body = definition_owns_body(definition, binding.body);
+        let foreign_body = document.bodies.get(binding.body).is_some()
+            || document
+                .elements
+                .iter()
+                .any(|(_, entry)| entry.body == binding.body)
+            || document.definitions.iter().any(|(id, other)| {
+                *id != binding.definition && definition_owns_body(other, binding.body)
+            });
+        if local.is_some_and(|entry| entry.body != binding.body || entry.kind != primary.kind)
+            // Independent copies share local IDs; the owning body's namespace wins.
+            || (local.is_none() && foreign_element && !local_body)
+            || (!local_body && foreign_body)
+        {
+            return Err(ApiError::InvalidCommand(
+                "joint binding body or element belongs to another definition".into(),
+            ));
+        }
+        onecad_core::document::import_source_identity::validate_reference(
+            &binding.element,
+            &definition.elements,
+        )
+        .map_err(ApiError::InvalidCommand)
+    }
+
     pub(crate) fn joint_head(&self) -> JointHead {
         JointHead {
             epoch: self.fencing.get().1,
@@ -116,14 +190,10 @@ impl DocumentRuntime {
             })
             .collect();
         super::super::joint_execution::validate_tree(&bodies, &joints, &drives)?;
-        let mut assembly = doc.assembly.clone();
-        assembly.joints = joints.clone();
-        if let Some(bindings) = &bindings {
-            assembly.joint_bindings = bindings.clone();
-        }
-        assembly
-            .validate(doc.root_definition_id, &doc.definitions)
-            .map_err(ApiError::InvalidCommand)?;
+        self.validate_joint_binding_structure(
+            &joints,
+            bindings.as_deref().unwrap_or(&doc.assembly.joint_bindings),
+        )?;
         let mut request = SolveRequest::new(bodies, joints);
         request.drive = drives;
         Ok(JointCapture {
@@ -230,6 +300,74 @@ mod tests {
             suppressed: false,
         };
         (runtime, vec![joint])
+    }
+
+    #[tokio::test]
+    async fn public_pose_services_refuse_constrained_motion_without_history() {
+        use crate::{api, state::AppState};
+        use onecad_core::edit::AssemblyEdit;
+        let (mut runtime, joints) = setup();
+        let capture = runtime
+            .prepare_joint_solve(&runtime.runtime_session(), joints.clone(), vec![])
+            .unwrap();
+        let SolveOutcome::Converged { poses, .. } = solver::solve(&capture.request) else {
+            panic!("solve failed")
+        };
+        runtime.commit_joint_solve(&capture, joints, poses).unwrap();
+        let session = runtime.runtime_session();
+        let generation = runtime.persisted_generation();
+        let depth = runtime.undo_depth();
+        let state = AppState::default();
+        *state.runtime.lock().await = Some(runtime);
+        for id in [1, 2] {
+            let change = || AssemblyEdit::SetPose {
+                occurrence: OccurrenceId(Uuid::from_u128(id)),
+                pose: RigidTransform::new(onecad_assembly::math::Quat::IDENTITY, Vec3d::X),
+            };
+            assert!(api::apply_assembly_edit(&state, &session, change())
+                .await
+                .is_err());
+            assert!(
+                api::apply_assembly_edit_at_generation(&state, &session, generation, change())
+                    .await
+                    .is_err()
+            );
+            assert!(api::apply_assembly_edit_for_display(
+                &state,
+                &session,
+                generation,
+                change(),
+                100
+            )
+            .await
+            .is_err());
+            assert!(matches!(
+                api::apply_assembly_edit_at_generation(&state, &session, generation - 1, change())
+                    .await,
+                Err(ApiError::StalePreview(_))
+            ));
+            api::apply_assembly_edit(
+                &state,
+                &session,
+                AssemblyEdit::SetPose {
+                    occurrence: OccurrenceId(Uuid::from_u128(id)),
+                    pose: RigidTransform::IDENTITY,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let guard = state.runtime.lock().await;
+        let runtime = guard.as_ref().unwrap();
+        assert_eq!(runtime.persisted_generation(), generation);
+        assert_eq!(runtime.undo_depth(), depth);
+        assert!(runtime
+            .session
+            .document()
+            .assembly
+            .occurrences
+            .iter()
+            .all(|occurrence| occurrence.local == RigidTransform::IDENTITY));
     }
 
     #[test]

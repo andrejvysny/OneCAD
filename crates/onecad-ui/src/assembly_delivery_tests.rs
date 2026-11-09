@@ -180,6 +180,7 @@ async fn invalid_limits_reach_diagnostics(
     context: &egui::Context,
     frame: &mut eframe::Frame,
 ) {
+    known_joint_occurrences(app, context, frame).await;
     for attempt in 0..2 {
         crate::assembly_controls::submit(
             app,
@@ -204,7 +205,10 @@ async fn invalid_limits_reach_diagnostics(
         .await;
         let failure = app.doc.diagnostics.latest_failure().unwrap().clone();
         assert_eq!(failure.source, Source::Assembly);
-        assert_eq!(failure.message, "invalid command: invalid limits [1, 0]");
+        assert_eq!(
+            failure.message,
+            "invalid command: joint 00000000-0000-0000-0000-000000000061: invalid limits [1, 0]"
+        );
         assert!(failure.details.contains("invalid limits [1, 0]"));
         assert_failure_toast(&app.doc.diagnostics);
         app.doc
@@ -217,6 +221,44 @@ async fn invalid_limits_reach_diagnostics(
         ));
         assert_eq!(app.doc.diagnostics.latest_failure(), Some(&failure));
         eprintln!("invalid limits attempt {attempt}: {}", failure.message);
+    }
+}
+
+async fn known_joint_occurrences(
+    app: &mut App,
+    context: &egui::Context,
+    frame: &mut eframe::Frame,
+) {
+    use onecad_assembly::{
+        math::RigidTransform,
+        occurrence::{ComponentDefId, Occurrence, OccurrenceId},
+    };
+    use onecad_core::edit::AssemblyEdit;
+    let definition = ComponentDefId(uuid::Uuid::from_u128(0x64));
+    let mut edits = vec![AssemblyEdit::CreateDefinition {
+        id: definition,
+        name: "Joint diagnostic fixture".into(),
+    }];
+    for n in 0..2u128 {
+        edits.push(AssemblyEdit::InsertOccurrence {
+            occurrence: Occurrence {
+                id: OccurrenceId(uuid::Uuid::from_u128(0x62 + n)),
+                def: definition,
+                parent: None,
+                local: RigidTransform::IDENTITY,
+                grounded: n == 0,
+                name: format!("Joint diagnostic instance {n}"),
+            },
+        });
+    }
+    for edit in edits {
+        crate::assembly_controls::submit(app, Action::Edit(edit));
+        assert!(app.doc.assembly_controls.pending);
+        pump_until(app, context, frame, |app| {
+            !app.doc.assembly_controls.pending
+        })
+        .await;
+        assert!(app.doc.diagnostics.latest_failure().is_none());
     }
 }
 
@@ -246,9 +288,9 @@ fn assert_failure_toast(diagnostics: &crate::diagnostics::Diagnostics) {
             .collect();
     }
     assert!(
-        labels
-            .iter()
-            .any(|text| text.contains("Assembly: invalid command: invalid limits")),
+        labels.iter().any(|text| {
+            text.contains("Assembly: invalid command: joint") && text.contains("invalid limits")
+        }),
         "{labels:?}"
     );
 }

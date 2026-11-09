@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) mod commit_authorization;
+pub(crate) mod effective_parameters;
 
 use crate::host::{AppEvent, HostContext};
 
@@ -685,7 +686,7 @@ async fn prepare_place_with_session(
         None => None,
     };
     let revision = snapshot.package.identity.revision.clone();
-    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let declared = effective_parameters::resolve(&snapshot.package, &component_id, &free_params)?;
     let (source, blob) = component_source_from_resolved(
         snapshot.source,
         &component_id,
@@ -1292,7 +1293,7 @@ async fn placed_source(
             ))
         }
         source => Ok((
-            source_with_free_params(source.clone(), merged, &params.component_id)?,
+            effective_parameters::source(package, &params.component_id, source.clone(), merged)?,
             blob,
         )),
     }
@@ -1528,9 +1529,8 @@ fn declared_numeric_params(
 /// the package format, `onecad-core` owns the wire/record form, and neither
 /// depends on the other.
 ///
-/// `declared` is the package's own default parameter set
-/// ([`declared_numeric_params`]); only a `profile` source reads it, because it
-/// is the only kind whose `params` regen actually consumes.
+/// `declared` contains verified free-parameter defaults. Generator and profile
+/// sources consume them during geometry replay.
 fn component_source_from_resolved(
     resolved: ResolvedSource,
     component_id: &str,
@@ -1545,7 +1545,7 @@ fn component_source_from_resolved(
             ComponentSourceRef::Generator {
                 generator_id,
                 generator_version,
-                params: Default::default(),
+                params: declared.clone(),
                 extra: Default::default(),
             },
             None,
@@ -1701,33 +1701,7 @@ async fn stage_archive_and_apply(
     Ok((outcome, rt.projection()))
 }
 
-/// Stages a component's geometry blob into the open document and applies `command`
-/// under the SAME runtime lock.
-///
-/// One lock, in this order, on purpose: the blob must be in the carrier and
-/// materialized for the worker BEFORE any regen can see the record that names it
-/// (the `add_import_record` discipline). Splitting the two would leave a window
-/// where an autosave writes a record whose blob is not yet staged.
-#[cfg(test)]
-async fn stage_blob_and_apply(
-    state: &AppState,
-    blob: Option<StagedBlob>,
-    command: EditCommand,
-    expected_session: &str,
-) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
-    let mut guard = state.runtime.lock().await;
-    let rt = guard
-        .as_mut()
-        .ok_or_else(|| ApiError::NoDocument("library".into()))?;
-    require_runtime_session(rt, expected_session)?;
-    if let Some(b) = blob {
-        b.stage_into(rt)?;
-    }
-    let outcome = rt.apply(command)?;
-    Ok((outcome, rt.projection()))
-}
-
-/// [`stage_blob_and_apply`] that first re-reads `record` under the runtime lock
+/// Stages a test blob and applies only if `record` remains unchanged under the runtime lock
 /// and refuses with [`ApiError::StalePreview`] unless it still equals `expected`.
 #[cfg(test)]
 async fn stage_blob_and_apply_unchanged(
@@ -1825,7 +1799,8 @@ async fn resolve_component_source_at(
         &state.archive_budget(),
     )?;
     let snapshot = admitted.snapshot;
-    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let declared =
+        effective_parameters::resolve(&snapshot.package, &component_id, &BTreeMap::new())?;
     let (source, blob) = component_source_from_resolved(
         snapshot.source,
         &component_id,
@@ -2264,13 +2239,8 @@ async fn replay_and_bake(
 /// `DetachComponentParams`'s shape would (missing `componentId` etc.), so no
 /// separate "is this a PlaceComponent" check is needed.
 ///
-/// **`source.params` mirrors the merged free-param map, not a fully resolved
-/// signature.** The worker (WP-2.1) only ever reads `role: free` keys by name
-/// (`thread`/`length`) — it owns its own dimension table and derives
-/// `role: table`/`computed` values itself. Shipping THOSE into `source.params`
-/// here would duplicate data the worker never reads and the wire format
-/// doesn't need; `component.toml`'s `[parameters]` table stays the single
-/// source of truth for that resolution, on the authoring side only.
+/// Generator inputs contain verified package defaults plus instance overrides.
+/// The instance's `params` remains the independently editable override map.
 pub async fn set_component_params_at(
     root: &Path,
     state: &AppState,
@@ -2352,18 +2322,13 @@ pub(crate) async fn set_component_params_removing_at(
     merged.extend(params);
 
     let (source, blob) = match &current.source {
-        ComponentSourceRef::Generator {
-            generator_id,
-            generator_version,
-            extra,
-            ..
-        } => (
-            ComponentSourceRef::Generator {
-                generator_id: generator_id.clone(),
-                generator_version: *generator_version,
-                params: merged.clone(),
-                extra: extra.clone(),
-            },
+        ComponentSourceRef::Generator { .. } => (
+            effective_parameters::source(
+                package,
+                &current.component_id,
+                current.source.clone(),
+                &merged,
+            )?,
             None,
         ),
         ComponentSourceRef::Embedded { .. } => {
@@ -2583,8 +2548,9 @@ async fn component_preview_mesh_with_budget(
         budget,
     )?;
     let snapshot = admitted.snapshot;
+    let params = params.unwrap_or_default();
     let revision = snapshot.package.identity.revision.clone();
-    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let declared = effective_parameters::resolve(&snapshot.package, &component_id, &params)?;
     let (source, blob) = component_source_from_resolved(
         snapshot.source,
         &component_id,
@@ -2602,7 +2568,7 @@ async fn component_preview_mesh_with_budget(
     // here.
     let source = match source {
         ComponentSourceRef::Generator { .. } | ComponentSourceRef::Profile { .. } => {
-            source_with_free_params(source, &params.unwrap_or_default(), &component_id)?
+            effective_parameters::source(&snapshot.package, &component_id, source, &params)?
         }
         baked => baked,
     };
@@ -3561,7 +3527,7 @@ pub(crate) async fn prepare_replace_component_from_snapshot(
         &state.archive_budget(),
     )?;
     let revision = snapshot.package.identity.revision.clone();
-    let declared = declared_numeric_params(&snapshot.package.parameters);
+    let declared = effective_parameters::resolve(&snapshot.package, &component_id, &free_params)?;
     let resolved = snapshot.source;
     let package = snapshot.package;
     // Params are checked against the NEW signature, not the old one: a key the
@@ -3570,7 +3536,7 @@ pub(crate) async fn prepare_replace_component_from_snapshot(
 
     let (source, blob) =
         component_source_from_resolved(resolved, &component_id, &declared, Some(retention))?;
-    let source = source_with_free_params(source, &free_params, &component_id)?;
+    let source = effective_parameters::source(&package, &component_id, source, &free_params)?;
 
     let (mate, dropped_attachment) = match current.mate {
         // A replace IS an authoring event, so the kept mate re-freezes the NEW
@@ -4056,11 +4022,12 @@ async fn detach_component_at(
     let record = RecordId::from_str(&record_id)
         .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
 
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("detachComponent".into()))?;
+    rt.require_component_parameters_ready(record)?;
     let (source, placement) = {
-        let guard = state.runtime.lock().await;
-        let rt = guard
-            .as_ref()
-            .ok_or_else(|| ApiError::NoDocument("detachComponent".into()))?;
         let params = rt.operation_params(record).ok_or_else(|| {
             ApiError::InvalidCommand(format!("detachComponent: no params for record {record_id}"))
         })?;
@@ -4097,7 +4064,8 @@ async fn detach_component_at(
     };
     let op = Operation::Known(KnownOperation::DetachComponent(detach_params));
 
-    apply_and_project(state, EditCommand::UpdateOperationParams { record, op }).await
+    let outcome = rt.apply(EditCommand::UpdateOperationParams { record, op })?;
+    Ok((outcome, rt.projection()))
 }
 
 pub async fn detach_component(
@@ -4110,21 +4078,7 @@ pub async fn detach_component(
     Ok(projection)
 }
 
-/// The shared apply→project tail (HostContext-free — see the module doc
-/// comment). Mirrors `api::apply_edit_command`'s lock scope exactly.
-async fn apply_and_project(
-    state: &AppState,
-    command: EditCommand,
-) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
-    let mut guard = state.runtime.lock().await;
-    let rt = guard
-        .as_mut()
-        .ok_or_else(|| ApiError::NoDocument("library".into()))?;
-    let outcome = rt.apply(command)?;
-    Ok((outcome, rt.projection()))
-}
-
-/// The HostContext-dependent tail `apply_and_project` can't do itself: emit the
+/// The host-dependent mutation tail: emit the
 /// projection event, hand the outcome to the scheduler, note the mutation
 /// tick — mirrors `api::apply_edit_command`'s tail exactly, so a library edit
 /// is indistinguishable from any other (autosave, undo, projection push).
@@ -4198,6 +4152,10 @@ name = "{name}"
 kind = "generator"
 generator = "iso4762"
 generator_version = 1
+
+[parameters]
+thread = {{ role = "free", value = "M6" }}
+length = {{ role = "free", value = 20 }}
 "#,
             "0".repeat(64)
         );
@@ -4226,6 +4184,10 @@ name = "{name}"
 kind = "generator"
 generator = "iso4762"
 generator_version = 1
+
+[parameters]
+thread = {{ role = "free", value = "M6" }}
+length = {{ role = "free", value = 20 }}
 
 [attachments]
 head_seat = {{ on = "face:head_underside", accepts = ["plane"], frame = {{ origin = [0.0, 0.0, 10.0], z = [0.0, 0.0, 4.0], x = [1.0, 0.0, 0.0] }} }}
@@ -4262,6 +4224,7 @@ generator = "iso4762"
 generator_version = 1
 
 [parameters]
+length = {{ role = "free", value = 20, min = 2 }}
 thread = {{ role = "free", key = "M6", domain = ["M3", "M4", "M5", "M6", "M8"] }}
 head_d = {{ role = "table", from = "iso4762.dk" }}
 thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simplified", "modeled"] }}
@@ -4673,6 +4636,10 @@ kind = "generator"
 generator = "iso4762"
 generator_version = 1
 
+[parameters]
+thread = {{ role = "free", value = "M6" }}
+length = {{ role = "free", value = 20 }}
+
 [attachments]
 {attachment} = {{ on = "cylinder:shank", accepts = ["cylinder", "hole"] }}
 "#,
@@ -4958,11 +4925,19 @@ generator_version = 1
             placed.params.get("thread"),
             Some(&ComponentParamValue::Text("M8".to_string()))
         );
+        assert_eq!(placed.params.len(), 1, "instance stores overrides only");
         match placed.source {
             ComponentSourceRef::Generator { params, .. } => assert_eq!(
-                params.get("thread"),
-                Some(&ComponentParamValue::Text("M8".to_string())),
-                "source.params is what the worker's table lookup reads"
+                params,
+                BTreeMap::from([
+                    ("length".into(), ComponentParamValue::Number(20.0)),
+                    ("thread".into(), ComponentParamValue::Text("M8".into())),
+                    (
+                        "thread_detail".into(),
+                        ComponentParamValue::Text("cosmetic".into())
+                    ),
+                ]),
+                "source.params is the complete input the worker's table lookup reads"
             ),
             other => panic!("expected a Generator source, got {other:?}"),
         }
@@ -5155,6 +5130,7 @@ generator_version = 1
             Some(&ComponentParamValue::Text("M8".to_string())),
             "top-level free-param override recorded"
         );
+        assert_eq!(updated.params.len(), 1, "instance stores overrides only");
         match updated.source {
             ComponentSourceRef::Generator { params, .. } => {
                 assert_eq!(
@@ -5162,6 +5138,17 @@ generator_version = 1
                     Some(&ComponentParamValue::Text("M8".to_string())),
                     "the resolved generator source.params carries the override — this is what \
                      the worker's table lookup (WP-2.1) actually reads"
+                );
+                assert_eq!(
+                    params,
+                    BTreeMap::from([
+                        ("length".into(), ComponentParamValue::Number(20.0)),
+                        ("thread".into(), ComponentParamValue::Text("M8".into())),
+                        (
+                            "thread_detail".into(),
+                            ComponentParamValue::Text("cosmetic".into())
+                        ),
+                    ])
                 );
             }
             other => panic!("expected a Generator source, got {other:?}"),
@@ -6244,9 +6231,10 @@ generator_version = 1
             .projection()
             .features
             .is_empty());
-        let (_, projection) = stage_blob_and_apply(
+        let (_, projection) = stage_archive_and_apply(
             &app_state,
             prepared.blob,
+            prepared.archive,
             prepared.command,
             &prepared.runtime_session,
         )
@@ -6269,6 +6257,7 @@ generator_version = 1
     }
 
     const CONFIGURED_PARAMS: &str = r#"
+thread = { role = "free", value = "M6" }
 length = { role = "free", value = 20, min = 2 }
 head_d = { role = "table", from = "iso4762.dk" }
 
@@ -6775,7 +6764,11 @@ loose = {{ on = "face:loose", accepts = ["plane"] }}
     #[tokio::test]
     async fn stale_params_result_cannot_edit_same_document_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        write_param_package(dir.path(), "acme.part", "1.0.0", VALIDATED_PARAMS);
+        let complete = VALIDATED_PARAMS.replace(
+            "tolerance = { role = \"free\", min = 0.5 }",
+            "tolerance = { role = \"free\", value = 0.5, min = 0.5 }",
+        );
+        write_param_package(dir.path(), "acme.part", "1.0.0", &complete);
         reindex_library_at(dir.path()).unwrap();
         let state = pending_app_state();
         let (engine, meshes, solver) = state.make_backend();
@@ -6823,7 +6816,11 @@ loose = {{ on = "face:loose", accepts = ["plane"] }}
     #[tokio::test]
     async fn a_params_edit_computed_from_an_old_record_is_refused_as_stale() {
         let dir = tempfile::tempdir().unwrap();
-        write_param_package(dir.path(), "acme.part", "1.0.0", VALIDATED_PARAMS);
+        let complete = VALIDATED_PARAMS.replace(
+            "tolerance = { role = \"free\", min = 0.5 }",
+            "tolerance = { role = \"free\", value = 0.5, min = 0.5 }",
+        );
+        write_param_package(dir.path(), "acme.part", "1.0.0", &complete);
         reindex_library_at(dir.path()).unwrap();
         let app_state = pending_app_state();
         let (engine, meshes, solver) = app_state.make_backend();

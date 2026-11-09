@@ -13,6 +13,10 @@ impl Slot {
         if let Some(path) = &mut state.path {
             truncate(path, 32768);
         }
+        state.notices.truncate(4);
+        for notice in &mut state.notices {
+            truncate(notice, 4096);
+        }
         if self.state.as_ref().is_some_and(|current| {
             current.runtime_session == state.runtime_session && current.revision > state.revision
         }) {
@@ -35,6 +39,12 @@ impl Slot {
                 .then(|| state.path.clone())
                 .flatten()
         });
+        let notices = self
+            .state
+            .as_ref()
+            .filter(|state| state.runtime_session == projection.runtime_session)
+            .map(|state| state.notices.clone())
+            .unwrap_or_default();
         self.publish(DocumentState {
             document_id: projection.document_id.clone(),
             runtime_session: projection.runtime_session.clone(),
@@ -42,6 +52,7 @@ impl Slot {
             dirty: projection.dirty,
             title: bounded(&projection.title, 4096),
             path,
+            notices,
         });
     }
 
@@ -108,6 +119,21 @@ impl crate::app::App {
             self.doc
                 .diagnostics
                 .runtime(&state.runtime_session, &self.doc.status);
+            if self
+                .doc
+                .document_state
+                .as_ref()
+                .map(|old| (&old.runtime_session, &old.notices))
+                != Some((&state.runtime_session, &state.notices))
+                && !state.notices.is_empty()
+            {
+                self.doc.status = state.notices.join("; ");
+                self.doc.diagnostics.record(
+                    crate::diagnostics::Source::Application,
+                    crate::diagnostics::State::Warning,
+                    self.doc.status.clone(),
+                );
+            }
             self.doc.document_state = (!state.runtime_session.is_empty()).then_some(state);
             self.doc.authoring_dirty = false;
         }
@@ -140,11 +166,14 @@ mod tests {
         slot.publish(DocumentState {
             title: "界".repeat(2000),
             path: Some("界".repeat(12000)),
+            notices: vec!["界".repeat(2000); 5],
             ..Default::default()
         });
         let (_, state) = slot.latest().unwrap();
         assert_eq!(state.title.len(), 4095);
         assert_eq!(state.path.unwrap().len(), 32766);
+        assert_eq!(state.notices.len(), 4);
+        assert!(state.notices.iter().all(|notice| notice.len() == 4095));
     }
 
     #[test]
@@ -153,6 +182,7 @@ mod tests {
         slot.publish(DocumentState {
             runtime_session: "saved".into(),
             path: Some("/saved.onecad".into()),
+            notices: vec!["Verified parameters corrected; save to keep changes".into()],
             revision: 8,
             ..Default::default()
         });
@@ -165,6 +195,7 @@ mod tests {
         let (_, state) = slot.latest().unwrap();
         assert_eq!(state.path.as_deref(), Some("/saved.onecad"));
         assert!(state.dirty);
+        assert_eq!(state.notices.len(), 1);
         assert_eq!(state.title.len(), 4096);
         projection.runtime_session = "replacement".into();
         slot.observe(&projection);
@@ -175,6 +206,7 @@ mod tests {
         });
         slot.observe(&projection);
         assert!(slot.latest().unwrap().1.path.is_none());
+        assert!(slot.latest().unwrap().1.notices.is_empty());
     }
 
     #[test]

@@ -60,6 +60,14 @@ and recovery fencing do not qualify the real OCCT worker, physical GPU rendering
 or device-specific lifecycle behavior; those require their respective repository
 qualification gates.
 
+Save admission uses the reader's inclusive limits: 64 MiB each for the document
+and manifest, 256 MiB for operation history, 4 GiB total uncompressed bytes and
+10,000 entries. Existing section and blob limits also apply. The manifest and
+every emitted section count even when no component archives are present.
+Checked arithmetic, bounded serialization and normal authoritative-document
+decoding run before replacement. Prepublication refusal preserves the previous
+target; it is distinct from the post-rename durability error described above.
+
 Embedded component archives are admitted to the native host budget before their
 fixed-size storage is allocated. The same retained allocation is shared by the
 captured draft, runtime, and detached save payload; closing a document does not
@@ -68,6 +76,28 @@ archive decode scratch before leaving the runtime, so they can finish after the
 host closes. ZIP archive sections borrow the retained bytes instead of cloning
 them. Admission refusal leaves the previous runtime or save target intact.
 Headless hosts without an admission callback retain the existing archive limits.
+
+Archive pruning requires complete reference knowledge across the root and every
+embedded definition. Opaque operations, modules or supported extension fields
+can own references that this build cannot interpret. In that case both carried
+archives and snapshot metadata are retained. Suppression and rollback do not
+make a reference permanently unused.
+
+Generator instances retain an override map separately from their complete
+geometry inputs. Verified package defaults plus validated overrides determine
+those inputs. Reopening a legacy mismatch backed by a carried verified snapshot
+corrects root and embedded placements in one undoable transaction, invalidates
+affected geometry caches and marks the document dirty. Reopen does not replace
+the saved file. Undo restores the repair requirement; unverified inputs cannot
+publish worker fallback geometry. Lifecycle notices remain available when scene
+capture fails.
+
+Component package publication synchronizes final payloads, the stamped manifest,
+created directories and library-root ancestry before promotion, then synchronizes
+the package's parent after rename. `PublishedDurabilityUnconfirmed` identifies an
+already published package whose final synchronization failed. That package is
+retained for reindexing; it must not be deleted as rollback. Fault-injection tests
+verify ordering and reported state, not physical power-loss survival.
 
 Catalog source resolution reserves a conservative `(32 MiB - 4096) / 3` source
 allowance before reading a bounded manifest, document, and geometry closure.

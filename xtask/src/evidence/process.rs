@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct Output {
+pub(crate) struct Output {
     pub text: String,
     /// Standard output alone (machine-readable tool output such as JSON).
     pub stdout: String,
@@ -17,7 +17,7 @@ pub(super) struct Output {
 
 /// Wall-clock and per-stream output bounds of one logged command.
 #[derive(Clone, Copy)]
-pub(super) struct Limits {
+pub(crate) struct Limits {
     pub timeout: Duration,
     pub output_bytes: u64,
 }
@@ -49,7 +49,7 @@ pub(super) fn run(
 }
 
 /// [`run`] with explicit bounds (Xcode and kernel builds outlast the default).
-pub(super) fn run_limited(
+pub(crate) fn run_limited(
     directory: &Path,
     name: &str,
     program: &str,
@@ -126,6 +126,9 @@ fn record_command(
         .iter()
         .filter(|(key, _)| {
             [
+                "ONECAD_TEST_ADDON_COMPONENT",
+                "ONECAD_RENDER_CAPTURE_DIR",
+                "ONECAD_WORKER_BUILD_DIR",
                 "ONECAD_REQUIRE_WORKER",
                 "ONECAD_REQUIRE_GPU",
                 "ONECAD_WORKER_PATH",

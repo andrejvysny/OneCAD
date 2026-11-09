@@ -19,8 +19,7 @@ pub enum ComponentParamError {
 
 impl ComponentSourceRef {
     /// Carries `free` into the source kinds that re-derive geometry from
-    /// params. A `Generator`'s params are replaced wholesale (they are the
-    /// RESOLVED set); a `Profile`'s are MERGED over its seeded defaults
+    /// params. Generator and profile params are merged over seeded defaults
     /// (`length` is required, so dropping the seed would author an invalid
     /// record). `Embedded`/`Document` accept only an empty `free`.
     ///
@@ -34,14 +33,17 @@ impl ComponentSourceRef {
             Self::Generator {
                 generator_id,
                 generator_version,
+                mut params,
                 extra,
-                ..
-            } => Ok(Self::Generator {
-                generator_id,
-                generator_version,
-                params: free.clone(),
-                extra,
-            }),
+            } => {
+                params.extend(free.clone());
+                Ok(Self::Generator {
+                    generator_id,
+                    generator_version,
+                    params,
+                    extra,
+                })
+            }
             Self::Profile {
                 sha256,
                 codec,
@@ -130,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn generator_params_are_replaced_wholesale() {
+    fn generator_params_merge_over_seeded_defaults() {
         let base = placed(generator([("length".to_string(), num(10.0))].into()));
         let want: BTreeMap<_, _> = [("length".to_string(), num(25.0))].into();
         let out = base.with_free_params(want.clone()).unwrap();

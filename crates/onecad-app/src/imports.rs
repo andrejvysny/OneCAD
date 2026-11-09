@@ -140,6 +140,15 @@ pub struct ImportWorkspace {
 }
 
 impl ImportWorkspace {
+    /// Transfers prepared source holds after the document transaction commits.
+    pub(crate) fn adopt(&mut self, mut prepared: Self) {
+        let shared: Vec<_> = prepared.held.intersection(&self.held).cloned().collect();
+        for sha in shared {
+            prepared.release(&sha);
+        }
+        self.held.extend(prepared.held.drain());
+    }
+
     /// A workspace for `document`. The directory is created lazily on the first
     /// [`materialize`](Self::materialize), so a document with no imports (the
     /// overwhelming majority) touches the filesystem zero times.

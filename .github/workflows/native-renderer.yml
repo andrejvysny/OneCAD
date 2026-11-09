@@ -27,6 +27,8 @@ jobs:
       - name: Install repository Rust toolchain
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-15-${{ runner.arch }}
       - name: Capture verifier regressions
         run: cargo test -p xtask evidence::tests
       - name: Check first-party formatting
@@ -51,13 +53,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: metal-renderer-captures
+          name: metal-renderer-captures-${{ runner.arch }}
           path: ${{ runner.temp }}/onecad-render-quality-smoke
           if-no-files-found: error
           retention-days: 14
       - uses: actions/download-artifact@v4
         with:
-          name: metal-renderer-captures
+          name: metal-renderer-captures-${{ runner.arch }}
           path: ${{ runner.temp }}/onecad-render-downloaded
       - name: Verify downloaded images and metadata match uploaded manifest
         run: |
@@ -78,6 +80,7 @@ jobs:
       ONECAD_WORKER_PATH: ${{ github.workspace }}/worker/build-native-host-ci/onecad-worker
       ONECAD_REQUIRE_WORKER: '1'
       ONECAD_REQUIRE_GPU: '1'
+      ONECAD_TEST_ADDON_COMPONENT: ${{ github.workspace }}/packaging/binaries/addons/dev.onecad.bambu-studio/extension.wasm
     steps:
       - name: Set pinned OCCT root
         run: echo "ONECAD_OCCT_ROOT=$RUNNER_TEMP/onecad-occt/8.0.1" >> "$GITHUB_ENV"
@@ -85,10 +88,12 @@ jobs:
       - name: Install repository Rust toolchain
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-15-${{ runner.arch }}
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/onecad-occt/8.0.1
-          key: occt-macos-15-8.0.1-b8f597c67781-${{ env.ONECAD_OCCT_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh', 'scripts/occt-fingerprint.sh') }}
+          key: occt-macos-15-${{ runner.arch }}-8.0.1-b8f597c67781-${{ env.ONECAD_OCCT_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh', 'scripts/occt-fingerprint.sh') }}
       - name: Install production worker dependencies
         run: brew install boost eigen nlohmann-json ninja
       - name: Build pinned OCCT
@@ -124,7 +129,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-host-lifecycle-evidence
+          name: native-host-lifecycle-evidence-${{ runner.arch }}
           path: ${{ runner.temp }}/onecad-native-host-gate
           if-no-files-found: error
           retention-days: 14

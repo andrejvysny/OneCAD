@@ -5413,6 +5413,7 @@ pub(crate) fn snapshot_of(rt: &DocumentRuntime) -> DocumentSnapshotDto {
         document_id: rt.document_id(),
         runtime_session: rt.runtime_session(),
         title: rt.title().to_string(),
+        notices: rt.parameter_correction_notice().into_iter().collect(),
     }
 }
 

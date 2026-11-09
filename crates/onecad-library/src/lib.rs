@@ -10,6 +10,7 @@ pub mod blob;
 pub mod error;
 pub mod index;
 pub mod package;
+mod publication;
 pub mod registry;
 pub mod resolve;
 pub mod search;
@@ -24,6 +25,7 @@ pub use package::ComponentPackage;
 
 use blob::BlobStore;
 use index::{IndexEntry, LibraryIndex, ReindexReport};
+use publication::PublicationStage;
 use registry::{LocalRegistry, RegistrySource};
 use resolve::{ResolveRequest, ResolvedSource};
 
@@ -286,9 +288,9 @@ impl Library {
     /// the revision over what is there, and publishes it with ONE `rename` to
     /// `<id>@<version>`.
     ///
-    /// A failure at any step leaves no `<id>@<version>` behind (the temp dir is
-    /// removed), so a half-written package can never be indexed or block a
-    /// retry. The rename never replaces a non-empty directory: a package that
+    /// Prepublication failures remove only staging. Files and directories are synced
+    /// before promotion; a parent-sync failure reports published but uncertain durability.
+    /// The rename never replaces a non-empty directory: a package that
     /// appeared since [`ensure_free`](Self::ensure_free) is refused as
     /// [`LibraryError::AlreadyExists`]. A reindex failure AFTER the rename is
     /// reported, but the package is complete on disk and a later reindex lists it.
@@ -297,6 +299,15 @@ impl Library {
         package: &ComponentPackage,
         files: &[(&str, &[u8])],
     ) -> LibraryResult<String> {
+        self.publish_package_with_hook(package, files, &mut |_| Ok(()))
+    }
+
+    fn publish_package_with_hook(
+        &mut self,
+        package: &ComponentPackage,
+        files: &[(&str, &[u8])],
+        hook: &mut dyn FnMut(PublicationStage) -> std::io::Result<()>,
+    ) -> LibraryResult<String> {
         let (id, version) = (&package.identity.id, &package.identity.version);
         let temp = self.exclusive_temp_dir()?;
         let built: LibraryResult<String> = (|| {
@@ -304,7 +315,18 @@ impl Library {
                 std::fs::write(temp.join(name), bytes)?;
             }
             let revision = package::write_package(&temp, package)?;
+            publication::synchronize_tree(&temp, hook)?;
+            hook(PublicationStage::Promotion)?;
             self.promote(&temp, id, version)?;
+            let durability = hook(PublicationStage::ParentSync)
+                .and_then(|()| std::fs::File::open(&self.root)?.sync_all());
+            durability.map_err(|error| LibraryError::PublishedDurabilityUnconfirmed {
+                id: id.clone(),
+                version: version.clone(),
+                revision: revision.clone(),
+                path: self.root.join(format!("{id}@{version}")),
+                message: error.to_string(),
+            })?;
             Ok(revision)
         })();
         if built.is_err() {
@@ -322,7 +344,7 @@ impl Library {
     fn exclusive_temp_dir(&self) -> LibraryResult<PathBuf> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        std::fs::create_dir_all(&self.root)?;
+        publication::create_durable_directory(&self.root)?;
         loop {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -594,6 +616,110 @@ generator_version = 1
             geometry_format: Some(4),
             preview_png: Some(b"\x89PNG\r\n".to_vec()),
         }
+    }
+
+    #[test]
+    fn package_publication_faults_preserve_stage_truth() {
+        for failure in [
+            PublicationStage::PayloadSync,
+            PublicationStage::DirectorySync,
+            PublicationStage::Promotion,
+            PublicationStage::ParentSync,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut library = Library::open(dir.path()).unwrap();
+            let package = authored_package("acme.stages", "1.0.0");
+            let mut stages = Vec::new();
+            let result = library.publish_package_with_hook(
+                &package,
+                &[("payload.bin", b"payload")],
+                &mut |stage| {
+                    stages.push(stage);
+                    if stage == failure {
+                        Err(std::io::Error::other("injected publication failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                dir.path().join("acme.stages@1.0.0").exists(),
+                failure == PublicationStage::ParentSync
+            );
+            assert!(leftovers(dir.path()).is_empty());
+            assert_eq!(stages.last(), Some(&failure));
+        }
+    }
+
+    #[test]
+    fn successful_package_syncs_payloads_before_directory_and_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut library = Library::open(dir.path()).unwrap();
+        let package = authored_package("acme.synced", "1.0.0");
+        let mut stages = Vec::new();
+        library
+            .publish_package_with_hook(&package, &[("payload.bin", b"payload")], &mut |stage| {
+                stages.push(stage);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            stages,
+            vec![
+                PublicationStage::PayloadSync,
+                PublicationStage::PayloadSync,
+                PublicationStage::DirectorySync,
+                PublicationStage::Promotion,
+                PublicationStage::ParentSync
+            ]
+        );
+        assert!(library.index().get("acme.synced", Some("1.0.0")).is_some());
+    }
+
+    #[test]
+    fn published_sync_failure_keeps_package_and_reports_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut library = Library::open(dir.path()).unwrap();
+        let package = authored_package("acme.durable", "1.0.0");
+        let result = library.publish_package_with_hook(
+            &package,
+            &[("payload.bin", b"payload")],
+            &mut |stage| {
+                if stage == PublicationStage::ParentSync {
+                    Err(std::io::Error::other("injected parent sync"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        let Err(LibraryError::PublishedDurabilityUnconfirmed {
+            id,
+            version,
+            revision,
+            path,
+            message,
+        }) = result
+        else {
+            panic!("expected published durability uncertainty");
+        };
+        assert_eq!(id, "acme.durable");
+        assert_eq!(version, "1.0.0");
+        assert_eq!(path, dir.path().join("acme.durable@1.0.0"));
+        assert!(message.contains("injected parent sync"));
+        assert_eq!(std::fs::read(path.join("payload.bin")).unwrap(), b"payload");
+        let mut reopened = Library::open(dir.path()).unwrap();
+        reopened.reindex().unwrap();
+        assert_eq!(
+            reopened
+                .index()
+                .get(&id, Some(&version))
+                .unwrap()
+                .1
+                .revision,
+            revision
+        );
+        assert!(leftovers(dir.path()).is_empty());
     }
 
     #[test]

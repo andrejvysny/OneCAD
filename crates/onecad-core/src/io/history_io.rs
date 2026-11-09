@@ -44,16 +44,24 @@ fn canonical_records_json(records: &[OperationRecord]) -> String {
 /// [`IoError::Corrupt`] if a record fails to serialize (should not happen for a
 /// valid in-memory record).
 pub fn serialize_ops_jsonl(records: &[OperationRecord]) -> IoResult<Vec<u8>> {
-    let mut out = Vec::new();
-    for rec in records {
-        let value = serde_json::to_value(rec)
-            .map_err(|e| IoError::Corrupt(format!("ops.jsonl serialize: {e}")))?;
-        let line = serde_json::to_string(&value)
-            .map_err(|e| IoError::Corrupt(format!("ops.jsonl serialize: {e}")))?;
-        out.extend_from_slice(line.as_bytes());
-        out.push(b'\n');
-    }
-    Ok(out)
+    serialize_ops_jsonl_bounded(records, super::container::MAX_OPS_BYTES)
+}
+
+pub(super) fn serialize_ops_jsonl_bounded(
+    records: &[OperationRecord],
+    cap: u64,
+) -> IoResult<Vec<u8>> {
+    use std::io::Write;
+    let mut out = super::bounded::Buffer::new(cap);
+    let result = (|| {
+        for rec in records {
+            let value = serde_json::to_value(rec)?;
+            serde_json::to_writer(&mut out, &value)?;
+            out.write_all(b"\n").map_err(serde_json::Error::io)?;
+        }
+        Ok(())
+    })();
+    out.finish(result, "ops.jsonl")
 }
 
 /// Parses `ops.jsonl` bytes into one [`serde_json::Value`] per non-blank line.

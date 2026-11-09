@@ -2,6 +2,7 @@ mod checks;
 mod evidence;
 mod hygiene;
 mod icons;
+mod qualification;
 mod reference_inputs;
 mod release;
 
@@ -28,6 +29,9 @@ fn run() -> Result {
         "bake-cad-icons" => icons::run(args),
         "check-hygiene" => hygiene::run(args),
         "verify-reference-inputs" => reference_inputs::run(args),
+        "python-oracles" | "qualify-macos" | "verify-qualification" => {
+            qualification::run(command, args)
+        }
         "prepare-release-materials"
         | "verify-release-materials"
         | "worker-manifest"

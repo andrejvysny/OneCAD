@@ -57,6 +57,7 @@
 //! deferred resolution.
 
 pub(crate) mod component_history;
+pub mod project_import;
 mod sketch_history;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -876,6 +877,7 @@ impl DocumentSession {
         cmd: &EditCommand,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
         match cmd {
+            EditCommand::ImportProject { project } => self.apply_project_import(project),
             EditCommand::Assembly { edit } => {
                 let inverse = super::assembly::memento(&self.document, edit);
                 if !super::assembly::apply(&mut self.document, edit)? {

@@ -167,6 +167,7 @@ fn stale_consumer_proof_cannot_adopt_definition_or_publish_cache() {
         replay_context: [0; 32],
         identity_signature: Some(BTreeMap::new()),
         quarantine: Some(commit),
+        evidence_translation: None,
         _retention: Arc::new(()),
     };
     runtime.persisted_generation += 1;

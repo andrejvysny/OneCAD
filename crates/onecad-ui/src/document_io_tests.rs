@@ -12,6 +12,9 @@ mod desktop_tests;
 #[path = "document_io_tests/deleted_source_repair.rs"]
 mod deleted_source_repair;
 
+#[path = "document_io_tests/constrained_reopen.rs"]
+mod constrained_reopen;
+
 #[derive(Default)]
 struct Events {
     mailbox: Arc<EventMailbox>,

@@ -4,6 +4,7 @@
 pub mod assembly;
 pub mod command;
 pub mod outcome;
+pub use session::project_import;
 pub mod session;
 pub mod undo;
 

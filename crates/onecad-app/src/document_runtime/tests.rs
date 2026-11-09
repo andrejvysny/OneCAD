@@ -6932,3 +6932,6 @@ fn assembly_budget_refuses_unreplayed_visible_definition() {
 
 #[path = "tests/rebind_outcomes.rs"]
 mod rebind_outcomes;
+
+#[path = "tests/project_import_identity.rs"]
+mod project_import_identity_tests;

@@ -2,6 +2,8 @@
 #[allow(dead_code)]
 #[path = "native_plate_support/host.rs"]
 mod host;
+#[path = "framework_retention_regularization_support/performance.rs"]
+mod performance;
 
 use host::Harness;
 use onecad_app::{api, dto::DocumentProjection};
@@ -202,6 +204,10 @@ async fn check_children(
 async fn imported_retention_regularization_preserves_split_children() {
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     host::required_worker();
+    if std::env::var_os("ONECAD_PERF_OUT").is_some() {
+        performance::run().await;
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("inputs.onecad");
     fixture(&path);

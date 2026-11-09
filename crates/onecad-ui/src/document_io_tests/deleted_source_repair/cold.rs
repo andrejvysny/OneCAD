@@ -156,32 +156,16 @@ pub(super) async fn reopen(area: &Path) {
         .await;
         return;
     }
-    accept(
+    let edited = super::super::constrained_reopen::move_free_instance(
         &mut backend,
         &session,
-        Action::Edit(AssemblyEdit::SetPose {
-            occurrence: B,
-            pose: RigidTransform::new(Quat::IDENTITY, Vec3d::new(301.0, 0.0, 0.0)),
-        }),
+        B,
+        occurrence(OccurrenceId(uuid::Uuid::from_u128(0xE506)), 0.0, false),
+        RigidTransform::new(Quat::IDENTITY, Vec3d::new(301.0, 0.0, 0.0)),
     )
     .await;
     assert_eq!(bindings(&backend, &session).await, expected);
-    let edited = api::get_assembly_projection(&backend.state, &session)
-        .await
-        .unwrap();
-    let pose = |id: OccurrenceId| {
-        edited
-            .occurrences
-            .iter()
-            .find(|row| row.id == id.to_string())
-            .unwrap()
-            .local
-    };
-    assert_eq!(pose(A), expected_poses[0]);
-    assert_eq!(
-        pose(B),
-        RigidTransform::new(Quat::IDENTITY, Vec3d::new(301.0, 0.0, 0.0))
-    );
+    assert_joint_coincident(&edited);
     assert!(
         api::save_document(
             &backend.state,
