@@ -187,6 +187,20 @@ add_test(NAME solver_stdout_hygiene
          COMMAND test_solver_stdout_hygiene $<TARGET_FILE:onecad-worker>)
 set_tests_properties(solver_stdout_hygiene PROPERTIES TIMEOUT 30)
 
+# Kernel audit 2026-11-11 finding 20 — a frame holding a number that overflows a
+# double (1e400) is a malformed frame: no response, clean exit 2, never SIGABRT.
+add_executable(test_frame_nonfinite test_frame_nonfinite.cpp)
+target_link_libraries(test_frame_nonfinite PRIVATE worker_core)
+add_test(NAME frame_nonfinite COMMAND test_frame_nonfinite $<TARGET_FILE:onecad-worker>)
+set_tests_properties(frame_nonfinite PROPERTIES TIMEOUT 60)
+
+# Kernel audit 2026-11-11 finding 25 — every opType the executor dispatches is
+# announced in hello `capabilities` (op.sweep / op.gear / op.featurePattern were not).
+add_executable(test_hello_capabilities test_hello_capabilities.cpp)
+target_link_libraries(test_hello_capabilities PRIVATE worker_core)
+add_test(NAME hello_capabilities COMMAND test_hello_capabilities $<TARGET_FILE:onecad-worker>)
+set_tests_properties(hello_capabilities PROPERTIES TIMEOUT 120)
+
 # ---------------------------------------------------------------------------
 # W-WP4: session + transactional ExecutePlan (SCHEMA §7.1/§7.2), STUB ops.
 # ---------------------------------------------------------------------------
@@ -273,6 +287,13 @@ add_test(NAME extrude_draft COMMAND test_extrude_draft)
 add_executable(test_extrude_toface_tilted test_extrude_toface_tilted.cpp)
 target_link_libraries(test_extrude_toface_tilted PRIVATE worker_core)
 add_test(NAME extrude_toface_tilted COMMAND test_extrude_toface_tilted)
+
+# Kernel audit 2026-11-11 finding 6 — a two-direction ToFace leg whose RESOLVED
+# distance lands on the other side is refused (EXTRUDE_TWO_DIRECTION_LEG_WRONG_SIDE);
+# correct-side and single-direction backward ToFace controls keep their volumes.
+add_executable(test_extrude_two_direction_side test_extrude_two_direction_side.cpp)
+target_link_libraries(test_extrude_two_direction_side PRIVATE worker_core)
+add_test(NAME extrude_two_direction_side COMMAND test_extrude_two_direction_side)
 
 # WP1 G1: Extrude's Blind-distance and ToFace-coincidence guards, asserted AT the
 # authoring-resolution boundary. Every other extrude refusal case sits at 0, which
@@ -488,6 +509,13 @@ add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
 add_test(NAME m6a_ops COMMAND test_m6a_ops)
 
+# Kernel audit 2026-11-11 finding 9 + review hypothesis — a five-opening shell (a
+# valid six-face plate) publishes; a through-hole body stays an honest refusal and a
+# kernel construction failure carries SHELL_CONSTRUCTION_FAILED.
+add_executable(test_shell_openings test_shell_openings.cpp)
+target_link_libraries(test_shell_openings PRIVATE worker_core)
+add_test(NAME shell_openings COMMAND test_shell_openings)
+
 add_executable(test_shell_coplanar_patch test_shell_coplanar_patch.cpp)
 target_link_libraries(test_shell_coplanar_patch PRIVATE worker_core)
 add_test(NAME shell_coplanar_patch COMMAND test_shell_coplanar_patch)
@@ -616,6 +644,13 @@ endforeach()
 add_executable(test_import_step test_import_step.cpp)
 target_link_libraries(test_import_step PRIVATE worker_core)
 add_test(NAME import_step COMMAND test_import_step)
+
+# Kernel audit 2026-11-11 finding 15 — a STEP root that yields solids AND open
+# shells / free faces imports only the solids and names the loss
+# (STEP_GEOMETRY_OMITTED). Fixture written with OCCT at run time.
+add_executable(test_step_read_omitted test_step_read_omitted.cpp)
+target_link_libraries(test_step_read_omitted PRIVATE worker_core)
+add_test(NAME step_read_omitted COMMAND test_step_read_omitted)
 
 # --- In-process library hardening (ADR-0016 findings, ADR-0019): every OCCT
 #     lock site refuses RETRIABLE with the OCCT_GLOBALS_BUSY prefix first, and a
@@ -1301,6 +1336,27 @@ add_executable(test_commit_tier_validation test_commit_tier_validation.cpp)
 target_link_libraries(test_commit_tier_validation PRIVATE worker_core)
 add_test(NAME commit_tier_validation COMMAND test_commit_tier_validation)
 
+# Review NEW-03 — a finite direction whose squared norm overflows ([1e200,0,0])
+# normalizes exactly: LinearPattern/CircularPattern/MirrorBody/TransformBody/
+# FeaturePattern/Gear frame results match the unit-direction control.
+add_executable(test_direction_scale test_direction_scale.cpp)
+target_link_libraries(test_direction_scale PRIVATE worker_core)
+add_test(NAME direction_scale COMMAND test_direction_scale)
+
+# Review NEW-01 — gear referenceability follows the EVALUATED body frame: a cap of a
+# gear rotated by TransformBody (same plan, incremental plan, face-placed gear)
+# binds; a tooth flank stays refused (GEAR_FACE_NOT_REFERENCEABLE).
+add_executable(test_gear_transformed_referenceability test_gear_transformed_referenceability.cpp)
+target_link_libraries(test_gear_transformed_referenceability PRIVATE worker_core)
+add_test(NAME gear_transformed_referenceability COMMAND test_gear_transformed_referenceability)
+
+# Kernel audit 2026-11-11 finding 1 — near-axis revolve: a signed gap sweep that
+# used to SIGSEGV at ±1e-7 mm now refuses by name (REVOLVE_PROFILE_NEAR_AXIS /
+# REVOLVE_PROFILE_CROSSES_AXIS); on-axis and ≥ resolution profiles keep their volumes.
+add_executable(test_revolve_near_axis test_revolve_near_axis.cpp)
+target_link_libraries(test_revolve_near_axis PRIVATE worker_core)
+add_test(NAME revolve_near_axis COMMAND test_revolve_near_axis)
+
 # UX-2026-09-14 WP-1 (B1) — the NUMBERS from `docs/design/astra/
 # sketch-host-face-transport.md` §6: frame transport G1/G2/G4/G8/G9, the τGS
 # conditioning boundary, an invalid stored basis, the significance thresholds, the
@@ -1411,3 +1467,8 @@ add_test(NAME sweep COMMAND test_sweep)
 add_executable(test_union_internals test_union_internals.cpp)
 target_link_libraries(test_union_internals PRIVATE worker_core)
 add_test(NAME union_internals COMMAND test_union_internals)
+
+# Kernel audit 2026-11-11 #10: a legacy profile's chord approximation is reported.
+add_executable(test_legacy_profile_polygonized test_legacy_profile_polygonized.cpp)
+target_link_libraries(test_legacy_profile_polygonized PRIVATE worker_core)
+add_test(NAME legacy_profile_polygonized COMMAND test_legacy_profile_polygonized)

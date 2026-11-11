@@ -183,6 +183,51 @@ pub trait MeshProvider: Send + Sync {
         lod: Lod,
         snapshot: SnapshotId,
     ) -> Result<Vec<u8>, EngineError>;
+
+    /// [`fetch_mesh`](Self::fetch_mesh) plus the snapshot the bytes were actually
+    /// meshed at. A transport that re-issues a stale request against a fresh head
+    /// (SCHEMA §7.6) MUST report that head here; the default covers providers
+    /// that only ever answer for the requested snapshot.
+    async fn fetch_mesh_at(
+        &self,
+        body: BodyId,
+        lod: Lod,
+        snapshot: SnapshotId,
+    ) -> Result<(Vec<u8>, SnapshotId), EngineError> {
+        self.fetch_mesh(body, lod, snapshot)
+            .await
+            .map(|bytes| (bytes, snapshot))
+    }
+}
+
+/// Fetches a mesh that will be stored or exported AS `snapshot`.
+///
+/// The transport's single stale re-issue is a liveness convenience; it does not
+/// authorize labelling another head's geometry with the identity the caller
+/// fenced on. Bytes meshed at any other snapshot are refused.
+///
+/// # Errors
+/// The provider's error, or a recoverable `StalePreview` refusal when the bytes
+/// belong to a different snapshot.
+pub async fn fetch_mesh_exact(
+    provider: &dyn MeshProvider,
+    body: BodyId,
+    lod: Lod,
+    snapshot: SnapshotId,
+) -> Result<Vec<u8>, EngineError> {
+    let (bytes, meshed_at) = provider.fetch_mesh_at(body, lod, snapshot).await?;
+    if meshed_at == snapshot {
+        return Ok(bytes);
+    }
+    Err(EngineError::OpFailed {
+        code: onecad_core::regen::OpFailureCode::StalePreview,
+        recoverable: true,
+        message: format!(
+            "mesh for snapshot {} was produced at snapshot {}; the head moved",
+            snapshot.0, meshed_at.0
+        ),
+        diagnostics: Vec::new(),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

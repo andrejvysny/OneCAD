@@ -55,7 +55,8 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
         !read_vec3(params, "planeNormal", nx, ny, nz)) {
         return OpOutcome::fail("OP_FAILED", "MirrorBody: missing plane point/normal");
     }
-    if (nx * nx + ny * ny + nz * nz < 1e-20) {
+    const std::optional<gp_Dir> normal = unit_direction(nx, ny, nz, 1e-10);
+    if (!normal) {
         return OpOutcome::fail("OP_FAILED", "MirrorBody plane normal is zero");
     }
 
@@ -70,7 +71,7 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
     TopoDS_Shape result;
     try {
         gp_Trsf mirror_trsf;
-        mirror_trsf.SetMirror(gp_Ax2(gp_Pnt(px, py, pz), gp_Dir(nx, ny, nz)));
+        mirror_trsf.SetMirror(gp_Ax2(gp_Pnt(px, py, pz), *normal));
         BRepBuilderAPI_Transform mirror(source, mirror_trsf, Standard_True);
         if (!mirror.IsDone() || mirror.Shape().IsNull()) {
             return OpOutcome::fail("OP_FAILED", "MirrorBody transform failed");

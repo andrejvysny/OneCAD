@@ -296,6 +296,18 @@ int main() {
     run_expect_refusal(gear_op_frame(json{{"height", 0.0}}), "zero height");
     run_expect_refusal(gear_op_frame(json{{"pressureAngleDeg", 0.0}}), "zero pressure angle");
     run_expect_refusal(gear_op_frame(json{{"sampleCount", 1}}), "sampleCount below 2");
+    // Kernel audit 2026-11-11 #37: a count is never truncated or wrapped into a
+    // DIFFERENT gear (20.9 → 20; 2³² + 20 → 20 through an int conversion).
+    run_expect_refusal(gear_op_frame(json{{"teeth", 20.9}}), "non-integral teeth", "OP_FAILED");
+    run_expect_refusal(gear_op_frame(json{{"teeth", 4294967316LL}}), "teeth beyond int",
+                       "OP_FAILED");
+    run_expect_refusal(gear_op_frame(json{{"sampleCount", 12.5}}), "non-integral sampleCount",
+                       "OP_FAILED");
+    run_expect_ok(gear_op_frame(json{{"teeth", 20.0}}), "integral-float teeth",
+                  [](const ops::OpOutcome& out, BodyStore& bodies, em::ElementMapPartition&) {
+                      check(out.body_ids.size() == 1 && bodies.get("body_opgear") != nullptr,
+                            "teeth 20.0 is the same count as 20");
+                  });
     run_expect_refusal(gear_op_frame(json{{"axleHole", true}, {"axleHoleDiameter", 0.0}}),
                        "axle bore with no diameter");
     run_expect_refusal(gear_op_frame(json{{"axleHole", true}, {"axleHoleDiameter", 500.0}}),

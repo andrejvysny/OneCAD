@@ -233,11 +233,11 @@ OpOutcome execute_linear_pattern(OpContext& ctx, const json& op, const std::stri
     if (std::abs(spacing) < 1e-9) {
         return OpOutcome::fail("OP_FAILED", "LinearPattern spacing must be non-zero");
     }
-    const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (len < 1e-10) {
+    const std::optional<gp_Dir> unit = unit_direction(dx, dy, dz, 1e-10);
+    if (!unit) {
         return OpOutcome::fail("OP_FAILED", "LinearPattern direction vector is zero");
     }
-    const double nx = dx / len, ny = dy / len, nz = dz / len;
+    const double nx = unit->X(), ny = unit->Y(), nz = unit->Z();
 
     return build_pattern(ctx, op, op_id, "LinearPattern", count, fuse_result, result_policy,
                          [&](int i) {
@@ -277,10 +277,11 @@ OpOutcome execute_circular_pattern(OpContext& ctx, const json& op, const std::st
         !read_vec3(params, "axisDirection", ax, ay, az)) {
         return OpOutcome::fail("OP_FAILED", "CircularPattern: missing axis origin/direction");
     }
-    if (ax * ax + ay * ay + az * az < 1e-20) {
+    const std::optional<gp_Dir> axis_dir = unit_direction(ax, ay, az, 1e-10);
+    if (!axis_dir) {
         return OpOutcome::fail("OP_FAILED", "CircularPattern axis direction is zero");
     }
-    gp_Ax1 axis(gp_Pnt(ox, oy, oz), gp_Dir(ax, ay, az));
+    gp_Ax1 axis(gp_Pnt(ox, oy, oz), *axis_dir);
     // Legacy stepAngle = (angleDeg / count) — divides by count (not count−1); parity.
     const double step_rad = (angle_deg / count) * M_PI / 180.0;
 

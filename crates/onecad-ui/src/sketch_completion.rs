@@ -155,6 +155,7 @@ mod tests {
             runtime_session: "test".into(),
             revision: 3,
             source_revision: 3,
+            worker_unavailable: false,
             outcome: "published".into(),
             message: None,
             diagnostics: vec![],

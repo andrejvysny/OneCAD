@@ -108,6 +108,7 @@ pub fn completion(tag: &RequestTag, source_revision: u64) -> RegenFinished {
         runtime_session: tag.context.runtime_session.clone(),
         revision: source_revision + 1,
         source_revision,
+        worker_unavailable: false,
         outcome: "published".into(),
         message: None,
         diagnostics: Vec::new(),

@@ -205,7 +205,10 @@ Envelope parse(const std::string& json_text) {
     json j;
     try {
         j = json::parse(json_text);
-    } catch (const json::parse_error& e) {
+    } catch (const json::exception& e) {
+        // Not only `parse_error`: a well-formed literal that overflows a double
+        // (`1e400`) raises `out_of_range` 406. SCHEMA §4 makes a non-finite value a
+        // PROTOCOL_ERROR; before this it escaped the reader and std::terminate'd.
         throw EnvelopeError(std::string("envelope JSON parse error: ") + e.what());
     }
     if (!j.is_object()) {

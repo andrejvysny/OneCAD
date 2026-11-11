@@ -586,6 +586,20 @@ std::optional<TopoDS_Face> build_profile_face(
         err = "profile: " + (fr.errorMessage.empty() ? std::string("face build failed") : fr.errorMessage);
         return std::nullopt;
     }
+    // A LEGACY profile (no regionIdentityVersion) is frozen geometry: its curved
+    // boundary is built as chords and stays so. That approximation used to be a
+    // FaceBuilder warning nobody read (kernel audit 2026-11-11 #10).
+    if (diagnostics_out != nullptr && !fr.polygonizedCurveIds.empty()) {
+        json entity_ids = json::array();
+        for (const std::string& id : fr.polygonizedCurveIds) entity_ids.push_back(map_edge(id));
+        diagnostics_out->push_back(
+            json{{"severity", "warning"},
+                 {"code", "PROFILE_CURVES_POLYGONIZED"},
+                 {"message", "profile: a legacy region (no regionIdentityVersion) approximates its "
+                             "curved boundary by straight chords"},
+                 {"stage", "profile"},
+                 {"evidence", json{{"entityIds", std::move(entity_ids)}}}});
+    }
     // Legacy profiles (no regionIdentityVersion 2/3) carry no labels, so they
     // stamp no generator slots on any path (closed-curve, whole-entity, polygon).
     if (labels_out != nullptr) {
@@ -627,6 +641,19 @@ void attach_profile_diagnostics(OpOutcome& out, std::vector<json>& diagnostics) 
         out.diagnostics = std::move(merged);
     }
     diagnostics.clear();
+}
+
+std::optional<gp_Dir> unit_direction(double x, double y, double z, double min_length) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return std::nullopt;
+    const double scale = std::max({std::abs(x), std::abs(y), std::abs(z)});
+    if (scale == 0.0) return std::nullopt;
+    const double sx = x / scale, sy = y / scale, sz = z / scale;
+    // `scale` × a factor in [1, √3]: overflows only when the true length does,
+    // and +inf still compares correctly against the floor.
+    if (scale * std::sqrt(sx * sx + sy * sy + sz * sz) < min_length) return std::nullopt;
+    const double plain = x * x + y * y + z * z;
+    if (std::isfinite(plain) && plain >= std::numeric_limits<double>::min()) return gp_Dir(x, y, z);
+    return gp_Dir(sx, sy, sz);
 }
 
 bool planar_face_plane_normal(const TopoDS_Face& face, gp_Pln& plane_out, gp_Dir& normal_out) {

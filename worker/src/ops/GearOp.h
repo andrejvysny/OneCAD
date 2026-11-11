@@ -77,7 +77,9 @@ struct GearBodyInfo {
     /// carries an explicit frame; DERIVED from the body (the normal of its
     /// largest planar face — a cap) for the `placement.face` mode, whose axis is
     /// the resolved host face's inward normal and therefore not recoverable from
-    /// params alone. Only the DIRECTION is used by the classifier.
+    /// params alone. Only the DIRECTION is used by the classifier. This is the
+    /// axis at the Gear step; PlanExecutor's `carry_gear_frames` moves it with
+    /// every later rigid re-location of the body (SCHEMA §7.3).
     gp_Ax1 axis;
     /// `computed.rootDiameter / 2` — the same quantity the op's own bore-validity
     /// gate uses. A cylindrical face at or beyond it is tooth geometry.

@@ -58,6 +58,10 @@ fn runtime() -> DocumentRuntime {
         })
         .unwrap();
     }
+    // The fixture models a document whose three features are already accepted
+    // geometry. `PendingBackend` cannot publish, so settle the claim directly;
+    // otherwise every plan would also claim the fixture's own setup edits.
+    rt.unaccepted_edit = None;
     rt
 }
 

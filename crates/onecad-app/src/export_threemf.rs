@@ -36,7 +36,7 @@ use onecad_core::ids::{BodyId, SnapshotId};
 use onecad_core::io::threemf::ThreeMfBody;
 use onecad_core::regen::{EngineError, Lod};
 
-use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
+use onecad_protocol::mesh::{f32_le, u32_le, MeshHeaderView};
 
 use crate::export::{PendingFaceColor, StepExportAttributes};
 use crate::worker::{wire, MeshProvider};
@@ -93,7 +93,9 @@ pub async fn build_bodies(
     };
     let mut out = Vec::with_capacity(bodies.len());
     for &body in bodies {
-        let blob = meshes.fetch_mesh(body, Lod::Fine, snapshot).await?;
+        // Face colours were resolved against `snapshot`; a mesh from any other
+        // head would pair them with the wrong faces.
+        let blob = crate::worker::fetch_mesh_exact(meshes, body, Lod::Fine, snapshot).await?;
         let wire_body_id = wire::body_id_wire(body);
         let name = attributes.body_names.get(&wire_body_id).cloned();
         let body_color = attributes.body_colors.get(&wire_body_id).copied();
@@ -125,9 +127,16 @@ fn mesh_to_threemf_body(
     authored_topo: Option<&BTreeMap<String, [u8; 4]>>,
     authored_element: Option<&BTreeMap<String, [u8; 4]>>,
 ) -> Result<ThreeMfBody, EngineError> {
-    let view = validate_mesh_blob(blob).map_err(|e| EngineError::Protocol {
-        message: format!("export3mf: invalid MESH1 blob: {e}"),
-    })?;
+    // The FULL checked decoder, not the header check: every offset read below
+    // is in bounds only because it validated each section's extent and the id
+    // and range tables. A header-valid, body-truncated blob used to index past
+    // the buffer and panic the export task.
+    let checked =
+        onecad_protocol::mesh::MeshView::decode(blob, onecad_protocol::mesh::MeshLimits::default())
+            .map_err(|e| EngineError::Protocol {
+                message: format!("export3mf: invalid MESH1 blob: {e}"),
+            })?;
+    let view = checked.header();
     let pos = view
         .section(SEC_POSITIONS)
         .ok_or_else(|| missing_section("POSITIONS"))?;
@@ -154,8 +163,8 @@ fn mesh_to_threemf_body(
         })
         .collect();
 
-    let face_ids = read_id_table(&view, blob)?;
-    let mesh_face_colors = read_face_colors_section(&view, blob);
+    let face_ids = read_id_table(view, blob)?;
+    let mesh_face_colors = read_face_colors_section(view, blob);
     let uses_element_ids = view.ids_have_element_ids();
 
     let face_count = view.face_count as usize;
@@ -256,4 +265,94 @@ fn read_face_colors_section(view: &MeshHeaderView, blob: &[u8]) -> Option<Vec<[u
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Header (64) + five 16-byte section entries, every section empty at the
+    /// end of the blob, while the header claims one vertex/triangle/face.
+    fn header_valid_body_truncated_mesh() -> Vec<u8> {
+        let sections = [
+            SEC_POSITIONS,
+            SEC_INDICES,
+            SEC_FACE_RANGES,
+            SEC_FACE_ID_OFFS,
+            SEC_FACE_ID_CHARS,
+        ];
+        let len = 64 + sections.len() * 16;
+        let mut blob = vec![0u8; len];
+        blob[0..4].copy_from_slice(&0x4D45_5348u32.to_le_bytes());
+        blob[4..6].copy_from_slice(&1u16.to_le_bytes());
+        for count_offset in [0x08, 0x0C, 0x10] {
+            blob[count_offset..count_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+        }
+        blob[0x1E..0x20].copy_from_slice(&(sections.len() as u16).to_le_bytes());
+        for (index, section) in sections.iter().enumerate() {
+            let base = 64 + index * 16;
+            blob[base..base + 4].copy_from_slice(&section.to_le_bytes());
+            blob[base + 8..base + 12].copy_from_slice(&(len as u32).to_le_bytes());
+        }
+        blob
+    }
+
+    /// Audit 33: the exporter indexed section data after a header-only check.
+    #[test]
+    fn malformed_mesh_is_refused_instead_of_panicking_the_export() {
+        let blob = header_valid_body_truncated_mesh();
+        assert!(
+            onecad_protocol::mesh::validate_mesh_blob(&blob).is_ok(),
+            "the fixture must pass the header-only check the exporter used to rely on"
+        );
+        let refused = mesh_to_threemf_body(&blob, None, None, None, None);
+        assert!(
+            matches!(refused, Err(EngineError::Protocol { .. })),
+            "a truncated body is a protocol error, not an out-of-bounds read"
+        );
+    }
+
+    struct MovedHead;
+
+    #[async_trait::async_trait]
+    impl MeshProvider for MovedHead {
+        async fn fetch_mesh(
+            &self,
+            _: BodyId,
+            _: Lod,
+            _: SnapshotId,
+        ) -> Result<Vec<u8>, EngineError> {
+            Ok(Vec::new())
+        }
+        async fn fetch_mesh_at(
+            &self,
+            _: BodyId,
+            _: Lod,
+            requested: SnapshotId,
+        ) -> Result<(Vec<u8>, SnapshotId), EngineError> {
+            Ok((Vec::new(), SnapshotId(requested.0 + 1)))
+        }
+    }
+
+    /// Audit 11 / SR-07: face colours are resolved against one snapshot, so a
+    /// mesh the transport re-fetched at a newer head must not be exported.
+    #[tokio::test]
+    async fn export_refuses_a_mesh_from_another_head() {
+        let body = BodyId(uuid::Uuid::from_u128(1));
+        let refused = build_bodies(
+            &[body],
+            &MovedHead,
+            Some(SnapshotId(7)),
+            &StepExportAttributes::default(),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::StalePreview,
+                ..
+            })
+        ));
+    }
 }

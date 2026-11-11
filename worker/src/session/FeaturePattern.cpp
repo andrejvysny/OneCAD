@@ -22,6 +22,7 @@
 #include "sketch/Sketch.h"
 #include "elementmap/Ladder.h"
 #include "io/OcctBusy.h"
+#include "ops/OpCommon.h"
 
 namespace onecad::session {
 namespace em = onecad::elementmap;
@@ -47,21 +48,28 @@ bool instance_transform(const json& layout, int instance, int count, gp_Trsf& ou
     const std::string kind = layout.value("kind", std::string());
     gp_XYZ a;
     if (kind == "Linear") {
-        if (!read_vec3(layout.value("direction", json()), a) || a.Modulus() < 1e-10) {
+        const std::optional<gp_Dir> unit =
+            read_vec3(layout.value("direction", json()), a)
+                ? ops::unit_direction(a.X(), a.Y(), a.Z(), 1e-10)
+                : std::nullopt;
+        if (!unit) {
             error = "FeaturePattern Linear direction is missing or zero"; return false;
         }
         double spacing = 0.0;
         if (!read_scalar(layout.value("spacing", json()), spacing) || std::abs(spacing) < 1e-9) {
             error = "FeaturePattern Linear spacing must be finite and non-zero"; return false;
         }
-        a.Normalize();
-        out.SetTranslation(gp_Vec(a) * (spacing * instance));
+        out.SetTranslation(gp_Vec(*unit) * (spacing * instance));
         return true;
     }
     if (kind == "Circular") {
         gp_XYZ origin;
-        if (!read_vec3(layout.value("axisOrigin", json()), origin) ||
-            !read_vec3(layout.value("axisDirection", json()), a) || a.Modulus() < 1e-10) {
+        const std::optional<gp_Dir> axis =
+            read_vec3(layout.value("axisOrigin", json()), origin) &&
+                    read_vec3(layout.value("axisDirection", json()), a)
+                ? ops::unit_direction(a.X(), a.Y(), a.Z(), 1e-10)
+                : std::nullopt;
+        if (!axis) {
             error = "FeaturePattern Circular axis is missing or zero"; return false;
         }
         double angle = 0.0;
@@ -70,7 +78,7 @@ bool instance_transform(const json& layout, int instance, int count, gp_Trsf& ou
             error = "FeaturePattern Circular angleDeg must be finite, non-zero, and <= 360";
             return false;
         }
-        out.SetRotation(gp_Ax1(gp_Pnt(origin), gp_Dir(a)),
+        out.SetRotation(gp_Ax1(gp_Pnt(origin), *axis),
                         angle * instance / count * M_PI / 180.0);
         return true;
     }

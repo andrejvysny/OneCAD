@@ -614,6 +614,17 @@ WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketc
             }
 
             result.warnings.push_back("Using polygon wire for planarized loop");
+            // A planarized edge id is `<entity>#seg<k>…`: a curved base entity
+            // here means its boundary is now chords, not the curve.
+            for (const auto& edgeId : loop.wire.edges) {
+                const std::string base = edgeId.substr(0, edgeId.find('#'));
+                const auto* entity = sketch.getEntity(base);
+                if (entity == nullptr || entity->type() == sk::EntityType::Line) continue;
+                if (std::find(result.polygonizedCurveIds.begin(), result.polygonizedCurveIds.end(),
+                              base) == result.polygonizedCurveIds.end()) {
+                    result.polygonizedCurveIds.push_back(base);
+                }
+            }
         }
 
         if (!wireMaker.IsDone()) {
@@ -666,6 +677,7 @@ FaceBuildResult FaceBuilder::buildFace(const Face& face, const sk::Sketch& sketc
                            outerWireResult.warnings.begin(),
                            outerWireResult.warnings.end());
     result.edgeLabels = outerWireResult.edgeLabels;
+    result.polygonizedCurveIds = outerWireResult.polygonizedCurveIds;
 
     try {
         // Create face from outer wire
@@ -705,6 +717,9 @@ FaceBuildResult FaceBuilder::buildFace(const Face& face, const sk::Sketch& sketc
             result.edgeLabels.insert(result.edgeLabels.end(),
                                      holeWireResult.edgeLabels.begin(),
                                      holeWireResult.edgeLabels.end());
+            result.polygonizedCurveIds.insert(result.polygonizedCurveIds.end(),
+                                              holeWireResult.polygonizedCurveIds.begin(),
+                                              holeWireResult.polygonizedCurveIds.end());
 
             BRepBuilderAPI_MakeFace faceWithHole(topoFace);
             faceWithHole.Add(holeWireResult.wire);

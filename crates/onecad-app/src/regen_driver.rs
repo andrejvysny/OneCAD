@@ -85,69 +85,103 @@ pub fn regen_driver_with_started(
         let post_publish = post_publish.clone();
         let autosave_tick = autosave_tick.clone();
         Box::pin(async move {
-            // Phase 1 (locked): compile the plan + clone the scratch session. An EMPTY
-            // plan (a no-op-producing request — a rolled-back append, an already-current
-            // timeline) still emits exactly ONE NoOp completion so the frontend awaiter's
-            // `regen-finished{noop}` anti-hang terminal fires in production (finding 4):
-            // returning silently here would strand the awaiter until its 8 s fallback.
-            let prepared = {
-                let mut guard = runtime.lock().await;
-                let Some(rt) = guard.as_mut() else {
-                    return Outcome::NoOp; // document closed while the job was queued.
-                };
-                if directive
-                    .runtime_session
-                    .as_deref()
-                    .is_some_and(|expected| !rt.matches_runtime_session(expected))
-                {
-                    return Outcome::NoOp;
-                }
-                match rt.begin_regen(directive.request) {
-                    Some(prepared) => prepared,
-                    None => {
-                        let report = rt.noop_report();
-                        let projection = rt.projection();
-                        drop(guard);
-                        emit(&report, &projection);
+            let mut retry: Option<StrandedRetry> = None;
+            let (report, cancel) = loop {
+                // Phase 1 (locked): compile the plan + clone the scratch session. An EMPTY
+                // plan (a no-op-producing request — a rolled-back append, an already-current
+                // timeline) still emits exactly ONE NoOp completion so the frontend awaiter's
+                // `regen-finished{noop}` anti-hang terminal fires in production (finding 4):
+                // returning silently here would strand the awaiter until its 8 s fallback.
+                let prepared = {
+                    let mut guard = runtime.lock().await;
+                    let Some(rt) = guard.as_mut() else {
+                        return Outcome::NoOp; // document closed while the job was queued.
+                    };
+                    if directive
+                        .runtime_session
+                        .as_deref()
+                        .is_some_and(|expected| !rt.matches_runtime_session(expected))
+                    {
                         return Outcome::NoOp;
                     }
+                    // A retry belongs to the runtime that owed the work. If the slot was
+                    // swapped meanwhile, the replacement's own open lane regenerates it.
+                    if retry
+                        .as_ref()
+                        .is_some_and(|retry| !rt.matches_runtime_session(&retry.runtime_session))
+                    {
+                        return Outcome::Superseded;
+                    }
+                    match rt.begin_regen(directive.request) {
+                        Some(prepared) => prepared,
+                        None => {
+                            let report = rt.noop_report();
+                            let projection = rt.projection();
+                            drop(guard);
+                            emit(&report, &projection);
+                            return Outcome::NoOp;
+                        }
+                    }
+                };
+                // The job has real work: announce it BEFORE the (slow) drive phase, so
+                // the busy indicator is up for the whole time the worker is out.
+                let runtime_session = prepared.runtime_session();
+                on_started(&runtime_session);
+                // Phase 2 (UNLOCKED): drive the worker; concurrent edits may supersede.
+                let cancel = directive.cancel.clone();
+                let mut driven = prepared.drive(cancel.clone()).await;
+                // Phase 2.5 (locked) + 2.6 (UNLOCKED), WP-D1: a regen that HALTED at some
+                // record gets ONE further from-0 pass that excludes that record's
+                // unprovable closure, so a broken feature cannot wipe bodies outside it.
+                // Only the second result is finished — the truncated one is never
+                // published, so the user never sees it flash and no awaiter settles twice.
+                let isolation = {
+                    let mut guard = runtime.lock().await;
+                    let Some(rt) = guard.as_mut() else {
+                        return Outcome::NoOp; // document closed during the worker IO.
+                    };
+                    rt.begin_isolation_regen(&driven)
+                };
+                if let Some(prepared) = isolation {
+                    // Adopt the isolation pass ONLY if it published: a worker that dies
+                    // or is cancelled inside its window must cost the isolation benefit,
+                    // never the halted pass's own publish (`adopt_isolated`).
+                    driven = adopt_isolated(driven, prepared.drive(cancel.clone()).await);
                 }
-            };
-            // The job has real work: announce it BEFORE the (slow) drive phase, so
-            // the busy indicator is up for the whole time the worker is out.
-            on_started(&prepared.runtime_session());
-            // Phase 2 (UNLOCKED): drive the worker; concurrent edits may supersede.
-            let cancel = directive.cancel.clone();
-            let mut driven = prepared.drive(directive.cancel).await;
-            // Phase 2.5 (locked) + 2.6 (UNLOCKED), WP-D1: a regen that HALTED at some
-            // record gets ONE further from-0 pass that excludes that record's
-            // unprovable closure, so a broken feature cannot wipe bodies outside it.
-            // Only the second result is finished — the truncated one is never
-            // published, so the user never sees it flash and no awaiter settles twice.
-            let isolation = {
-                let mut guard = runtime.lock().await;
-                let Some(rt) = guard.as_mut() else {
-                    return Outcome::NoOp; // document closed during the worker IO.
+                // Phase 3 (locked): commit iff still current, then emit events.
+                let attempts = retry.as_ref().map_or(0, |retry| retry.attempts);
+                let (report, projection, stranded) = {
+                    let mut guard = runtime.lock().await;
+                    let Some(rt) = guard.as_mut() else {
+                        return Outcome::NoOp; // document closed during the worker IO.
+                    };
+                    let mut report = rt.finish_regen(driven);
+                    let stranded = rt.take_stranded_regen();
+                    // A re-prepared attempt that the scheduler then cancelled was
+                    // overtaken by a newer request. That request owns the
+                    // terminal; a `cancelled` here would settle its awaiter early
+                    // and could roll back the very feature it is waiting on.
+                    if attempts > 0 && matches!(report.outcome, Outcome::Cancelled) {
+                        report.outcome = Outcome::Superseded;
+                    }
+                    let projection = rt.projection();
+                    (report, projection, stranded)
                 };
-                rt.begin_isolation_regen(&driven)
+                emit(&report, &projection);
+                if stranded && owes_stranded_retry(&report, &cancel, attempts) {
+                    tracing::info!(
+                        target: "onecad_lib::regen",
+                        attempt = attempts + 1,
+                        "regen superseded with no successor queued; re-preparing the owed request"
+                    );
+                    retry = Some(StrandedRetry {
+                        runtime_session,
+                        attempts: attempts + 1,
+                    });
+                    continue;
+                }
+                break (report, cancel);
             };
-            if let Some(prepared) = isolation {
-                // Adopt the isolation pass ONLY if it published: a worker that dies
-                // or is cancelled inside its window must cost the isolation benefit,
-                // never the halted pass's own publish (`adopt_isolated`).
-                driven = adopt_isolated(driven, prepared.drive(cancel.clone()).await);
-            }
-            // Phase 3 (locked): commit iff still current, then emit events.
-            let (report, projection) = {
-                let mut guard = runtime.lock().await;
-                let Some(rt) = guard.as_mut() else {
-                    return Outcome::NoOp; // document closed during the worker IO.
-                };
-                let report = rt.finish_regen(driven);
-                let projection = rt.projection();
-                (report, projection)
-            };
-            emit(&report, &projection);
             // A published regen produced new geometry outputs worth autosaving
             // (the debounce coalesces the edit-tick + this publish-tick).
             if report.published() {
@@ -159,7 +193,11 @@ pub fn regen_driver_with_started(
                 // against. It is a no-op once the ids are bound, and deliberately
                 // off the LOCKED phases: it does worker round trips of its own and
                 // must never sit in the edit path.
-                let rebind = {
+                // Skipped once a newer request is queued: its own publish
+                // replaces this partition and re-arms the pass.
+                let rebind = if cancel.is_cancelled() {
+                    None
+                } else {
                     let mut guard = runtime.lock().await;
                     guard.as_mut().and_then(|rt| {
                         rt.has_unbound_persisted_elements()
@@ -204,6 +242,41 @@ pub fn regen_driver_with_started(
             report.outcome
         })
     }
+}
+
+/// Bound on consecutive re-preparations of one directive. Each retry needs a
+/// fresh document mutation to be superseded again, so this only stops a
+/// pathological mutator from pinning the regen lane.
+const MAX_STRANDED_RETRIES: usize = 16;
+
+/// Identity of the runtime whose superseded regen is being re-prepared.
+struct StrandedRetry {
+    runtime_session: String,
+    attempts: usize,
+}
+
+/// `true` when a `Superseded` terminal left the document owing this regen.
+///
+/// The caller has already asked the runtime whether the supersede came only
+/// from mutations that queue no regen (`take_stranded_regen`): an edit that
+/// needs none (rename, colour, visibility) still advances the fencing revision,
+/// so it supersedes the in-flight result while queueing nothing. Without a retry
+/// the accepted history would never receive geometry, and a hard failure
+/// relabelled `Superseded` would never be reported. A fired cancel token means
+/// a newer request arrived meanwhile and owns the work.
+fn owes_stranded_retry(report: &RegenReport, cancel: &CancelToken, attempts: usize) -> bool {
+    if !matches!(report.outcome, Outcome::Superseded) || cancel.is_cancelled() {
+        return false;
+    }
+    if attempts >= MAX_STRANDED_RETRIES {
+        tracing::error!(
+            target: "onecad_lib::regen",
+            attempts,
+            "regen kept being superseded without a successor; giving up on this directive"
+        );
+        return false;
+    }
+    true
 }
 
 /// Best-effort checkpoint mint at the head a just-published **rollback** settled on

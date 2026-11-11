@@ -25,8 +25,8 @@ using nlohmann::json;
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
-// Below this an axis is treated as degenerate (squared length; matches MirrorOp).
-constexpr double kMinAxisLen2 = 1e-20;
+// Below this an axis length is treated as degenerate (matches MirrorOp).
+constexpr double kMinAxisLen = 1e-10;
 constexpr std::size_t kMaxTransformTargets = 128;
 
 bool read_scalar_value(const json& value, double& result) {
@@ -123,8 +123,8 @@ bool parse_placement(const json& params, Placement& out, std::string& err) {
             return false;
         }
     }
-    const double axis_len2 = ax * ax + ay * ay + az * az;
-    if (angle_deg != 0.0 && axis_len2 < kMinAxisLen2) {
+    const std::optional<gp_Dir> axis_dir = unit_direction(ax, ay, az, kMinAxisLen);
+    if (angle_deg != 0.0 && !axis_dir) {
         err = "TransformBody rotate.axis must be non-zero when angleDeg != 0";
         return false;
     }
@@ -133,7 +133,7 @@ bool parse_placement(const json& params, Placement& out, std::string& err) {
     // first, so `translation * rotation` rotates about the pivot, then translates.
     gp_Trsf rotation;
     if (angle_deg != 0.0) {
-        rotation.SetRotation(gp_Ax1(gp_Pnt(cx, cy, cz), gp_Dir(ax, ay, az)),
+        rotation.SetRotation(gp_Ax1(gp_Pnt(cx, cy, cz), *axis_dir),
                              angle_deg * kPi / 180.0);
     }
     gp_Trsf translation;

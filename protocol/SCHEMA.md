@@ -304,7 +304,11 @@ The receiver assembles the payload by `byteOffset`, verifies assembled length ==
   `"ThroughAll"`, `"Union"`, matching OneCAD-CPP `operationTypeName`).
 - **64-bit hashes are hex strings**, never numbers ([§2](#2-identifier--scalar-types)).
 - **`NaN`, `+Infinity`, `-Infinity` are rejected** on read → `PROTOCOL_ERROR`.
-  Producers MUST NOT emit them.
+  Producers MUST NOT emit them. A number literal that overflows an IEEE-754
+  double (e.g. `1e400`, anywhere in the frame, read or ignored) is such a value.
+  The worker cannot correlate an unparseable request, so it handles it as a
+  malformed frame ([§1](#1-frame-layout-ocw1) no-resync rule): a `stderr` log, no response,
+  and a clean exit with status 2 — never an abort (kernel audit 2026-11-11 #20).
 - **`-0` is normalized to `0`** by producers; readers treat `-0.0` and `0.0` as
   equal.
 - No trailing whitespace requirement; parsers MUST accept minified JSON.
@@ -808,7 +812,8 @@ unknown code as an opaque warning):
 | code | meaning |
 |---|---|
 | `REGION_REBOUND_BY_ANCHOR` | the op's stored `regionId` matched no cell after an edit moved a crossing; the op bound the unique cell containing `regionAnchor` instead (§7.3 "Region anchor"). `stage` is `"profile"`. Evidence `{ "region": { "from": "<stale regionId>", "to": "<bound regionId>", "anchor": [u, v] } }`. The params are unchanged; the warning repeats on every regen until the user re-picks. |
-| `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the node-merge coincidence tolerance, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) and, since WP-S1 (2026-09-09), on the `SketchRegions` result's own OPTIONAL `diagnostics` array ([§7.4](#74-sketch-solver-lane)) — so a dropped degenerate entity is now visible in sketch mode too. Both channels are omission-legal; a consumer that sees neither is not entitled to assume nothing was dropped. |
+| `PROFILE_CURVES_POLYGONIZED` | a LEGACY profile (no `regionIdentityVersion`) contains curved entities whose boundary the legacy face builder replaces by straight chords. The geometry is frozen and unchanged; the warning only makes the approximation visible (a stadium of two R5 arcs is about 0.3% short of its analytic volume). `stage` is `"profile"`. Evidence `{ "entityIds": ["<sketch entity id>", …] }`. Identity versions 2 and 3 build exact curves and never emit it. |
+| `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the entity-degeneracy floor, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. That floor is NOT the tolerance at which two DIFFERENT entities' endpoints merge into one graph node (and so at which a gap closes): on the V2/V3 exact-fragment path that is scale-relative, sketch extent × 1e-7 clamped to [1e-7, 1e-4] mm; on the legacy (V1) path it is a fixed 1e-4 mm, so e.g. a 1e-5 mm gap closes there while a 1e-3 mm gap stays open (kernel audit 2026-11-11 #24 — terminology only, behaviour unchanged). NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) and, since WP-S1 (2026-09-09), on the `SketchRegions` result's own OPTIONAL `diagnostics` array ([§7.4](#74-sketch-solver-lane)) — so a dropped degenerate entity is now visible in sketch mode too. Both channels are omission-legal; a consumer that sees neither is not entitled to assume nothing was dropped. |
 | `FILLET_BLEND_APPROXIMATED` | an approximated (walked) fillet blend published inside its fit bound + radius-relative section budget (kernel-hardening WP-G, 2026-09-06; §7.3 Fillet "Two blend classes"). `stage` is `"publication"`. Evidence is the `blendEvidence` object with the failure path's existing keys — `maximumSectionRadiusError`, `allowedSectionRadiusError`, `maximumTangencyRadians`, `allowedTangencyRadians` — plus `blendSurfaceClass`, `approximationTolerance`, `maxContourVertexValence` and the two counts `approximatedContours`, `approximatedBlendFaces`; ONE vocabulary, no aliases; emitted ONCE per step. The op published; the warning repeats on every regen because the geometry is what it is. |
 | `FILLET_OVERFLOW_TRIMMED` | an opted-in (`overflow: "auto"`) Fillet whose native build failed was published by the overflow builder (2026-11-01; §7.3 Fillet `overflow`). Severity `warning`, `stage` `"publication"`. Evidence `{ "overflowKind": "cliff", "consumedFace": "f:<ordinal>", "survivingSupport": "f:<ordinal>", "setback", "analyticRemovedVolume", "measuredRemovedVolume" }`. `consumedFace` and `survivingSupport` are PRE-op snapshot ordinals (the face map of the body BEFORE this op, not of the result). |
 | `CHAMFER_OVERFLOW_TRIMMED` | the Chamfer counterpart of `FILLET_OVERFLOW_TRIMMED`; `overflowKind` is `"extendedPlane"`. Same severity, stage and evidence. |
@@ -926,8 +931,12 @@ codes like any other `reasonCode`.
   `modified`/`deleted` events reference bodies that already exist. A **boolean split**
   (a boolean-mode op — Boolean, or boolean-mode Extrude/Revolve — whose **Cut or
   Intersect** result is **multi-solid**, i.e. bisects a body; an **Add/Union** never
-  splits — a fuse whose tool does not touch the target is a NAMED refusal, see
-  §7.3 "Boolean result policy") **deletes the
+  splits a single-solid target — a fuse whose tool does not touch the target is a
+  NAMED refusal, see §7.3 "Boolean result policy". The one exception is a target
+  that is ALREADY a multi-solid aggregate (only legacy replay produces one, e.g. an
+  unfused legacy Pattern): a fuse keeps the untouched solids, so its result stays
+  multi-solid and is published as a split like any other, deleting the aggregate's
+  id) **deletes the
   parent** (a `deleted` event) and mints ordered split children `body_<opId>:<k>`, each
   emitted as its **own `created` event** and adopted + fenced under the **same** D1
   rules above (the `body_` prefix + `<opId>` a known plan op, the `:<k>` ordinals
@@ -1703,7 +1712,13 @@ OneCAD-CPP `ExtrudeParams`.
   `twoDirections:true`, a negative `distance` or `distance2` is refused by name
   (`EXTRUDE_TWO_DIRECTION_NEGATIVE_LEG`, `stage:"classify"`, evidence
   `{extrude:{distance,distance2}}`); a negative leg used to build both prisms on one
-  side with the shorter one silently absorbed.
+  side with the shorter one silently absorbed. The same contract applies to each
+  RESOLVED leg (kernel audit 2026-11-11): a `ToFace` leg (parallel or tilted)
+  whose target lies on the OTHER side of the sketch plane resolves to a negative
+  extent and is refused `EXTRUDE_TWO_DIRECTION_LEG_WRONG_SIDE` (`stage:"classify"`,
+  evidence `{extrude:{leg,endCondition,resolvedDistance}}`) — it used to grow along
+  the first leg and publish a valid but wrong solid. A single-direction `ToFace`
+  whose target is behind the profile stays a legal backward extrude.
 - **`ThroughAll` is a tool extent, never published material.** With `NewBody` there
   is no reference body to reach through, so the combination is refused by name
   (`EXTRUDE_THROUGH_ALL_NO_TARGET`, `stage:"classify"`); it used to publish a 10⁵ mm
@@ -1890,6 +1905,26 @@ together. This is additive; old readers may continue to use the legacy pair.
   Touching the axis (an edge or vertex on it) is legal — it makes the degenerate
   pole edges of a shaft or a sphere. Pinned by
   `worker/tests/test_commit_tier_validation.cpp`.
+- **Near-axis band (kernel audit 2026-11-11).** "On the axis" means within the
+  on-axis tolerance `onAxisTolerance = Precision::Confusion() × (1 − 1e-3)`
+  (≈ 9.99e-8 mm; the rounding guard keeps the band strictly below the distance at
+  which OCCT's own on-axis and intersection tests disagree — exactly there
+  `BRepPrimAPI_MakeRevol` dereferenced an empty extrema result and the worker died
+  with SIGSEGV). A profile whose boundary reaches beyond that tolerance on BOTH
+  sides crosses the axis and refuses `REVOLVE_PROFILE_CROSSES_AXIS` by any margin
+  (it used to need the authoring resolution on both sides; smaller crossings fell
+  through to a generic `Revolve operation failed` or the crash). Otherwise every
+  boundary EDGE's true 3D closest approach to the axis line (closed form for a
+  line; dense sampling + golden-section refinement otherwise, so an arc's INTERIOR
+  minimum counts) must be either within `onAxisTolerance` or at least the
+  authoring resolution (1e-3 mm, compared with a 1e-9 relative rounding slack so a
+  gap authored exactly AT the resolution passes). An edge in between refuses
+  `OP_FAILED` with diagnostic `REVOLVE_PROFILE_NEAR_AXIS` (`stage:"classify"`,
+  evidence `{revolve:{minAxisDistance,onAxisTolerance,authoringResolution}}`)
+  before any kernel work — never a snap. This replaces a published sub-micron
+  bore (gaps 1e-5…5e-4 mm), a `GEOMETRY_INVALID` (≈2e-7…1e-6 mm) and the crash
+  (±1e-7 mm). `REVOLVE_PROFILE_CROSSES_AXIS` evidence additionally carries
+  `onAxisTolerance`. Pinned by `worker/tests/test_revolve_near_axis.cpp`.
 
 **Sweep** (`op.sweep`) — bounded circular section on one analytic sketch path.
 
@@ -2638,7 +2673,14 @@ placement. Added 2026-08-14 (Gear Generator G1).
     (`"edge"` | `"vertex"`) in place of `surfaceType`. A gear body SPLIT by a
     downstream op is no longer `body_<gearOpId>` and leaves the rule (recorded
     limit); a `PreviewOp` consults the head's gear map (a preview never mints a
-    durable id).
+    durable id). *The gear axis is the EVALUATED body's axis (2026-11-11).* It
+    starts as the Gear op's own frame (`placement.frame.axis`, or for
+    `placement.face` the derived cap normal) and is carried by every later step
+    that only re-locates the body (`TransformBody` with `copy:false` — same
+    shape, new placement), in plan order, so a cap of a gear rotated after it was
+    built stays referenceable and its flanks stay refused, at every prefix, on a
+    cold replay and across an incremental plan that does not itself name the
+    Gear op (the head's tracked entry is inherited, never dropped).
   - *Refusal shape.* `BindElementIds`: terminal `resp` `ok:false`, `error.code`
     `REF_UNRESOLVED` (the class Bind already uses for an unknown body or
     TopoKey), `detail.bindingIndex` as on every Bind refusal, and
@@ -2652,7 +2694,9 @@ placement. Added 2026-08-14 (Gear Generator G1).
   exactly where a bad parameter combination produces a plausible-looking but
   self-intersecting solid, so this op does not take the lighter tier.
 - Failures are recoverable `OP_FAILED` / `GEOMETRY_INVALID` naming the
-  parameter at fault: `teeth` below 3, non-positive `module`/`height`,
+  parameter at fault: `teeth` below 3, a `teeth` or `sampleCount` that is not an
+  integer (an integral float such as `20.0` is the same count; `20.9` is refused,
+  never truncated — 2026-11-11), non-positive `module`/`height`,
   `pressureAngleDeg` outside (0, 90), a shift/clearance combination with no
   valid tooth depth, a bore that reaches the tooth roots, a flank that will not
   interpolate at the requested `sampleCount`, or a profile that will not close.
@@ -2840,6 +2884,20 @@ names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelo
   plate skin. The message asks for an opening that keeps the remaining walls
   connected; changing thickness does not resolve this topology. Shell never
   silently opens another face, deletes the boss, or invents connecting material.
+- Any other kernel construction failure keeps the message `Shell operation
+  failed` and carries the diagnostic `SHELL_CONSTRUCTION_FAILED`
+  (`stage:"construction"`, evidence `{shell:{offsetError}}` naming the
+  `BRepOffset_Error`). A kernel result that BUILDS but is not a valid solid is the
+  ordinary `GEOMETRY_INVALID` publication refusal. Known limitation of the pinned
+  kernel (kernel audit 2026-11-11): a body with a through hole crossing the
+  opening (e.g. box 40×20×25, Ø12 bore, open bottom) is refused — as
+  `GEOMETRY_INVALID`, or `SHELL_CONSTRUCTION_FAILED` when the body is also
+  filleted — under every `MakeThickSolidByJoin` join/intersection configuration;
+  the predecessor stays intact.
+- An inward shell always REMOVES material; a kernel result whose volume is not
+  measurably below the input's (`minimumVolume`) is refused as unchanged
+  (ONECAD-243). Face count is not the criterion: five openings on a box leave one
+  thickened wall with the input's six faces, a valid result that publishes.
 
 **OffsetFace** (`op.offsetFace`) — Shapr3D-style direct-modeling face offset:
 selected face(s) move along their surface normals, adjacent faces extend/trim
@@ -3220,7 +3278,13 @@ advance `historyPrefixHash`). Added 2026-08-02 (WP-A).
   step (publish ≤ m−1, Invariant 6), NEVER `PROTOCOL_ERROR` — a user data
   problem must not tear down the worker. Diagnostics vocabulary: `STEP_SEWN`,
   `STEP_HEALED`, `STEP_UNIT_CONVERTED`, `STEP_NO_SOLIDS`, `STEP_ROOT_SKIPPED`,
-  `STEP_INVALID_SHAPE`, `STEP_DUPLICATE_SOLIDS`.
+  `STEP_INVALID_SHAPE`, `STEP_DUPLICATE_SOLIDS`, `STEP_GEOMETRY_OMITTED`.
+- **Import is solids-only; surface loss is named** (kernel audit 2026-11-11). A
+  transferred root that yields solids AND open shells or faces outside any shell
+  imports only the solids (surfaces are never promoted to bodies) and carries
+  `STEP_GEOMETRY_OMITTED` whose message names the root and the omitted open-shell
+  and free-face counts. A root that yields no solid at all stays
+  `STEP_ROOT_SKIPPED`.
 
 **TransformBody** (`op.transformBody`) — rigid placement of one or more bodies:
 translate + rotate about a frozen pivot, optionally as copies. The light
@@ -4864,7 +4928,12 @@ existing `ARTIFACT_TESSELLATE_FAILED` warning path and drops the entire artifact
   Rust's mesh cache sends the `snapshotId` it is meshing FOR; on `STALE_PREVIEW`
   it re-reads the head once (`GetWorkerHead`) and re-issues, and never blanks
   the cache on a stale answer. That re-issue is for `Tessellate` ONLY (a mesh is
-  a liveness artifact of whatever the head is). The four WRITERS are never
+  a liveness artifact of whatever the head is). The re-issued answer belongs to
+  the FRESH head and the transport reports that snapshot with the bytes. A
+  consumer that stores or exports a mesh under a fixed snapshot identity (the
+  mesh cache keyed by the published head, 3MF export whose face colours were
+  resolved against one snapshot, component replay) MUST compare the two and
+  refuse a mismatch as `stalePreview`; it never relabels the fresh bytes. The four WRITERS are never
   re-issued: a stale answer is surfaced as `stalePreview` and the caller decides
   — a bake or an export of a head that moved under the caller is geometry the
   caller never validated (`ExportStep`'s `faceColors` are even keyed by

@@ -437,8 +437,14 @@ AcceptOutcome Session::accept_prepared(std::uint64_t job_id,
         std::make_shared<const TopologyOwnerLedger>(std::move(scratch_->topology_owners));
     // SCHEMA §7.3 (WP-I): the gear-body map is PLAN-DERIVED, so it is rebuilt
     // here from the ACCEPTED plan against the freshly published bodies — no
-    // per-body state to persist, and every replay reproduces it exactly.
+    // per-body state to persist, and every replay reproduces it exactly. The
+    // scratch's TRACKED entries win: they carry the axis through every rigid
+    // re-location the plan applied (PlanExecutor `carry_gear_frames`), and they
+    // keep gear bodies an incremental plan inherited but does not itself name.
     gear_bodies_ = ops::gear_body_infos(scratch_->plan, bodies_);
+    for (const auto& [body_id, info] : scratch_->gear_bodies) {
+        if (bodies_.get(body_id) != nullptr) gear_bodies_[body_id] = info;
+    }
     history_prefix_hash_ = scratch_->history_prefix_hash;  // opaque; never recomputed
     snapshot_id_ = scratch_->prepared_snapshot_id;
     // D4: ADOPT the accepted plan's documentRevision as the head (Rust-owned edit

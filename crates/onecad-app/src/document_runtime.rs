@@ -259,6 +259,20 @@ impl RegenReport {
         }
     }
 
+    /// Whether this regen failed because no worker connection existed.
+    ///
+    /// Only [`EngineError::NotConnected`] qualifies. A crash, protocol violation
+    /// or timeout happened WHILE the plan ran, so the newest feature may be its
+    /// cause and stays eligible for the guarded provisional rollback (replaying
+    /// a crashing feature would only crash the restarted worker again).
+    #[must_use]
+    pub fn worker_unavailable(&self) -> bool {
+        matches!(
+            self.outcome,
+            Outcome::EngineFailed(EngineError::NotConnected { .. })
+        )
+    }
+
     /// The `document-changed` payload, or `None` when nothing was published.
     #[must_use]
     pub fn document_change(
@@ -382,11 +396,12 @@ impl PreparedMeshFetch {
                 instance,
                 worker_epoch,
             } => {
-                let bytes = provider
-                    .fetch_mesh(key.body, key.lod, snapshot)
-                    .await
-                    .ok()
-                    .map(Arc::new);
+                // Cached under `snapshot`, so only bytes meshed AT it qualify.
+                let bytes =
+                    crate::worker::fetch_mesh_exact(provider.as_ref(), key.body, key.lod, snapshot)
+                        .await
+                        .ok()
+                        .map(Arc::new);
                 Err(DrivenMeshFetch {
                     key,
                     snapshot,
@@ -596,6 +611,15 @@ const DISPLAY_LOD: Lod = Lod::Fine;
 /// terminal on the first pass regardless — this bounds only the worker-error
 /// path, where retrying is correct but must not become a per-publish tax.
 const MAX_REBIND_TRANSPORT_FAILURES: u8 = 3;
+
+/// Content edits made since geometry was last accepted for the applied prefix.
+#[derive(Debug, Clone, Copy)]
+struct UnacceptedEdit {
+    /// Lowest timeline step any of them edited.
+    floor: usize,
+    /// Undo position before the first of them; reverting to it undoes them all.
+    undo_mark: u64,
+}
 
 /// One entry of the promotion cache (see [`DocumentRuntime::promoted`]).
 ///
@@ -819,6 +843,14 @@ pub struct DocumentRuntime {
     /// Whether the most recent [`begin_regen`](Self::begin_regen) compiled a
     /// checkpoint-accelerated plan (observability for tests / diagnostics).
     last_regen_used_checkpoint: bool,
+    /// The content edits no accepted publish has covered yet (SCHEMA §7.2
+    /// `editedFrom`). See [`edit_claim`](Self::edit_claim).
+    unaccepted_edit: Option<UnacceptedEdit>,
+    /// Revision of the newest mutation whose caller queues a regen of its own.
+    regen_requested_at: u64,
+    /// Set by `finish_regen` when a superseded job left geometry owed with no
+    /// successor on the way. See [`take_stranded_regen`](Self::take_stranded_regen).
+    stranded_regen: bool,
     /// The document's import source blobs, keyed by content hash — the carrier
     /// [`ContainerWriter::save_with_imports`] persists (only the digests a live
     /// `ImportStep` record references are actually written; see
@@ -1139,6 +1171,9 @@ impl DocumentRuntime {
             rebind_transport_failures: 0,
             checkpoints: InMemoryCheckpointStore::new(),
             last_regen_used_checkpoint: false,
+            unaccepted_edit: None,
+            regen_requested_at: 0,
+            stranded_regen: false,
             imports: ImportBlobs::new(),
             library_archives: Default::default(),
             archive_budget: Default::default(),
@@ -1432,7 +1467,15 @@ impl DocumentRuntime {
             EditCommand::ImportProject { project } => Some(project.elements.clone()),
             _ => None,
         };
+        let undo_position = self.undo_position();
+        // A new variable has no user yet: it dirties from step 0 but moves nothing.
+        let records_before = if matches!(cmd, EditCommand::AddVariable { .. }) {
+            0
+        } else {
+            self.session.document().timeline.records().len()
+        };
         let (outcome, changed) = self.session.apply_with_change(cmd)?;
+        self.note_content_edit(&outcome, undo_position, records_before);
         if let Some(prior) = imported_elements {
             self.restore_imported_elements(&prior);
         }
@@ -1453,6 +1496,9 @@ impl DocumentRuntime {
             }
         }
         self.after_mutation(outcome.dirty.map(|dirty| dirty.from));
+        if !matches!(outcome.regen, onecad_core::edit::RegenHint::None) {
+            self.regen_requested_at = self.fencing.revision().0;
+        }
         Ok(outcome)
     }
 
@@ -1494,6 +1540,8 @@ impl DocumentRuntime {
             ));
         }
         let body_cleanup = self.transaction_body_cleanup(&commands)?;
+        let undo_position = self.undo_position();
+        let records_before = self.session.document().timeline.records().len();
         let mut hydrated = Vec::with_capacity(commands.len());
         for command in commands {
             if !matches!(&command, EditCommand::DeleteBody { body } if body_cleanup.contains(body))
@@ -1515,6 +1563,7 @@ impl DocumentRuntime {
         let Some(outcome) = self.session.end_transaction() else {
             return Err(DomainError::Validation("empty transaction".into()));
         };
+        self.note_content_edit(&outcome, undo_position, records_before);
         self.adopt_staged(staged);
         if let Some(dirty) = outcome.dirty {
             self.checkpoints.invalidate_from(dirty.from);
@@ -1885,6 +1934,7 @@ impl DocumentRuntime {
     /// The request is minted HERE, as a [`RegenRequest::RevertToEnd`], so no caller can
     /// accidentally hand the H6a edit-lane veto a `from > 0` that came from an undo.
     fn revert_report(&mut self, outcome: UndoOutcome) -> RevertReport {
+        self.forget_reverted_edits();
         let Some(floor) = outcome.dirty_floor else {
             // Nothing the timeline regenerates moved (a sketch-visibility undo).
             return RevertReport { regen: None };
@@ -1917,6 +1967,66 @@ impl DocumentRuntime {
         }
     }
 
+    /// Records an edit-lane content edit that accepted geometry does not yet
+    /// reflect. `position_before` is the undo position the edit was applied at.
+    ///
+    /// A pure append (`dirty.from` at or past the previous end of the timeline)
+    /// is not one: it adds records and moves nothing that existed, so no stored
+    /// anchor is stale because of it. Its own request still claims its step.
+    fn note_content_edit(
+        &mut self,
+        outcome: &CommandOutcome,
+        position_before: u64,
+        records_before: usize,
+    ) {
+        let (onecad_core::edit::RegenHint::ToEnd, Some(dirty)) = (outcome.regen, outcome.dirty)
+        else {
+            return;
+        };
+        if dirty.from >= records_before {
+            return;
+        }
+        self.unaccepted_edit = Some(match self.unaccepted_edit {
+            Some(edit) => UnacceptedEdit {
+                floor: edit.floor.min(dirty.from),
+                undo_mark: edit.undo_mark.min(position_before),
+            },
+            None => UnacceptedEdit {
+                floor: dirty.from,
+                undo_mark: position_before,
+            },
+        });
+    }
+
+    /// A revert that unwound past the first unaccepted edit restored the state
+    /// accepted geometry was built from: nothing is left to claim (H8).
+    fn forget_reverted_edits(&mut self) {
+        if self
+            .unaccepted_edit
+            .is_some_and(|edit| self.undo_position() <= edit.undo_mark)
+        {
+            self.unaccepted_edit = None;
+        }
+    }
+
+    /// The SCHEMA §7.2 `editedFrom` a plan for `request` must carry.
+    ///
+    /// The request names only the edit that queued it. A regen that was
+    /// cancelled or superseded never published, so its edit is still newer than
+    /// every stored anchor; the plan that finally runs must claim it too, even
+    /// when it was queued by a later edit, an undo of a DIFFERENT edit, or a
+    /// worker-restart replay. Otherwise the resolver's descriptor-tie veto is
+    /// silently disarmed for geometry that did move. A revert that restored the
+    /// accepted state still claims nothing.
+    fn edit_claim(&self, request: RegenRequest) -> Option<usize> {
+        let outstanding = self.unaccepted_edit.map(|edit| edit.floor);
+        match request {
+            RegenRequest::ToStep(_) => None,
+            RegenRequest::ToEnd { from } => Some(outstanding.map_or(from, |floor| floor.min(from))),
+            RegenRequest::RevertToEnd { .. } => outstanding,
+        }
+    }
+
     /// Re-mirror a mutation while retaining verdicts below its dirty floor, bump
     /// the fencing revision, and mark unsaved. None means no timeline invalidation.
     fn after_mutation(&mut self, dirty_floor: Option<usize>) {
@@ -1937,11 +2047,37 @@ impl DocumentRuntime {
         // it reverts. Insert-only — user-authored name/visible survive.
         self.session.adopt_regen_bodies(&self.regen.bodies);
         self.fencing.bump_revision();
+        // A mutation that dirtied the timeline has a caller that queues its regen.
+        if dirty_floor.is_some() {
+            self.regen_requested_at = self.fencing.revision().0;
+        }
         self.persisted_generation = self
             .persisted_generation
             .checked_add(1)
             .expect("persisted generation exhausted");
         self.dirty = true;
+    }
+
+    /// Whether the job just finished was superseded ONLY by mutations that queue
+    /// no regen (rename, colour, visibility): same worker epoch, and no
+    /// regen-requesting edit since the job was prepared. Then nobody else will
+    /// produce the geometry it owed. Any other supersede has its own successor
+    /// (the edit's request, an undo's, the restart replay), and re-running here
+    /// would race it and could hand its awaiter a terminal for the wrong work.
+    fn superseded_without_successor(
+        &self,
+        expected: (
+            onecad_core::ids::DocumentRevision,
+            onecad_core::ids::WorkerEpoch,
+        ),
+    ) -> bool {
+        self.fencing.get().1 == expected.1 && self.regen_requested_at <= expected.0 .0
+    }
+
+    /// Consumes the "geometry owed, no successor queued" mark of the last
+    /// `finish_regen`. The regen driver re-prepares its request when it is set.
+    pub fn take_stranded_regen(&mut self) -> bool {
+        std::mem::take(&mut self.stranded_regen)
     }
 
     fn require_generation_capacity(&self) -> Result<(), DomainError> {
@@ -2160,7 +2296,7 @@ impl DocumentRuntime {
         // edit lane's `ToEnd { from > 0 }` claims an upstream content edit.
         let mut plan_req = plan
             .into_request(job, plan_rev, epoch, PolicyVersions::default(), artifacts)
-            .with_edited_from(request.edited_from());
+            .with_edited_from(self.edit_claim(request));
         // Attach the selected checkpoint's stored artifacts so the executor's
         // RestoreCheckpoint reconstructs the base from them (review F3). A missing
         // stored checkpoint leaves them `None` ⇒ the worker reports `restored:false`
@@ -2221,7 +2357,7 @@ impl DocumentRuntime {
             planner_ms: planning_started.elapsed().as_millis() as u64,
             clock,
             target_step,
-            edited_from: request.edited_from(),
+            edited_from: self.edit_claim(request),
             isolation: None,
         })
     }
@@ -2490,6 +2626,7 @@ impl DocumentRuntime {
         let DrivenRegen {
             outcome,
             mut scratch,
+            base_elements,
             prior,
             instance,
             expected,
@@ -2501,6 +2638,7 @@ impl DocumentRuntime {
             mesh_sink,
             timings,
             isolation,
+            edited_from,
             ..
         } = driven;
         // WP-D1: an isolation pass excluded the halted record, so the worker
@@ -2514,6 +2652,7 @@ impl DocumentRuntime {
             }
             _ => outcome,
         };
+        self.stranded_regen = false;
         let job = JobLabel(job);
         // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
         // into EVERY outcome — including Superseded/Failed — for commit correlation.
@@ -2541,7 +2680,10 @@ impl DocumentRuntime {
                     .iter()
                     .map(|meta| meta.id)
                     .collect();
+                self.carry_inflight_promotions(&mut scratch, &base_elements);
                 let (changed, removed) = self.commit_snapshot(scratch, snap, lod, &prior);
+                self.settle_edit_claim(snap, edited_from);
+                self.rearm_rebind_after_publish(edited_from);
                 // The worker already tessellated every one of these bodies while
                 // preparing and shipped the MESH1 blobs in the plan terminal's tail.
                 // Seed them now so the `document-changed` this commit is about to emit
@@ -2617,6 +2759,7 @@ impl DocumentRuntime {
                 return report;
             }
             // Window race: worker accepted lock-free but the document advanced.
+            self.stranded_regen = same_instance && self.superseded_without_successor(expected);
             tracing::warn!(
                 job = %job,
                 rev = self.fencing.revision().0,
@@ -2648,6 +2791,10 @@ impl DocumentRuntime {
         // (a hard failure with UNCHANGED fencing is still reported as `failed`). Cancelled
         // and NoOp keep their own terminal. A failure that belongs to ANOTHER runtime
         // instance is likewise not this document's to report (VF-B2).
+        if matches!(outcome, Outcome::Superseded) {
+            // The executor's own revision gate refused before accepting.
+            self.stranded_regen = same_instance && self.superseded_without_successor(expected);
+        }
         let outcome = if matches!(outcome, Outcome::EngineFailed(_))
             && (!same_instance || self.fencing.get() != expected)
         {
@@ -2662,6 +2809,7 @@ impl DocumentRuntime {
                     "regen: FAILED downgraded to superseded (fencing moved)"
                 );
             }
+            self.stranded_regen = same_instance && self.superseded_without_successor(expected);
             Outcome::Superseded
         } else {
             outcome
@@ -2843,10 +2991,12 @@ impl DocumentRuntime {
         // generation but {this one, the one before it} — the window the
         // descriptor-pinned reuse rung reads. Ordered AFTER the tripwire evaluate
         // above, which must see the pre-swap mirror.
-        self.prune_promoted(snap.id, prev_snapshot);
         // The caller has already fenced (tokens unchanged since begin_regen), so the
         // live epoch IS the one this geometry was computed under.
-        self.head_epoch = self.fencing.get().1;
+        let epoch = self.fencing.get().1;
+        self.retire_promotions_of_other_epochs(epoch);
+        self.prune_promoted(snap.id, prev_snapshot);
+        self.head_epoch = epoch;
         // NOT `self.dirty = true` here. A genuine edit already dirties via
         // `after_mutation` at apply()/undo()/redo() time, before any regen
         // starts — setting it again here is redundant for that case. But
@@ -2864,6 +3014,72 @@ impl DocumentRuntime {
             .filter(|b| !current.contains(b))
             .collect();
         (changed, removed)
+    }
+
+    /// Clears the outstanding edit claim once accepted geometry covers it: a
+    /// publish that carried the claim and whose last valid step reached the
+    /// edited one. Steps it halted at are held by their own repair items, and a
+    /// reference re-picked afterwards is authored against this post-edit head.
+    /// A preview or an empty publish resolved nothing under the veto, so the
+    /// edit stays owed.
+    fn settle_edit_claim(&mut self, snap: &ModelSnapshot, edited_from: Option<usize>) {
+        let Some(edit) = self.unaccepted_edit else {
+            return;
+        };
+        if edited_from.is_some_and(|claimed| claimed <= edit.floor)
+            && snap.step_index.is_some_and(|last| last >= edit.floor)
+        {
+            self.unaccepted_edit = None;
+        }
+    }
+
+    /// Every publish replaces the worker's element partition, so a rebind that
+    /// completed against an earlier head proves nothing about this one.
+    ///
+    /// The pass is re-armed only for a publish with NO edit claim (open, undo,
+    /// redo, restart replay, rollback). Its lane is `ResolveRefs`, which carries
+    /// no `editedFrom`: after an upstream content edit a stored anchor could
+    /// decide a descriptor tie there, which SCHEMA §10 forbids. A publish that
+    /// carries a claim, or lands while an edit is still unaccepted, leaves the
+    /// pass as it was; ids it unbound are bound by the next claim-free replay.
+    /// The transport-failure budget still bounds the retries.
+    fn rearm_rebind_after_publish(&mut self, edited_from: Option<usize>) {
+        let after_edit = edited_from.is_some() || self.unaccepted_edit.is_some();
+        if !after_edit && self.rebind_transport_failures < MAX_REBIND_TRANSPORT_FAILURES {
+            self.rebind_attempted = false;
+        }
+    }
+
+    /// Keeps persistent ids promoted while this regen was out.
+    ///
+    /// The scratch was cloned at `begin_regen`; a promotion that landed afterwards
+    /// exists only in the live index and would vanish when the scratch replaces
+    /// it. Only durable evidence is carried: the worker binding belonged to the
+    /// replaced head, so the id stays unbound until the ladder re-binds it. An id
+    /// the scratch was seeded with is never restored here: its absence means the
+    /// regen itself retired it.
+    fn carry_inflight_promotions(
+        &self,
+        scratch: &mut RegenSession,
+        base_elements: &BTreeSet<ElementId>,
+    ) {
+        for (id, live) in self.regen.elements.iter() {
+            if !live.is_durable() {
+                continue;
+            }
+            match scratch.elements.get(id) {
+                None if !base_elements.contains(id) => {
+                    scratch.elements.insert(id.clone(), live.clone());
+                }
+                // Evidence filled onto a row the job did see (H5 fill-iff-None).
+                Some(seen)
+                    if !seen.is_durable() && seen.body == live.body && seen.kind == live.kind =>
+                {
+                    scratch.elements.insert(id.clone(), live.clone());
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Plants / retires the VF-B6 ordinal-permutation gates a just-committed regen
@@ -5621,6 +5837,22 @@ impl DocumentRuntime {
     /// next pick. That is the safe direction — a false negative creates a new sketch
     /// instead of re-entering the wrong one — and it bounds a map that would
     /// otherwise grow once per pick per snapshot for the life of the document.
+    /// Drops the whole promotion cache when the publishing epoch differs from the
+    /// head's. A restarted (or reset) worker numbers its snapshots from 1 again,
+    /// so a bare `(snapshot, body, topoKey)` key from the earlier process can
+    /// collide with a different face in the new one and hand its element id
+    /// over on an exact-key hit. Durable ids and their evidence are untouched;
+    /// only the snapshot-scoped shortcut is retired.
+    fn retire_promotions_of_other_epochs(&mut self, publishing: onecad_core::ids::WorkerEpoch) {
+        if publishing != self.head_epoch && !self.promoted.is_empty() {
+            tracing::debug!(
+                entries = self.promoted.len(),
+                "promotion cache retired — the worker epoch changed under it"
+            );
+            self.promoted.clear();
+        }
+    }
+
     fn prune_promoted(&mut self, current: SnapshotId, previous: Option<SnapshotId>) {
         self.promoted
             .retain(|(s, _, _), _| *s == current || Some(*s) == previous);
@@ -6909,6 +7141,8 @@ impl PreparedRegen {
             edited_from,
             isolation,
         } = self;
+        let base_elements: BTreeSet<ElementId> =
+            scratch.elements.iter().map(|(id, _)| id.clone()).collect();
         // The phase-2 span. Everything the executor awaits nests inside it — INCLUDING
         // the `onecad_protocol::frames` tx/rx events, which is the join from a regen to
         // its OCW1 `reqId`s. The forwarded worker-stderr lane does NOT nest (it is a
@@ -6980,6 +7214,7 @@ impl PreparedRegen {
         DrivenRegen {
             outcome,
             scratch,
+            base_elements,
             prior,
             instance,
             expected,
@@ -7027,7 +7262,8 @@ fn drive_clear(
         return Outcome::Cancelled;
     }
     scratch.bodies = BodyRegistry::new();
-    scratch.elements.retain_quarantined();
+    // Rollback hides geometry; it does not delete the user's attached intent.
+    scratch.elements.retain_durable();
     scratch.repair.clear();
     let step_states: Vec<(usize, StepState)> = (0..target)
         .filter_map(|s| scratch.timeline.state(s).map(|st| (s, st.clone())))
@@ -7056,6 +7292,9 @@ fn drive_clear(
 pub struct DrivenRegen {
     outcome: Outcome,
     scratch: RegenSession,
+    /// The element ids the scratch was seeded with. A live id outside this set
+    /// was promoted while the job was out, so the job never saw it.
+    base_elements: BTreeSet<ElementId>,
     prior: Vec<BodyId>,
     /// Carried verbatim from [`PreparedRegen::instance`] — the cross-document fence.
     instance: Uuid,

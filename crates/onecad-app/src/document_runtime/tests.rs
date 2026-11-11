@@ -6935,3 +6935,6 @@ mod rebind_outcomes;
 
 #[path = "tests/project_import_identity.rs"]
 mod project_import_identity_tests;
+
+#[path = "tests/review_hardening.rs"]
+mod review_hardening;

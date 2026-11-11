@@ -347,7 +347,9 @@ impl DocumentRuntime {
                 PolicyVersions::default(),
                 PlanArtifacts::default(),
             )
-            .with_edited_from(request.edited_from());
+            // The same claim the commit will make, including edits no publish
+            // has covered yet: the preview must veto exactly what the commit vetoes.
+            .with_edited_from(self.edit_claim(request));
         let (seq, cancel) = self.edit_preview.install();
         Ok(EditPreviewPrep::Run(Box::new(EditPreviewJob {
             seq,

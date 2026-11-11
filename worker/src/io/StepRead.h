@@ -50,6 +50,7 @@ inline constexpr const char* kUnitConverted = "STEP_UNIT_CONVERTED";  // file un
 inline constexpr const char* kNoSolids = "STEP_NO_SOLIDS";           // nothing solid in the file
 inline constexpr const char* kRootSkipped = "STEP_ROOT_SKIPPED";     // a root yielded no solid
 inline constexpr const char* kInvalidShape = "STEP_INVALID_SHAPE";   // BRepCheck rejected a solid
+inline constexpr const char* kGeometryOmitted = "STEP_GEOMETRY_OMITTED";  // open shells / free faces dropped
 }  // namespace step_diag
 
 inline constexpr const char* kAmbiguousImportOrder = "AMBIGUOUS_IMPORT_ORDER";

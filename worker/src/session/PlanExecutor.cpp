@@ -17,6 +17,8 @@
 #include <utility>
 
 #include <Standard_Failure.hxx>
+#include <TopLoc_Location.hxx>
+#include <gp_Trsf.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
@@ -953,6 +955,48 @@ json candidate_diagnostics(const CandidateResult& candidate) {
     return diagnostics;
 }
 
+namespace {
+
+// SCHEMA §7.3 gear referenceability: the classifier's axis lives in the EVALUATED
+// body frame, not the Gear op's authored frame (review NEW-01: a cap of a gear
+// rotated 90° about X was refused). These are the tracked gear bodies' shapes
+// before a step, so the step's effect on each can be measured afterwards.
+std::map<std::string, TopoDS_Shape> gear_shapes_before(const ScratchJob& job) {
+    std::map<std::string, TopoDS_Shape> out;
+    for (const auto& [body_id, info] : job.gear_bodies) {
+        if (const BodyRecord* rec = job.bodies.get(body_id)) out.emplace(body_id, rec->geom);
+    }
+    return out;
+}
+
+// After an Ok step: a Gear step starts tracking the body it minted (D1
+// `body_<opId>`), and a step that only RE-LOCATED a tracked body — same TShape,
+// new TopLoc, i.e. `TransformBody` move — carries the axis by exactly that rigid
+// motion. Any other change rebuilt geometry in place, which leaves the axis put.
+void carry_gear_frames(ScratchJob& job, const json& op, const std::string& op_id,
+                       const std::map<std::string, TopoDS_Shape>& before) {
+    for (const auto& [body_id, old_shape] : before) {
+        const BodyRecord* rec = job.bodies.get(body_id);
+        const auto tracked = job.gear_bodies.find(body_id);
+        if (!rec || tracked == job.gear_bodies.end() || !rec->geom.IsPartner(old_shape) ||
+            rec->geom.Location().IsEqual(old_shape.Location())) {
+            continue;
+        }
+        const gp_Trsf motion = rec->geom.Location().Transformation() *
+                               old_shape.Location().Transformation().Inverted();
+        tracked->second.axis.Transform(motion);
+    }
+    if (get_str(op, "opType", "") != "Gear") return;
+    const std::string body_id = "body_" + op_id;
+    if (const BodyRecord* rec = job.bodies.get(body_id)) {
+        if (auto info = ops::gear_body_info(job.plan, body_id, rec->geom)) {
+            job.gear_bodies[body_id] = *info;
+        }
+    }
+}
+
+}  // namespace
+
 ExecResult execute_plan_ops(ScratchJob& job, const json& ops, std::uint64_t job_id,
                             std::uint64_t req_id, HandlerContext& ctx,
                             ops::ValidationMode validation_mode) {
@@ -1003,6 +1047,7 @@ ExecResult execute_plan_ops(ScratchJob& job, const json& ops, std::uint64_t job_
         CandidateSnapshot pre_step;
         if (can_substitute) pre_step = snapshot_candidate(job, last_sketch_id);
 
+        const std::map<std::string, TopoDS_Shape> gear_before = gear_shapes_before(job);
         CandidateResult candidate;
 
         if (op_id.find("__fail") != std::string::npos) {
@@ -1069,6 +1114,7 @@ ExecResult execute_plan_ops(ScratchJob& job, const json& ops, std::uint64_t job_
                 job.last_valid_step = last_ok_step;  // prepare m−1 (Invariant 6)
                 return res;
             }
+            carry_gear_frames(job, op, op_id, gear_before);
             StepResult r;
             r.step_index = step_index;
             r.status = "ok";

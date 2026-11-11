@@ -5376,6 +5376,7 @@ pub fn emit_regen_events(app: &HostContext, report: &RegenReport, projection: &D
         runtime_session: report.runtime_session.clone(),
         revision: report.revision,
         source_revision: report.source_revision,
+        worker_unavailable: report.worker_unavailable(),
         outcome: report.outcome_str().to_string(),
         message: report.failure_message(),
         diagnostics: report.diagnostics.clone(),

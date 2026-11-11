@@ -16,6 +16,10 @@
 //! local frame offsets 0.001, 1 and 20,000 mm, and two global rotations.
 //! These sampled cases do not establish arbitrary scale or origin invariance.
 //!
+//! A start outside the iteration's local basin gets one retry from a closed-form
+//! tree guess (`solver/seed.rs`); the guess passes through the same convergence,
+//! residual, limit and rank checks as any other start.
+//!
 //! Non-convergence never partially moves the assembly: failure outcomes carry
 //! no poses, so the caller keeps its input poses (ONECAD-401).
 
@@ -30,6 +34,8 @@ use crate::occurrence::OccurrenceId;
 
 #[path = "solver/forest.rs"]
 mod forest;
+#[path = "solver/seed.rs"]
+mod seed;
 
 const FD_STEP: f64 = 1e-7;
 const RANK_REL_TOL: f64 = 1e-8;
@@ -199,7 +205,7 @@ fn solve_inner(req: &SolveRequest) -> Result<SolveOutcome, SolverError> {
     if layout.unknowns == 0 {
         return Ok(solve_fixed(req, &problem, &start));
     }
-    let first = run_lm(&start, &problem);
+    let first = solve_lm(&start, &problem);
     let clamped =
         first.status == LmStatus::Converged && apply_limit_clamps(&mut cons, &first.poses, tol);
     let problem = Problem {
@@ -212,7 +218,7 @@ fn solve_inner(req: &SolveRequest) -> Result<SolveOutcome, SolverError> {
         let iterations = first.iterations;
         return Ok(finish(req, &problem, first, iterations, &cons));
     }
-    let second = run_lm(&first.poses, &problem);
+    let second = solve_lm(&first.poses, &problem);
     let iterations = first.iterations + second.iterations;
     let authored_cons = build_constraints(req)?;
     Ok(finish(req, &problem, second, iterations, &authored_cons))
@@ -702,6 +708,30 @@ fn try_step(
     None
 }
 
+/// Iterate from `start`; if that does not converge, retry once from the
+/// closed-form tree guess.
+///
+/// A start the iteration already handles keeps its exact historical result.
+/// The retry exists for starts outside the local basin: lever arms of metres
+/// (rotation about the body origin and translation become badly coupled) and
+/// exactly opposed joint axes (a stationary point of the rotation residual).
+/// Either way the returned poses went through the same convergence test, and
+/// the caller re-verifies residuals, limits and rank.
+fn solve_lm(start: &[RigidTransform], problem: &Problem) -> LmOutcome {
+    let direct = run_lm(start, problem);
+    if direct.status == LmStatus::Converged {
+        return direct;
+    }
+    let seeded = run_lm(&seed::tree_seed(start, problem), problem);
+    if seeded.status != LmStatus::Converged {
+        return direct;
+    }
+    LmOutcome {
+        iterations: direct.iterations + seeded.iterations,
+        ..seeded
+    }
+}
+
 fn run_lm(start: &[RigidTransform], problem: &Problem) -> LmOutcome {
     let n = problem.layout.unknowns;
     let mut poses = copy_poses(start);
@@ -949,9 +979,22 @@ mod tests {
             1,
             2,
         );
+        // A lone joint on a tree has a closed-form pose and no longer needs any
+        // iteration. Exhaustion needs a loop the tree guess cannot close: a hinge
+        // about z plus a rigid joint that fixes the hinge angle at 0.3 rad.
+        let hinge = joint(
+            11,
+            JointKind::Revolute,
+            frame_at(Vec3d::new(1.0, 0.0, 0.0)),
+            frame_at(Vec3d::ZERO),
+            1,
+            2,
+        );
+        let mut j = j;
+        j.a.frame.x = Vec3d::new(0.3_f64.cos(), 0.3_f64.sin(), 0.0);
         let mut request = SolveRequest::new(
             two_bodies(pose(rot_z(0.4), Vec3d::new(0.0, 5.0, 7.0))),
-            vec![j],
+            vec![hinge, j],
         );
         request.max_iterations = 1;
         let before = serde_json::to_value(&request).unwrap();
@@ -1455,3 +1498,6 @@ mod tests {
 #[cfg(test)]
 #[path = "solver/forest_tests.rs"]
 mod forest_tests;
+#[cfg(test)]
+#[path = "solver/seed_tests.rs"]
+mod seed_tests;

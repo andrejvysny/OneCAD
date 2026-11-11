@@ -36,6 +36,31 @@ successful outcomes carry poses. Callers retain the previous accepted state on
 invalid, uncertain, cancelled or failed work; application publication still
 requires its session/head/worker fences.
 
+## Convergence outside the local basin
+
+The iteration runs from the caller's poses first, and a start it handles keeps
+its historical result bit for bit. When it does not converge, the solver retries
+once from a closed-form guess: poses are propagated outward from placed bodies
+through `T_b l_b = T_a l_a J(q)`, one joint at a time, in input order. A driven
+or equality-limited joint uses its target. A free joint keeps the coordinate its
+current pose already has (the twist about the joint z for a revolute, the z
+offset for a slider), moved to the nearest bound when it has limits. Nothing is
+pinned and no constraint is added, so reported mobility is unchanged. A joint
+between two already placed bodies closes a loop the guess does not honour; it is
+left to the iteration.
+
+The guess is never an answer. The same convergence test, the final residual and
+limit recheck and the rank report apply to it, and a failed retry returns the
+original failure with no poses. Regressions cover single grounded rigid and
+driven-slider joints with attachment offsets of 1 mm to 10 m from near and far
+starts, and exactly opposed joint axes (a stationary point of the rotation
+residual), each re-checked by an oracle independent of the solver's residuals.
+This is a sampled envelope, not a guarantee for arbitrary scale or for loops.
+
+Directed frames are not contact mates: two outward face normals are opposed, so
+aligning their frames flips the part. That is a satisfied solve, not an error.
+A persisted flip/offset modifier for geometry-bound joints is not implemented.
+
 ## Rank and degrees of freedom
 
 Perturbations rotate around each body's origin, with world-axis translation.

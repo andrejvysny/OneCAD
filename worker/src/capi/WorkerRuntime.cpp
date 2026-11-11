@@ -106,11 +106,12 @@ nlohmann::json make_hello_result_impl() {
         // exactly why it rotted, so it is completed here rather than extended by
         // three and left half-true.
         {"capabilities",
-         nlohmann::json::array({"importSourceIdentityV1", "op.sketch", "op.extrude", "op.revolve", "op.loft", "op.fillet", "op.chamfer",
+         nlohmann::json::array({"importSourceIdentityV1", "op.sketch", "op.extrude", "op.revolve", "op.loft", "op.sweep", "op.fillet", "op.chamfer",
                                 "op.boolean", "op.boolean.tools", "op.hole", "op.hole.points",
                                 "op.shell", "op.linearPattern",
                                 "op.circularPattern", "op.mirrorBody", "op.transformBody",
-                                "op.offsetFace", "op.importStep", "op.placeComponent",
+                                "op.offsetFace", "op.gear", "op.featurePattern",
+                                "op.importStep", "op.placeComponent",
                                 "op.detachComponent", "solver.planegcs", "constraint.tangentAtPoint", "tessellate.mesh1",
                                 "io.step", "io.step.import", "io.geometry.export",
                                 "query.classifyElement", "query.bodyTopology",

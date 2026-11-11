@@ -151,6 +151,14 @@ std::optional<TopoDS_Face> build_profile_face(const nlohmann::json& sketch_param
 // (advisory_limit 63 + 1). A Cancelled outcome carries nothing.
 void attach_profile_diagnostics(OpOutcome& out, std::vector<nlohmann::json>& diagnostics);
 
+// The unit vector of a user-authored direction (pattern / mirror / rotation /
+// frame axes), or nullopt for a non-finite component or a vector shorter than
+// `min_length`. Scale-safe: `gp_Dir(x, y, z)` squares its components, so a finite
+// direction like [1e200, 0, 0] overflowed to an infinite length and normalized to
+// the ZERO vector (review NEW-03). Every direction whose plain squared norm is
+// representable keeps exactly the bits `gp_Dir(x, y, z)` gave it before.
+std::optional<gp_Dir> unit_direction(double x, double y, double z, double min_length);
+
 // Plane + outward normal of a planar face (normal reversed for REVERSED faces).
 // false when the face is null / non-planar.
 bool planar_face_plane_normal(const TopoDS_Face& face, gp_Pln& plane_out, gp_Dir& normal_out);

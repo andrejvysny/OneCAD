@@ -204,9 +204,12 @@ fn should_rollback(
     let Some(record) = fresh else {
         return false;
     };
+    // An unreachable worker judged nothing: the accepted feature stays in
+    // history, unregenerated, for the restarted worker to build.
     if completion.runtime_session != session
         || completion.source_revision != accepted_revision
         || completion.outcome == "superseded"
+        || completion.worker_unavailable
         || completion
             .repair_steps
             .iter()
@@ -228,6 +231,7 @@ mod tests {
             runtime_session: "current".into(),
             revision: 10,
             source_revision: 9,
+            worker_unavailable: false,
             outcome: outcome.into(),
             message: Some("original failure".into()),
             diagnostics: vec![],
@@ -252,6 +256,10 @@ mod tests {
             &completion("cancelled")
         ));
         assert!(!should_rollback(None, "current", 9, &completion("failed")));
+        // Audit 13: a regen that never reached a worker rejects nothing.
+        let mut unavailable = completion("failed");
+        unavailable.worker_unavailable = true;
+        assert!(!should_rollback(Some(record), "current", 9, &unavailable));
         assert!(!should_rollback(
             Some(record),
             "old",

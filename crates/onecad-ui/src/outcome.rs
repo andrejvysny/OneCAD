@@ -58,6 +58,7 @@ mod tests {
             runtime_session: "current".into(),
             revision: 4,
             source_revision: 3,
+            worker_unavailable: false,
             outcome: "published".into(),
             message: None,
             diagnostics: vec![],

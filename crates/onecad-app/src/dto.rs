@@ -2166,6 +2166,12 @@ pub struct RegenFinished {
     /// surfaces WHY. Absent for any other outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// `true` when a `failed` regen never reached a geometry worker at all (no
+    /// connection: handshake pending, between restarts, retired). The failure
+    /// then says nothing about the features it was asked to build, so it must
+    /// not be treated as their rejection.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worker_unavailable: bool,
     /// Structured kernel evidence for a hard failure or published failed step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<onecad_core::regen::Diagnostic>,
@@ -3466,6 +3472,7 @@ mod tests {
             runtime_session: "runtime-1".into(),
             revision: 7,
             source_revision: 7,
+            worker_unavailable: false,
             outcome: "published".into(),
             message: None,
             diagnostics: Vec::new(),

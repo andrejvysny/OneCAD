@@ -2276,28 +2276,67 @@ type MeshPayload = (Vec<u8>, Option<u64>, Option<String>);
 /// PROTOCOL_ERROR, never zero-fill-and-hope (F5).
 #[derive(Default)]
 struct StreamAcc {
+    /// The contiguous prefix `[0, buf.len())` received so far.
     buf: Vec<u8>,
     total_bytes: Option<u64>,
     sha256: Option<String>,
     /// Received `(start, end)` byte ranges, in arrival order.
     segments: Vec<(u64, u64)>,
+    /// Chunks that arrived ahead of the contiguous prefix, held at their own
+    /// size until [`finalize`](Self::finalize) has proven the tiling.
+    ahead: Vec<(u64, Vec<u8>)>,
+    received: u64,
+    /// First contract violation seen; sticky, reported by `finalize`.
+    violation: Option<&'static str>,
 }
 
 impl StreamAcc {
+    /// The largest end offset any chunk may claim: the manifest's `totalBytes`
+    /// once known, and never more than one frame's binary cap.
+    fn limit(&self) -> u64 {
+        let cap = u64::from(onecad_protocol::framing::MAX_BIN_LEN);
+        self.total_bytes.map_or(cap, |total| total.min(cap))
+    }
+
+    /// Folds one chunk. The worker's `byteOffset` is untrusted: it is bounded
+    /// with checked arithmetic BEFORE any allocation, and memory only ever grows
+    /// by bytes actually received — a chunk can never make the host zero-fill a
+    /// range it merely claims.
     fn apply(&mut self, c: &onecad_protocol::messages::ChunkFrame, bin: &[u8]) {
+        if self.violation.is_some() {
+            return;
+        }
         match c.kind {
             onecad_protocol::messages::ChunkKind::Manifest => {
+                if c.total_bytes
+                    .is_some_and(|total| total > u64::from(onecad_protocol::framing::MAX_BIN_LEN))
+                {
+                    self.violation = Some("MESH1 stream manifest exceeds the payload cap");
+                    return;
+                }
                 self.total_bytes = c.total_bytes;
                 self.sha256 = c.sha256.clone();
+                if self.segments.iter().any(|&(_, end)| end > self.limit()) {
+                    self.violation = Some("MESH1 stream chunk lies outside totalBytes");
+                }
             }
             onecad_protocol::messages::ChunkKind::Data => {
                 let off = c.byte_offset.unwrap_or(0);
-                let end = off + bin.len() as u64;
-                let (start_us, end_us) = (off as usize, end as usize);
-                if self.buf.len() < end_us {
-                    self.buf.resize(end_us, 0);
+                let Some(end) = off.checked_add(bin.len() as u64) else {
+                    self.violation = Some("MESH1 stream chunk offset overflows");
+                    return;
+                };
+                let received = self.received.saturating_add(bin.len() as u64);
+                if end > self.limit() || received > self.limit() {
+                    self.violation = Some("MESH1 stream chunk lies outside totalBytes");
+                    return;
                 }
-                self.buf[start_us..end_us].copy_from_slice(bin);
+                self.received = received;
+                if off == self.buf.len() as u64 {
+                    self.buf.extend_from_slice(bin);
+                } else {
+                    self.ahead.push((off, bin.to_vec()));
+                }
                 self.segments.push((off, end));
             }
         }
@@ -2306,6 +2345,9 @@ impl StreamAcc {
     /// Verifies the received segments tile `[0, totalBytes)` with no gap and no
     /// overlap, then returns `(payload, manifest totalBytes, manifest sha256)`.
     fn finalize(mut self) -> Result<MeshPayload, EngineError> {
+        if let Some(violation) = self.violation {
+            return Err(protocol(violation));
+        }
         let mut segs = self.segments.clone();
         segs.sort_by_key(|&(start, _)| start);
         let mut cursor = 0u64;
@@ -2324,7 +2366,15 @@ impl StreamAcc {
             if cursor != t {
                 return Err(protocol("MESH1 stream chunks do not cover [0, totalBytes)"));
             }
-            self.buf.truncate(t as usize);
+        }
+        // Exact tiling proven: `cursor` equals the bytes received, so this
+        // allocation is backed by real payload.
+        if !self.ahead.is_empty() {
+            self.buf.resize(cursor as usize, 0);
+            for (off, bytes) in &self.ahead {
+                let start = *off as usize;
+                self.buf[start..start + bytes.len()].copy_from_slice(bytes);
+            }
         }
         Ok((self.buf, self.total_bytes, self.sha256))
     }
@@ -2906,6 +2956,20 @@ impl MeshProvider for WorkerManager {
         lod: Lod,
         snapshot: SnapshotId,
     ) -> Result<Vec<u8>, EngineError> {
+        self.fetch_mesh_at(body, lod, snapshot)
+            .await
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// The re-issued fetch answers for the FRESH head, and says so: a caller
+    /// that stores or exports the bytes under the requested identity compares
+    /// the two (`fetch_mesh_exact`).
+    async fn fetch_mesh_at(
+        &self,
+        body: BodyId,
+        lod: Lod,
+        snapshot: SnapshotId,
+    ) -> Result<(Vec<u8>, SnapshotId), EngineError> {
         match self.fetch_mesh_fenced(body, lod, Some(snapshot)).await {
             Err(err) if is_stale_preview(&err) => {
                 let fresh = GeometryEngine::get_worker_head(self).await?.snapshot_id;
@@ -2914,9 +2978,11 @@ impl MeshProvider for WorkerManager {
                     head = fresh.0,
                     "Tessellate refused STALE_PREVIEW — re-reading the head once"
                 );
-                self.fetch_mesh_fenced(body, lod, Some(fresh)).await
+                self.fetch_mesh_fenced(body, lod, Some(fresh))
+                    .await
+                    .map(|bytes| (bytes, fresh))
             }
-            other => other,
+            other => other.map(|bytes| (bytes, snapshot)),
         }
     }
 }
@@ -3162,6 +3228,55 @@ mod preview_parse_tests {
             "needsRepair": [],
             "meshes": []
         })
+    }
+
+    fn chunk(
+        kind: onecad_protocol::messages::ChunkKind,
+        offset: Option<u64>,
+        total: Option<u64>,
+    ) -> onecad_protocol::messages::ChunkFrame {
+        serde_json::from_value(json!({
+            "v": 1, "seq": 1, "id": 1, "streamId": 1,
+            "documentRevision": 0, "workerEpoch": 1, "snapshotId": 1,
+            "kind": match kind {
+                onecad_protocol::messages::ChunkKind::Manifest => "manifest",
+                onecad_protocol::messages::ChunkKind::Data => "data",
+            },
+            "byteOffset": offset,
+            "totalBytes": total,
+        }))
+        .expect("chunk frame")
+    }
+
+    /// Audit 14: a hostile `byteOffset` must be a protocol error with no
+    /// allocation sized by the claim.
+    #[test]
+    fn stream_chunk_outside_the_manifest_is_refused_without_allocating() {
+        use onecad_protocol::messages::ChunkKind::{Data, Manifest};
+        for offset in [9, 1 << 40, u64::MAX] {
+            let mut acc = StreamAcc::default();
+            acc.apply(&chunk(Manifest, None, Some(8)), &[]);
+            acc.apply(&chunk(Data, Some(offset), None), &[1, 2, 3, 4]);
+            assert!(acc.buf.capacity() <= 8, "no allocation for offset {offset}");
+            assert!(matches!(acc.finalize(), Err(EngineError::Protocol { .. })));
+        }
+        // No manifest yet: still bounded by bytes received, never by the claim.
+        let mut acc = StreamAcc::default();
+        acc.apply(&chunk(Data, Some(1 << 29), None), &[1, 2, 3, 4]);
+        assert_eq!(acc.buf.capacity(), 0);
+        assert!(matches!(acc.finalize(), Err(EngineError::Protocol { .. })));
+    }
+
+    #[test]
+    fn stream_chunks_reassemble_in_any_arrival_order() {
+        use onecad_protocol::messages::ChunkKind::{Data, Manifest};
+        let mut acc = StreamAcc::default();
+        acc.apply(&chunk(Manifest, None, Some(8)), &[]);
+        acc.apply(&chunk(Data, Some(4), None), &[5, 6, 7, 8]);
+        acc.apply(&chunk(Data, Some(0), None), &[1, 2, 3, 4]);
+        let (bytes, total, _) = acc.finalize().expect("exact tiling");
+        assert_eq!(bytes, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(total, Some(8));
     }
 
     fn assert_protocol_error(result: Result<crate::dto::PreviewResultDto, EngineError>) {

@@ -137,6 +137,13 @@ impl ElementEntry {
         self.binding_state == Some(ElementBindingState::Quarantined)
     }
 
+    /// Whether this entry is identity a document must keep while its topology is
+    /// absent: a reservation, or evidence a later head can be re-bound from.
+    #[must_use]
+    pub fn is_durable(&self) -> bool {
+        self.is_quarantined() || self.has_stored_evidence()
+    }
+
     fn has_stored_evidence(&self) -> bool {
         self.anchor.is_some() || self.descriptor.is_some() || self.import_source_identity.is_some()
     }
@@ -163,6 +170,24 @@ impl ElementIndex {
     /// Clearing geometry must not free identities reserved against future reuse.
     pub fn retain_quarantined(&mut self) {
         self.map.retain(|_, entry| entry.is_quarantined());
+    }
+
+    /// Publishing no geometry drops live partition rows only. Evidence-bearing
+    /// identities stay dormant so a later head can re-bind them through the ladder;
+    /// erasing them orphans authored intent (a face colour keeps its key and loses
+    /// the only evidence that could find its face again).
+    pub fn retain_durable(&mut self) {
+        self.map.retain(|_, entry| entry.is_durable());
+    }
+
+    /// Adds every durable entry of `live` that this index does not hold. Existing
+    /// rows win: they describe the partition this index was built for.
+    pub fn adopt_dormant_from(&mut self, live: &Self) {
+        for (id, entry) in live.iter().filter(|(_, entry)| entry.is_durable()) {
+            if !self.map.contains_key(id) {
+                self.map.insert(id.clone(), entry.clone());
+            }
+        }
     }
 
     /// Rejects critical state that an older schema could silently reinterpret.
@@ -243,6 +268,48 @@ mod tests {
 
     fn body(n: u128) -> BodyId {
         BodyId(Uuid::from_u128(n))
+    }
+
+    fn durable(body_id: u128) -> ElementEntry {
+        ElementEntry::new(body(body_id), ElementKind::Face)
+            .with_evidence(None, Some(serde_json::json!({ "surface": "plane" })))
+    }
+
+    #[test]
+    fn retain_durable_drops_only_rows_without_evidence() {
+        let mut idx = ElementIndex::new();
+        idx.insert(
+            ElementId::new("el_row"),
+            ElementEntry::new(body(1), ElementKind::Face),
+        );
+        idx.insert(ElementId::new("el_evidence"), durable(1));
+        let mut reserved = durable(1);
+        reserved.binding_state = Some(ElementBindingState::Quarantined);
+        idx.insert(ElementId::new("el_reserved"), reserved);
+        idx.retain_durable();
+        assert!(!idx.contains(&ElementId::new("el_row")));
+        assert!(idx.contains(&ElementId::new("el_evidence")));
+        assert!(idx.contains(&ElementId::new("el_reserved")));
+    }
+
+    #[test]
+    fn adopt_dormant_keeps_existing_rows_and_ignores_plain_ones() {
+        let mut live = ElementIndex::new();
+        live.insert(ElementId::new("el_shared"), durable(9));
+        live.insert(ElementId::new("el_dormant"), durable(2));
+        live.insert(
+            ElementId::new("el_row"),
+            ElementEntry::new(body(3), ElementKind::Edge),
+        );
+        let mut base = ElementIndex::new();
+        base.insert(
+            ElementId::new("el_shared"),
+            ElementEntry::new(body(1), ElementKind::Face),
+        );
+        base.adopt_dormant_from(&live);
+        assert_eq!(base.body_of(&ElementId::new("el_shared")), Some(body(1)));
+        assert_eq!(base.body_of(&ElementId::new("el_dormant")), Some(body(2)));
+        assert!(!base.contains(&ElementId::new("el_row")));
     }
 
     #[test]

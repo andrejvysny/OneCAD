@@ -12,12 +12,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <gp_Vec.hxx>
-#include <gp_Pln.hxx>
-#include <BRep_Tool.hxx>
-#include <TopExp_Explorer.hxx>
 #include <GeomAbs_CurveType.hxx>
-#include <gp_Circ.hxx>
-#include <gp_Elips.hxx>
 #include <Standard_Failure.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -32,6 +27,7 @@
 #include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/OpCommon.h"
+#include "ops/RevolveProfileAxis.h"
 #include "protocol/SketchTruth.h"
 #include "ops/TopologyHistory.h"
 #include "sketch/Sketch.h"
@@ -344,97 +340,8 @@ OpOutcome revolve_impl(OpContext& ctx, const json& op, const std::string& op_id,
 
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
-    // --- profile-vs-axis classification (WP-E) ---
-    // A profile that CROSSES its axis sweeps through itself: OCCT builds the
-    // figure-8 solid, BRepCheck accepts it face by face, and the volume is positive,
-    // so only a global self-interference pass would ever notice. Refuse it by name
-    // before any kernel work: every point of the profile boundary must lie on ONE
-    // side of the axis (measured in the profile plane; touching the axis is legal —
-    // it makes the degenerate pole edges of a shaft or a sphere).
-    {
-        gp_Pln profile_pln;
-        gp_Dir profile_n;
-        if (planar_face_plane_normal(*profile, profile_pln, profile_n)) {
-            const double resolution =
-                kernel::validation::precision_of(*profile).authoring_resolution();
-            // side(P) = ((P − O) × a) · n = (P − O) · w with w = a × n: the signed
-            // in-plane offset from the axis, linear in P. Vertices alone are NOT
-            // enough — a full circle has one vertex (its seam) and an arc's extremum
-            // can lie between its endpoints — so every edge contributes its endpoints
-            // plus the analytic extrema of a Circle/Ellipse (the parameters where
-            // d side/dt = 0 that fall inside the edge's range), and a free-form curve
-            // is sampled. Adversarial review 2026-09-02 measured the vertex-only form
-            // missing every crossing circle profile.
-            const gp_Vec w = gp_Vec(axis.Direction()).Crossed(gp_Vec(profile_n));
-            auto side_of = [&](const gp_Pnt& p) { return gp_Vec(axis.Location(), p).Dot(w); };
-            double lo = 0.0, hi = 0.0;
-            bool any = false;
-            auto take = [&](double side) {
-                lo = any ? std::min(lo, side) : side;
-                hi = any ? std::max(hi, side) : side;
-                any = true;
-            };
-            constexpr double kTwoPi = 2.0 * 3.14159265358979323846;
-            for (TopExp_Explorer exp(*profile, TopAbs_EDGE); exp.More(); exp.Next()) {
-                const TopoDS_Edge edge = TopoDS::Edge(exp.Current());
-                if (BRep_Tool::Degenerated(edge)) continue;
-                BRepAdaptor_Curve curve(edge);
-                const double first = curve.FirstParameter();
-                const double last = curve.LastParameter();
-                take(side_of(curve.Value(first)));
-                take(side_of(curve.Value(last)));
-                // Extremum parameters of a conic: side(t) = s_c + A cos t + B sin t.
-                auto take_conic_extrema = [&](const gp_Pnt& centre, const gp_Dir& xdir,
-                                              const gp_Dir& ydir, double rx, double ry) {
-                    const double a = gp_Vec(xdir).Dot(w) * rx;
-                    const double b = gp_Vec(ydir).Dot(w) * ry;
-                    const double t_star = std::atan2(b, a);
-                    for (const double t : {t_star, t_star + kTwoPi / 2.0}) {
-                        // Fold t into [first, first + 2π) and keep it if it lies on the arc.
-                        double tt = first + std::fmod(std::fmod(t - first, kTwoPi) + kTwoPi, kTwoPi);
-                        if (tt <= last + 1.0e-9) take(side_of(curve.Value(tt)));
-                    }
-                    (void)centre;
-                };
-                switch (curve.GetType()) {
-                    case GeomAbs_Line: break;
-                    case GeomAbs_Circle: {
-                        const gp_Circ c = curve.Circle();
-                        take_conic_extrema(c.Location(), c.XAxis().Direction(),
-                                           c.YAxis().Direction(), c.Radius(), c.Radius());
-                        break;
-                    }
-                    case GeomAbs_Ellipse: {
-                        const gp_Elips e = curve.Ellipse();
-                        take_conic_extrema(e.Location(), e.XAxis().Direction(),
-                                           e.YAxis().Direction(), e.MajorRadius(), e.MinorRadius());
-                        break;
-                    }
-                    default: {
-                        constexpr int kSamples = 128;
-                        for (int k = 1; k < kSamples; ++k) {
-                            const double t = first + (last - first) * k / kSamples;
-                            take(side_of(curve.Value(t)));
-                        }
-                        break;
-                    }
-                }
-            }
-            if (any && lo < -resolution && hi > resolution) {
-                const std::string message =
-                    "Revolve profile crosses its axis (the sweep would pass through itself)";
-                OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
-                failure.diagnostics.push_back(
-                    {{"severity", "error"},
-                     {"code", "REVOLVE_PROFILE_CROSSES_AXIS"},
-                     {"message", message},
-                     {"stage", "classify"},
-                     {"evidence", {{"revolve", {{"minSignedOffset", lo}, {"maxSignedOffset", hi},
-                                                {"authoringResolution", resolution}}}}}});
-                return failure;
-            }
-        }
-    }
+    // --- profile-vs-axis classification (WP-E; near-axis band 2026-11-11) ---
+    if (auto refusal = classify_revolve_profile(*profile, axis)) return *refusal;
 
     // --- build the revolved tool shape ---
     TopoDS_Shape tool_shape;

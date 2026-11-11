@@ -9,6 +9,7 @@
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
@@ -1149,6 +1150,26 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
             if (!d2) {
                 if (tf_fail) return to_face_refusal(*tf_fail);
                 return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
+            }
+            // The sign contract above sees only the AUTHORED legs. A resolved ToFace
+            // leg is signed along its own direction, so a target on the OTHER side
+            // came back negative and the leg grew along the first side instead
+            // ((−Z)·(−20) = +20 Z), absorbing leg 1 (kernel audit 2026-11-11 #6).
+            for (const auto& [leg, leg_mode, resolved] :
+                 {std::tuple{1, mode_str, *d1}, std::tuple{2, mode2_str, *d2}}) {
+                if (resolved >= 0.0) continue;
+                const std::string message = "Extrude two-direction leg " + std::to_string(leg) +
+                                            " resolves to the other side of the sketch plane";
+                OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+                failure.diagnostics.push_back(
+                    {{"severity", "error"},
+                     {"code", "EXTRUDE_TWO_DIRECTION_LEG_WRONG_SIDE"},
+                     {"message", message},
+                     {"stage", "classify"},
+                     {"evidence", {{"extrude", {{"leg", leg},
+                                                {"endCondition", leg_mode},
+                                                {"resolvedDistance", resolved}}}}}});
+                return failure;
             }
             if (!trim1 && !trim2 && *d1 > 0.0 && *d2 > 0.0) {
                 // Both legs are plain distances: ONE prism from the profile shifted

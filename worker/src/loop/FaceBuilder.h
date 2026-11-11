@@ -57,6 +57,10 @@ struct FaceBuildResult {
     /// One label per wire edge built from a sketch entity (outer + holes).
     /// The polygon fallback records none.
     std::vector<ProfileEdgeLabel> edgeLabels;
+
+    /// Sketch entity ids (internal, deduplicated) of CURVED entities whose
+    /// boundary the polygon fallback replaced by chords (outer + holes).
+    std::vector<std::string> polygonizedCurveIds;
 };
 
 /**
@@ -77,6 +81,9 @@ struct WireBuildResult {
 
     /// See FaceBuildResult::edgeLabels.
     std::vector<ProfileEdgeLabel> edgeLabels;
+
+    /// See FaceBuildResult::polygonizedCurveIds.
+    std::vector<std::string> polygonizedCurveIds;
 };
 
 /**

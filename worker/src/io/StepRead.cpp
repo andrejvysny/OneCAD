@@ -127,7 +127,8 @@ struct HealedRoot {
     bool sewn = false;               // sewing actually merged edges
     bool healed = false;             // ShapeFix_Shape reported ShapeExtend_DONE
     bool topology_changed = false;   // …and it changed face/edge/vertex counts
-    bool had_open_shell = false;
+    int open_shells = 0;             // non-solid geometry promote_solids dropped
+    int free_faces = 0;
 };
 
 // Face/edge/vertex counts — the cheap "did healing actually restructure this"
@@ -284,9 +285,10 @@ TopoDS_Shape heal_shape(const TopoDS_Shape& shape, double tol, double max_tol, b
 }
 
 // Stage 3 — promote. Existing solids pass through verbatim; every CLOSED shell
-// not already owned by one becomes a solid. Open shells are dropped here and
-// reported by the caller as a skipped root.
-TopoDS_Shape promote_solids(const TopoDS_Shape& shape, double tol, bool& open_shell_out) {
+// not already owned by one becomes a solid. Open shells and faces outside any
+// shell are dropped here and COUNTED, so the caller can report the loss whether
+// or not the root still yields solids.
+TopoDS_Shape promote_solids(const TopoDS_Shape& shape, double tol, HealedRoot& hr) {
     BRep_Builder builder;
     TopoDS_Compound out;
     builder.MakeCompound(out);
@@ -301,13 +303,16 @@ TopoDS_Shape promote_solids(const TopoDS_Shape& shape, double tol, bool& open_sh
         if (owned_shells.Contains(sh.Current())) continue;
         const TopoDS_Shell shell = TopoDS::Shell(sh.Current());
         if (!shell_is_closed(shell)) {
-            open_shell_out = true;
+            ++hr.open_shells;
             continue;
         }
         ShapeFix_Solid solid_fixer;
         solid_fixer.SetPrecision(tol);
         const TopoDS_Solid solid = solid_fixer.SolidFromShell(shell);
         if (!solid.IsNull()) builder.Add(out, solid);
+    }
+    for (TopExp_Explorer fe(shape, TopAbs_FACE, TopAbs_SHELL); fe.More(); fe.Next()) {
+        ++hr.free_faces;
     }
     return out;
 }
@@ -323,7 +328,7 @@ HealedRoot heal_root(const TopoDS_Shape& root, const StepReadPolicy& policy,
     const ShapeCounts before = count_shape(sewed);
     const TopoDS_Shape fixed = heal_shape(sewed, tol, max_tol, hr.healed, claims);
     hr.topology_changed = hr.healed && count_shape(fixed) != before;
-    hr.shape = promote_solids(fixed, tol, hr.had_open_shell);
+    hr.shape = promote_solids(fixed, tol, hr);
     return hr;
 }
 
@@ -526,8 +531,18 @@ static StepReadResult read_step_impl(const std::string& path, const std::span<co
             if (shape_solids == 0) {
                 add_diag(out, step_diag::kRootSkipped,
                          "transferred shape " + std::to_string(i) + " yielded no solid" +
-                             (hr.had_open_shell ? " (open shell after healing)" : ""));
+                             (hr.open_shells > 0 ? " (open shell after healing)" : ""));
                 continue;
+            }
+            // Kernel audit 2026-11-11 #15: a root that DOES yield solids used to
+            // drop its surface geometry without a word. Import stays solids-only;
+            // the loss is named by type and count.
+            if (hr.open_shells > 0 || hr.free_faces > 0) {
+                add_diag(out, step_diag::kGeometryOmitted,
+                         "transferred shape " + std::to_string(i) + ": omitted " +
+                             std::to_string(hr.open_shells) + " open shell(s) and " +
+                             std::to_string(hr.free_faces) +
+                             " free face(s); only solids are imported");
             }
             builder.Add(all, hr.shape);
         }

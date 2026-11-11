@@ -137,6 +137,12 @@ impl SnapshotPublisher {
     }
 
     /// A fresh subscriber. Its initial value is the latest snapshot (or `None`).
+    ///
+    /// **Not an authority stream.** A snapshot is sent when the executor accepts
+    /// it, which is BEFORE the document's own fence decides whether to adopt
+    /// it: a regen superseded in that window is visible here and never becomes
+    /// the document's head. Consumers that need accepted geometry must read
+    /// the runtime's published head, not this channel.
     #[must_use]
     pub fn subscribe(&self) -> watch::Receiver<Option<Arc<ModelSnapshot>>> {
         self.tx.subscribe()

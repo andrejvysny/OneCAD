@@ -994,6 +994,7 @@ mod finish_tests {
                     runtime_session: "test".into(),
                     revision: 3,
                     source_revision: 3,
+                    worker_unavailable: false,
                     outcome: outcome.into(),
                     message: Some("worker retired".into()),
                     diagnostics: Vec::new(),

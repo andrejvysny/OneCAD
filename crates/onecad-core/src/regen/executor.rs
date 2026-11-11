@@ -597,7 +597,14 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                 })
                 .await
             {
-                Ok(r) if r.restored && !r.drift_detected => (r.base_registry, r.base_elements),
+                Ok(r) if r.restored && !r.drift_detected => {
+                    // The checkpoint owns the base PARTITION. Durable identity is
+                    // not partition state: an evidence-bearing entry the checkpoint
+                    // does not hold stays dormant instead of being erased.
+                    let mut base_elements = r.base_elements;
+                    base_elements.adopt_dormant_from(&session.elements);
+                    (r.base_registry, base_elements)
+                }
                 // Restore failed or drifted ⇒ before any step event ⇒ F12 fallback.
                 _ => {
                     self.discard(job).await;

@@ -314,11 +314,14 @@ pub(super) async fn collect_fresh_meshes(
     let mut budget = MeshBudget::default();
     if let Some(snapshot) = &runtime.latest_snapshot {
         for body in &snapshot.bodies {
-            let bytes = runtime
-                .meshes
-                .fetch_mesh(body.body, body.mesh_key.lod, snapshot.id)
-                .await
-                .map_err(|e| ApiError::Worker(e.to_string()))?;
+            let bytes = crate::worker::fetch_mesh_exact(
+                runtime.meshes.as_ref(),
+                body.body,
+                body.mesh_key.lod,
+                snapshot.id,
+            )
+            .await
+            .map_err(|e| ApiError::Worker(e.to_string()))?;
             budget.add(mesh_budget(&bytes)?);
             budget.validate()?;
             runtime.reject_quarantined_mesh(&bytes)?;

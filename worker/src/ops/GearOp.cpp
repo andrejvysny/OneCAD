@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <map>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -78,12 +79,19 @@ bool read_flag(const json& o, const char* key, bool dflt) {
     return o[key].get<bool>();
 }
 
-int read_int(const json& o, const char* key, int dflt) {
+/// An integer count. An integral float (`20.0`) is the same count; anything
+/// else present — `20.9`, a value outside `int`, a non-number — is refused by
+/// name instead of being truncated to a different gear (kernel audit #37).
+std::optional<int> read_int(const json& o, const char* key, int dflt) {
     if (!o.contains(key)) return dflt;
     const json& v = o[key];
-    if (v.is_number_integer()) return v.get<int>();
-    if (v.is_number()) return static_cast<int>(v.get<double>());
-    return dflt;
+    if (!v.is_number()) return std::nullopt;
+    const double d = v.get<double>();
+    if (!(std::trunc(d) == d) || d < std::numeric_limits<int>::min() ||
+        d > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(d);
 }
 
 /// A `[x, y, z]` array. Returns false when absent or malformed.
@@ -106,7 +114,9 @@ std::string read_involute_spec(const json& params, gear::GearBuildSpec& spec) {
     }
     const json& b = params["involuteExternal"];
 
-    spec.involute.numTeeth = read_int(b, "teeth", 0);
+    const std::optional<int> teeth = read_int(b, "teeth", 0);
+    if (!teeth) return "Gear teeth must be an integer";
+    spec.involute.numTeeth = *teeth;
     spec.involute.module = read_scalar(b, "module", 0.0);
     spec.involute.pressureAngle = deg_to_rad(read_scalar(b, "pressureAngleDeg", 0.0));
     spec.involute.clearance = read_scalar(b, "clearance", 0.25);
@@ -116,7 +126,9 @@ std::string read_involute_spec(const json& params, gear::GearBuildSpec& spec) {
     spec.involute.backlash = read_scalar(b, "backlash", 0.0);
     spec.involute.head = read_scalar(b, "head", 0.0);
     spec.involute.propertiesFromTool = read_flag(b, "propertiesFromTool", false);
-    spec.sampleCount = read_int(b, "sampleCount", 20);
+    const std::optional<int> sample_count = read_int(b, "sampleCount", 20);
+    if (!sample_count) return "Gear sampleCount must be an integer";
+    spec.sampleCount = *sample_count;
     spec.height = read_scalar(b, "height", 0.0);
 
     // Helical is UNSUPPORTED in this version (SCHEMA §7.3). Refused by name
@@ -232,9 +244,9 @@ std::optional<gp_Ax1> plan_frame_axis(const json& params) {
     if (!read_vec3(pl["frame"], "origin", origin) || !read_vec3(pl["frame"], "axis", axis_pt)) {
         return std::nullopt;
     }
-    const gp_Vec axis_v(axis_pt.X(), axis_pt.Y(), axis_pt.Z());
-    if (axis_v.Magnitude() <= 0.0) return std::nullopt;
-    return gp_Ax1(origin, gp_Dir(axis_v));
+    const std::optional<gp_Dir> axis = unit_direction(axis_pt.X(), axis_pt.Y(), axis_pt.Z(), 0.0);
+    if (!axis) return std::nullopt;
+    return gp_Ax1(origin, *axis);
 }
 
 /// The gear axis DERIVED from the body: the normal of its largest planar face.
@@ -499,24 +511,24 @@ OpOutcome execute_gear(OpContext& ctx, const json& op, const std::string& op_id)
             return OpOutcome::fail("OP_FAILED",
                                    "Gear placement frame needs origin, axis and xDir as [x,y,z]");
         }
-        const gp_Vec axis_v(axis_pt.X(), axis_pt.Y(), axis_pt.Z());
-        const gp_Vec xdir_v(xdir_pt.X(), xdir_pt.Y(), xdir_pt.Z());
-        if (axis_v.Magnitude() <= 0.0) {
+        const std::optional<gp_Dir> axis_dir = unit_direction(axis_pt.X(), axis_pt.Y(), axis_pt.Z(), 0.0);
+        const std::optional<gp_Dir> xdir_dir = unit_direction(xdir_pt.X(), xdir_pt.Y(), xdir_pt.Z(), 0.0);
+        if (!axis_dir) {
             return OpOutcome::fail("OP_FAILED", "Gear placement frame axis is degenerate");
         }
-        if (xdir_v.Magnitude() <= 0.0) {
+        if (!xdir_dir) {
             return OpOutcome::fail("OP_FAILED", "Gear placement frame xDir is degenerate");
         }
         if (origin.Distance(frozen) > 1e-9) {
             return OpOutcome::fail("OP_FAILED",
                                    "Gear placement point must equal the frame origin");
         }
-        if (axis_v.IsParallel(xdir_v, 1e-9)) {
+        if (axis_dir->IsParallel(*xdir_dir, 1e-9)) {
             return OpOutcome::fail("OP_FAILED",
                                    "Gear placement frame xDir is parallel to the axis");
         }
         try {
-            frame = gp_Ax2(origin, gp_Dir(axis_v), gp_Dir(xdir_v));
+            frame = gp_Ax2(origin, *axis_dir, *xdir_dir);
         } catch (const Standard_Failure& f) {
             return OpOutcome::fail("OP_FAILED",
                                    std::string("Gear placement frame is not buildable: ") +

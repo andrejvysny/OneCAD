@@ -355,7 +355,15 @@ void test_empty_region_id_ignores_anchor() {
     check(plain_area > 500.0,
           "empty regionId: the fallback cell is NOT the small cell the anchor names "
           "(so the check is not vacuous)");
-    check(diagnostics.empty(), "empty regionId: no diagnostic emitted");
+    // Anchor scoping is what this case pins. The legacy profile's circle is
+    // built from chords, which now carries its own PROFILE_CURVES_POLYGONIZED
+    // warning (kernel audit 2026-11-11 #10), so "no diagnostic at all" is no
+    // longer the contract: no ANCHOR rebind is.
+    bool rebound = false;
+    for (const auto& d : diagnostics) {
+        rebound = rebound || d.value("code", "") == "REGION_REBOUND_BY_ANCHOR";
+    }
+    check(!rebound, "empty regionId: no REGION_REBOUND_BY_ANCHOR emitted");
 }
 
 // 6. An AMBIGUOUS id is a refusal, and stays one. Resolving it by anchor would be a

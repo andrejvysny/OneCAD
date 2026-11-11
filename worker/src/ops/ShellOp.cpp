@@ -6,6 +6,8 @@
 #include <vector>
 
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffset_Mode.hxx>
 #include <GeomAbs_JoinType.hxx>
@@ -13,8 +15,6 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
-#include <TopExp.hxx>
-#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "elementmap/ElementMapPartition.h"
@@ -50,9 +50,34 @@ std::string target_body_of(const json& op, const json& params) {
     return "";
 }
 
+const char* offset_error_name(BRepOffset_Error error) {
+    switch (error) {
+        case BRepOffset_NoError: return "NoError";
+        case BRepOffset_UnknownError: return "UnknownError";
+        case BRepOffset_BadNormalsOnGeometry: return "BadNormalsOnGeometry";
+        case BRepOffset_C0Geometry: return "C0Geometry";
+        case BRepOffset_NullOffset: return "NullOffset";
+        case BRepOffset_NotConnectedShell: return "NotConnectedShell";
+        case BRepOffset_CannotTrimEdges: return "CannotTrimEdges";
+        case BRepOffset_CannotFuseVertices: return "CannotFuseVertices";
+        case BRepOffset_CannotExtentEdge: return "CannotExtentEdge";
+        case BRepOffset_UserBreak: return "UserBreak";
+        case BRepOffset_MixedConnectivity: return "MixedConnectivity";
+    }
+    return "Unrecognized";
+}
+
 OpOutcome construction_refusal(BRepOffset_Error error) {
     if (error != BRepOffset_NotConnectedShell) {
-        return OpOutcome::fail("OP_FAILED", "Shell operation failed");
+        // Message frozen; the code names the kernel's own construction verdict
+        // (kernel audit 2026-11-11 #9: e.g. a filleted body with a through hole).
+        OpOutcome out = OpOutcome::fail("OP_FAILED", "Shell operation failed");
+        out.diagnostics.push_back({{"severity", "error"},
+                                   {"code", "SHELL_CONSTRUCTION_FAILED"},
+                                   {"message", "Shell operation failed"},
+                                   {"stage", "construction"},
+                                   {"evidence", {{"shell", {{"offsetError", offset_error_name(error)}}}}}});
+        return out;
     }
     const std::string message =
         "Selected opening disconnects the remaining shell. Choose an opening that keeps "
@@ -181,18 +206,6 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
             return construction_refusal(builder->MakeOffset().Error());
         }
         result = builder->Shape();
-        // OCCT 8.0.1 reports IsDone/NoError yet returns the body unchanged when the
-        // open face is tangent-continuous to a fillet (ONECAD-243). A real shell
-        // always adds inner-wall faces, so no face growth means nothing was built.
-        TopTools_IndexedMapOfShape in_faces, out_faces;
-        TopExp::MapShapes(target_shape, TopAbs_FACE, in_faces);
-        TopExp::MapShapes(result, TopAbs_FACE, out_faces);
-        if (out_faces.Extent() <= in_faces.Extent()) {
-            return OpOutcome::fail(
-                "OP_FAILED",
-                "Shell left the body unchanged: the kernel could not build a cavity for "
-                "the selected opening and thickness. Try a different thickness or opening.");
-        }
     } catch (const Standard_Failure& f) {
         return OpOutcome::fail("OP_FAILED",
                                std::string("Shell operation failed: ") +
@@ -209,6 +222,24 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) {
         return publication_refusal(decision, "publication");
+    }
+    // OCCT 8.0.1 reports IsDone/NoError yet returns the body unchanged when the
+    // open face is tangent-continuous to a fillet (ONECAD-243). A real shell
+    // hollows INWARD, so it always removes material. Face growth is NOT that
+    // invariant: opening five faces of a box leaves one thickened wall with the
+    // input's six faces (independent review 2026-11-11), a valid plate. Measured
+    // after publication so an INVALID kernel result keeps its honest refusal.
+    {
+        GProp_GProps in_props, out_props;
+        BRepGProp::VolumeProperties(target_shape, in_props);
+        BRepGProp::VolumeProperties(result, out_props);
+        const double removed = in_props.Mass() - out_props.Mass();
+        if (!(removed > kernel::validation::precision_of(target_shape).minimum_volume())) {
+            return OpOutcome::fail(
+                "OP_FAILED",
+                "Shell left the body unchanged: the kernel could not build a cavity for "
+                "the selected opening and thickness. Try a different thickness or opening.");
+        }
     }
 
     // --- publish the modified body (id preserved) + rebind partition via history ---
