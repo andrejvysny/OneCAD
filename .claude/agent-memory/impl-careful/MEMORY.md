@@ -14,3 +14,5 @@
 - [iPad XCUITest lane](ipad-xcuitest-lane.md) — typeText vs egui, persisted tab, recovery prompt, ids, canvas mm mapping, pick-based geometry checks
 - [iPad render lane](ipad-render-lane.md) — profile at with_profile, renderer idle in tests, Host::ui skips logic, Mobile host+zoom tests, cache in Shared, sim bg state
 - [iPad docs lane](ipad-docs-lane.md) — shared hosted process, gate-clean run dir, plate identity, sim content limits, picker detection, background state
+- [Native gate lane](native-gate-lane.md) — shared target clobbers xtask/test bins across worktrees, camera-flake repro, onecad-ui test prereqs, CTest CI summary, no capability gating
+- [Assembly solver lane](assembly-solver-lane.md) — solver is onecad-assembly, app validate_tree gates topology, free-joint order dependence, cheap joint harness

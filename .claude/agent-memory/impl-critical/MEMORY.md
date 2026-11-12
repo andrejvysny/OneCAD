@@ -23,3 +23,5 @@
 - [Shell wall attachment](repo_shell_wall_attachment.md) — rim adjacency refuses ambiguity, σ is never assumed, axisDepthFromRay returns null, chip rides H(q)
 - [Embedded kernel lane](repo_embedded_kernel.md) — bundle script + env, lib-unit tests, simctl, sticky relaunch latch, feature-unification trap
 - [iPad model lane](repo_ipad_model_lane.md) — anchors on staged refs, XY plate frame, tap-by-id Metal tests, fmt hook style trap, TransformBody edit gate, zsh
+- [Rebind edit context](repo_rebind_edit_context.md) — evidenceBasis stamps per entry, no re-stamp, root-only claim settlement, refusal classes, history-hash legacy fence
+- [First-Ready replay + stream budgets](repo_first_ready_stream_budgets.md) — ONECAD-536 owed rule + waiter predicate, teardown cause/prompt restart, scripted supervisor rig

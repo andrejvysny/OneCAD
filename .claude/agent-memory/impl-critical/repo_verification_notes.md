@@ -111,6 +111,8 @@ nothing unless it is shown to fail without the fix.
   `stamp_intents`. Measure the worker's actual decision (temporarily push an extra
   `info_diagnostic` carrying `topoKey`/score/margin/postEdit — it lands in
   `RegenReport::diagnostics`, which a test can `eprintln!`) instead of inferring it.
+- An `rtk` hook condenses cargo/git output (`cargo test: N passed`); for exact `test result:`
+  lines run `rtk bypass cargo test … > <scratch>/log 2>&1` and awk the log.
 - `cargo test --workspace | awk '/^test result:/'` over-counts: a test NAMED
   `result::…` matches `^test result:`. Filter on `$4 ~ /^[0-9]+$/`.
 - zsh does NOT word-split an unquoted `$T`: a probe loop running `bunx vitest run $T` over a
@@ -126,3 +128,18 @@ nothing unless it is shown to fail without the fix.
   does not exist in vitest 4 and fails at startup.
 - `npx` is permission-denied in this sandbox; use `bunx`. A `cmd >> file <<'EOF'` heredoc append is
   also denied — write the fragment to the scratchpad and append it with `python3`.
+- `cargo test -p onecad-protocol` (default features) compiles NONE of `client.rs`'s tests
+  (39 vs 64 with `--features client,tracing`); run both when the client changes.
+- A `CARGO_TARGET_DIR` shared with another WORKTREE is not isolated: path packages get the
+  same metadata hash and RELATIVE dep-info paths, so the other tree's build of a crate you
+  did not edit looks fresh to you (seen 2026-11-11: onecad-core without a trait method →
+  loud E0407 in onecad-app). `touch` one source file of that crate to force your rebuild.
+- `worker_chaos.rs` (and other stub drills) skip QUIETLY unless
+  `<target>/debug/onecad-worker-stub` exists: `cargo build -p onecad-worker-stub` first.
+- macOS has no `timeout` binary; bound waits inside the test instead.
+- A fresh worktree has no staged addon: `CARGO_TARGET_DIR=… scripts/build-addons.sh
+  addons/bambu-studio` (wasm32 target already installed, ~10 s) stages the gitignored
+  `packaging/binaries/addons/dev.onecad.bambu-studio/extension.wasm`.
+- `cargo test -p onecad-app --tests` also runs the lib unit tests; editing a source while
+  it compiles leaves you unsure which tree you tested — stop it and rerun.
+

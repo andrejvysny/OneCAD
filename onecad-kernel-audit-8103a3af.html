@@ -1,0 +1,539 @@
+<title>OneCAD Kernel Audit 8103a3af</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&display=swap">
+<style>
+/* Layout: single reading column (max 62rem) with a sticky section index; findings are ruled records keyed by a severity tag, like a drawing's revision table. */
+:root {
+  --bg: #f5f7f9; --surface: #ffffff; --ink: #18222c; --muted: #566473; --rule: #d3dae1;
+  --accent: #1f5f99; --code-bg: #e9eef3;
+  --p1: #b3261e; --p1-bg: #fbe9e7; --p2: #9a5b00; --p2-bg: #fbefd9; --p3: #3d5a73; --p3-bg: #e4ebf1;
+  --ok: #1d6b45; --ok-bg: #e0f1e8;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10161c; --surface: #172029; --ink: #e3e9ee; --muted: #94a3b1; --rule: #2b3843;
+  --accent: #7db7ea; --code-bg: #212d38;
+  --p1: #ff8a80; --p1-bg: #3d1a18; --p2: #f0b860; --p2-bg: #3a2a10; --p3: #a9bfd2; --p3-bg: #23313d;
+  --ok: #7fd3a6; --ok-bg: #173326; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10161c; --surface: #172029; --ink: #e3e9ee; --muted: #94a3b1; --rule: #2b3843;
+  --accent: #7db7ea; --code-bg: #212d38;
+  --p1: #ff8a80; --p1-bg: #3d1a18; --p2: #f0b860; --p2-bg: #3a2a10; --p3: #a9bfd2; --p3-bg: #23313d;
+  --ok: #7fd3a6; --ok-bg: #173326; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font: 400 16px/1.6 var(--sans);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 4rem; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.wrap { max-width: 62rem; margin: 0 auto; display: flex; flex-direction: column; gap: 2.5rem; }
+header.top { padding-block: 2.5rem 0; display: flex; flex-direction: column; gap: .75rem; }
+.eyebrow { font: 500 .78rem/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font: 600 2.3rem/1.1 var(--cond); margin: 0; text-wrap: balance; }
+h2 { font: 600 1.55rem/1.2 var(--cond); margin: 0; text-wrap: balance; padding-top: 1.25rem; border-top: 2px solid var(--ink); }
+h3 { font: 600 1.1rem/1.3 var(--cond); margin: 0; text-wrap: balance; letter-spacing: .01em; }
+h4 { font: 600 1rem/1.35 var(--sans); margin: 0; }
+p { margin: 0; max-width: 70ch; }
+ul, ol { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: .3rem; max-width: 74ch; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code { font: 400 .86em var(--mono); background: var(--code-bg); padding: .08em .3em; border-radius: 3px; overflow-wrap: anywhere; }
+pre { margin: 0; font: 400 .82rem/1.5 var(--mono); background: var(--code-bg); padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+section { display: flex; flex-direction: column; gap: 1.1rem; min-width: 0; }
+.meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .5rem 1.5rem; font-size: .9rem; border-block: 1px solid var(--rule); padding-block: .9rem; }
+.meta div { display: flex; flex-direction: column; min-width: 0; }
+.meta dt, .k { font: 500 .72rem var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.meta dd { margin: 0; overflow-wrap: anywhere; }
+nav.idx { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--rule); padding-block: .55rem; display: flex; flex-wrap: wrap; gap: .25rem 1rem; font: 500 .82rem var(--mono); }
+nav.idx a { text-decoration: none; white-space: nowrap; }
+nav.idx a:hover { text-decoration: underline; }
+.tally { display: flex; flex-wrap: wrap; gap: .5rem; }
+.tag { display: inline-block; font: 500 .74rem/1 var(--mono); letter-spacing: .05em; padding: .32rem .5rem; border-radius: 3px; white-space: nowrap; }
+.tag.p1 { color: var(--p1); background: var(--p1-bg); } .tag.p2 { color: var(--p2); background: var(--p2-bg); }
+.tag.p3 { color: var(--p3); background: var(--p3-bg); } .tag.ok { color: var(--ok); background: var(--ok-bg); }
+.tag.conf { color: var(--muted); background: var(--code-bg); }
+.finding { background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 1.1rem 1.2rem; display: flex; flex-direction: column; gap: .8rem; min-width: 0; }
+.finding .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem .7rem; }
+.finding .head h3 { flex: 1 1 18rem; min-width: 0; }
+.finding dl { margin: 0; display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: .45rem 1rem; font-size: .93rem; }
+.finding dt { font: 500 .72rem/1.9 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.finding dd { margin: 0; min-width: 0; }
+.finding dd ul { gap: .15rem; }
+@media (max-width: 34rem) { .finding dl { grid-template-columns: 1fr; gap: .1rem; } .finding dd { margin-bottom: .5rem; } h1 { font-size: 1.8rem; } }
+.tw { overflow-x: auto; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: .87rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--rule); }
+th { font: 500 .72rem var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.n { text-align: right; white-space: nowrap; }
+.note { font-size: .9rem; color: var(--muted); }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1.2rem 2rem; }
+.cols > div { display: flex; flex-direction: column; gap: .5rem; min-width: 0; }
+footer { font-size: .85rem; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 1rem; }
+</style>
+
+<div class="wrap">
+<header class="top">
+  <span class="eyebrow">Independent read-only audit · 2026-11-11</span>
+  <h1>OneCAD modeling kernel and assembly engine audit</h1>
+  <p>Mathematical correctness, topological validity, regeneration integrity and assembly solving, checked against the real OCCT worker. No tracked file was changed, nothing was committed, and nothing was written to Plane or GitHub.</p>
+  <dl class="meta">
+    <div><dt>Reviewed commit</dt><dd><code>8103a3af835551937f3047692ab90ccd1c1c28c6</code> (master, clean tree before and after)</dd></div>
+    <div><dt>Worker</dt><dd>OCCT 8.0.1, build <code>onecad-occt-8.0.1-b8f597c67781-kp1</code>, protocol 1, solver policy 4</dd></div>
+    <div><dt>Host</dt><dd>macOS 26.6.2 arm64, 14 cores, rustc 1.99.0, cmake 4.1.3</dd></div>
+    <div><dt>Plane context</dt><dd>Work-item titles and page list only. Treated as history; every claim here comes from code or execution at this commit.</dd></div>
+  </dl>
+  <div class="tally">
+    <span class="tag p1">P1 · 3 findings</span><span class="tag p2">P2 · 12 findings</span><span class="tag p3">P3 · 21 findings</span>
+    <span class="tag ok">P0 · none found</span>
+  </div>
+</header>
+
+<nav class="idx" aria-label="Sections">
+  <a href="#summary">A Summary</a><a href="#findings">B Findings</a><a href="#matrix">C Operations</a><a href="#assembly">D Assembly</a><a href="#tests">E Tests</a><a href="#roadmap">F Roadmap</a><a href="#verdict">G Verdict</a><a href="#open">Open questions</a>
+</nav>
+
+<section id="summary">
+  <h2>A. Executive summary</h2>
+  <div class="cols">
+    <div><h4>Modeling kernel</h4>
+      <p>Strong on current authoring paths. About 250 direct probes against the real worker matched closed-form volume and area to roughly 1e-16 relative error (worst case 2.4e-9, an oblique loft). Refusals were explicit and named. I found no case where an invalid B-Rep was accepted as success.</p></div>
+    <div><h4>Assembly engine</h4>
+      <p>The transform, residual and degree-of-freedom math is correct at millimetre scale. Usability of the solver is not: contact mates from picked faces fail or flip the part, convergence breaks at lever arms of 0.3–1 m, and driving one joint moves others.</p></div>
+  </div>
+  <h4>Most serious correctness risks</h4>
+  <ol>
+    <li>The worker crashes with a segmentation fault on a revolve whose profile sits about 1e-7 mm off the axis.</li>
+    <li>A metadata-only edit (rename, colour, visibility) cancels the regeneration in flight and nothing schedules a replacement.</li>
+    <li>Joints built from picked faces cannot express a contact mate. The solve fails, or converges with the part upside-down inside its mate.</li>
+    <li>The joint solver fails on trivially solvable single joints once lever arms reach roughly 0.3–1 m.</li>
+  </ol>
+  <h4>What was verified by execution</h4>
+  <ul>
+    <li>247 of 247 C++ worker tests.</li>
+    <li>2655 Rust tests across core, assembly, protocol, app, regen, kernelbench and xtask, with 0 failures, against the real worker.</li>
+    <li>6 ignored real-worker tests, the 3 xtask modeling gates, and the solver repeatability test.</li>
+    <li>Bit-identical results across 6 fresh worker processes, and a STEP export→import round trip.</li>
+    <li>About 250 analytic probes and 4 added reproduction tests (in a scratch copy, not in the repository).</li>
+  </ul>
+  <h4>Readiness for dependable macOS part and small-assembly modeling</h4>
+  <p>Part modeling is close; risks 1 and 2 block it. Small-assembly modeling is not dependable yet because of risks 3 and 4 and the drive side effect (finding 5). Native UI workflows, GPU display and appearance were not exercised at all.</p>
+</section>
+
+<section id="findings">
+  <h2>B. Findings ranked by severity</h2>
+  <p class="note"><strong>Confirmed</strong> means reproduced by execution in this audit. <strong>Strong evidence</strong> means the code path was read end to end but not executed. <strong>Hypothesis</strong> means the outcome is inferred. Reproduction scripts are listed in section E.</p>
+
+  <h3>P1 — high</h3>
+
+  <article class="finding" id="f1">
+    <div class="head"><span class="tag p1">P1 · 1</span><h3>Revolve with a near-axis profile crashes the worker</h3><span class="tag conf">Confirmed</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>worker/src/ops/RevolveOp.cpp:423</code> (crossing classifier dead zone) and <code>:443</code> (unguarded <code>BRepPrimAPI_MakeRevol</code>)</dd>
+      <dt>Subsystem</dt><dd>Revolve, all boolean modes</dd>
+      <dt>Reproduce</dt><dd>Sketch a rectangle x∈[1e-7, 10], y∈[0, 10] with a construction axis on x=0. Revolve 360° or 90°. Either sign of the gap triggers it. Script: <code>p4.py</code>.</dd>
+      <dt>Expected</dt><dd>A named refusal, or a snap to the axis, for any profile point closer than the authoring resolution (1e-3 mm) that is not exactly on the axis.</dd>
+      <dt>Observed</dt><dd><code>EXC_BAD_ACCESS</code> (SIGSEGV) in <code>Extrema_ExtCC::Points</code> ← <code>BRepPrimAPI_MakeRevol::CheckValidity</code> ← <code>revolve_impl</code>. Neighbouring gaps behave inconsistently:
+        <ul>
+          <li>≤ 1e-8: treated as on-axis, 3 faces, correct volume.</li>
+          <li>1e-7: crash.</li>
+          <li>1e-6: <code>GEOMETRY_INVALID</code>.</li>
+          <li>1e-5 to 5e-4: accepted with a 10–500 nm bore along the axis (4 faces).</li>
+          <li>−1e-4: generic "Revolve operation failed" instead of <code>REVOLVE_PROFILE_CROSSES_AXIS</code>.</li>
+        </ul></dd>
+      <dt>Root cause</dt><dd>The classifier only refuses when the profile reaches beyond ±resolution on both sides. A point inside the band but off the axis flows into OCCT, whose validity check dereferences an empty extrema result when an edge is parallel to the axis at about <code>Precision::Confusion()</code>. A segfault is not a C++ exception, so the <code>catch (...)</code> at <code>:451</code> cannot contain it.</dd>
+      <dt>Fix</dt><dd>Add a preflight at <code>:423</code>: every profile point with |offset| &lt; resolution must be on the axis within confusion, otherwise snap it or refuse with a new <code>REVOLVE_PROFILE_NEAR_AXIS</code>.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f2">
+    <div class="head"><span class="tag p1">P1 · 2</span><h3>A metadata-only edit supersedes the regeneration in flight and nothing reschedules it</h3><span class="tag conf">Mechanism confirmed · UI hang not executed</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-app/src/document_runtime.rs:1455</code> (<code>after_mutation</code> runs for <code>RegenHint::None</code> edits), <code>:2644-2668</code> (failure relabelled as superseded); <code>crates/onecad-core/src/regen/scheduler.rs:569</code> (no action on <code>Superseded</code>)</dd>
+      <dt>Subsystem</dt><dd>Regeneration scheduling, document runtime</dd>
+      <dt>Reproduce</dt><dd><code>promotable_fake_runtime()</code> → <code>apply(add_extrude(0x11, 10.0))</code> → <code>begin_regen(ToEnd{from:1})</code> → <code>apply(RenameBody)</code> → <code>finish_regen(drive)</code>. Test <code>audit1_…</code> in the scratch copy.</dd>
+      <dt>Expected</dt><dd>A regeneration covering the extrude eventually publishes two bodies.</dd>
+      <dt>Observed</dt><dd>The rename returns <code>RegenHint::None</code>, the regeneration reports <code>Superseded</code>, the projection still has 1 body, and nothing is queued.</dd>
+      <dt>Impact</dt><dd>From code reading: the edit's geometry is never published; if the worker already accepted, the worker head and the Rust head diverge until the next geometric edit, so picks and fenced exports return stale; a hard failure in that window is relabelled <code>Superseded</code> and lost; the UI's wait has no timeout. Rename body or sketch, visibility, body or face colour, module state and add-sketch all take this path.</dd>
+      <dt>Fix</dt><dd>Do not bump the fencing revision for edits that need no regeneration, or re-request the superseded span when a regeneration ends <code>Superseded</code> with no successor.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f3">
+    <div class="head"><span class="tag p1">P1 · 3</span><h3>Joint origins from picked faces cannot describe a contact mate</h3><span class="tag conf">Solver confirmed · pick path read</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-app/src/api/component_execution/joint_origin.rs:174-195</code> (z = outward face normal or cylinder axis, no flip); <code>crates/onecad-assembly/src/solver.rs:526-541</code> (all joint kinds require both z axes to point the same way)</dd>
+      <dt>Subsystem</dt><dd>Assembly joints: rigid, revolute, slider</dd>
+      <dt>Reproduce</dt><dd>Frame A: origin (0,0,10), z=+Z (top face). Frame B: origin 0, z=−Z (bottom face). A grounded at identity, B free at identity (the insert default). Script: <code>asmprobe</code>.</dd>
+      <dt>Expected</dt><dd>B seated upright on A at z=10.</dd>
+      <dt>Observed</dt><dd>
+        <ul>
+          <li>Rigid and slider from identity: <code>NotConverged</code>, residual π.</li>
+          <li>Revolute from identity or with a 1e-3 rad roll: <code>NotConverged</code>, residual 2.</li>
+          <li>Any start that does converge puts B's local +Z at (0,0,−1): B is flipped and sits inside A.</li>
+        </ul></dd>
+      <dt>Root cause</dt><dd>Outward normals of two touching faces are opposed, but the joint has no flip flag (the library mate has one), and a bound frame must equal the resolved frame exactly, so the user cannot negate it. The exact-π start is a stationary point of the rotation residual.</dd>
+      <dt>Fix</dt><dd>Add a flip or contact option per joint side, and perturb or solve in closed form when the start is antiparallel.</dd>
+    </dl>
+  </article>
+
+  <h3>P2 — medium</h3>
+
+  <article class="finding" id="f4">
+    <div class="head"><span class="tag p2">P2 · 4</span><h3>Joint solver does not converge at large lever arms</h3><span class="tag conf">Confirmed</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-assembly/src/solver.rs:36-50</code>: finite-difference Levenberg–Marquardt, 50 iterations, unknowns in unscaled radians and millimetres. The app uses these defaults (<code>document_runtime/joint_execution.rs:197</code>).</dd>
+      <dt>Reproduce</dt><dd>One grounded body, one free body, one joint with a closed-form answer. Scale frame offsets and positions by s.</dd>
+      <dt>Observed</dt><dd>
+        <ul>
+          <li>Frame offsets about 0.3 m, start a few metres away: rigid and slider <code>NotConverged</code>.</li>
+          <li>Offsets about 1 m: a 5° and 1 mm perturbation needs 47 of 50 iterations.</li>
+          <li>Offsets about 3 m: the same perturbation fails.</li>
+          <li>At s=1 everything converges in 4–7 iterations with residual below 4e-10.</li>
+        </ul></dd>
+      <dt>Expected</dt><dd>Convergence in a few iterations at any scale; the answer is <code>B = A·la·J(value)·lb⁻¹</code>.</dd>
+      <dt>Note</dt><dd>The failure is honest: no poses are returned, so nothing moves.</dd>
+      <dt>Fix</dt><dd>For grounded trees, compute poses by closed-form propagation and use them as the answer or the initial guess. Scale rotation columns by a characteristic length.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f5">
+    <div class="head"><span class="tag p2">P2 · 5</span><h3>Driving one joint moves other free joints, and their stored value goes stale</h3><span class="tag conf">Solver confirmed · persistence read</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>solver.rs:256-267</code> (only joints in the drive list are pinned); <code>crates/onecad-app/src/joint_execution.rs:235-240</code> (only driven joints' <code>value</code> is rewritten)</dd>
+      <dt>Reproduce</dt><dd>Ground G, bodies B1 and B2 at z=2, slider J1 (G→B1, value 2), slider J2 (B1→B2). Drive J2 = 5 only.</dd>
+      <dt>Expected</dt><dd>B1 stays at z=2, B2 moves to z=7.</dd>
+      <dt>Observed</dt><dd>B1 moves to z=−0.5 and B2 to z=4.5. J1's stored value remains 2.0.</dd>
+      <dt>Fix</dt><dd>Pin undriven joints at their stored values during a drive, or write back every joint's measured value at commit.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f6">
+    <div class="head"><span class="tag p2">P2 · 6</span><h3>Two-direction extrude with a ToFace leg on the wrong side builds silently</h3><span class="tag conf">Confirmed</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>worker/src/ops/ExtrudeOp.cpp:1028-1042</code> (sign contract checked on raw params only), <code>:1153-1195</code></dd>
+      <dt>Reproduce</dt><dd>Target box at z∈[20,30]. Profile 10×10 at z=0. Extrude NewBody, two directions: leg 1 Blind 5, leg 2 ToFace the z=20 face (which lies on leg 1's side). Script: <code>p13.py</code>.</dd>
+      <dt>Expected</dt><dd>A named refusal: leg 2 has no face on its own side.</dd>
+      <dt>Observed</dt><dd>Success. One solid, V=2000, spanning z∈[0,20]. Leg 2 was built on leg 1's side and absorbed leg 1; nothing exists on the opposite side. This is a plausible-looking but wrong result.</dd>
+      <dt>Fix</dt><dd>After resolving a ToFace distance, refuse a negative or backward leg.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f7">
+    <div class="head"><span class="tag p2">P2 · 7</span><h3>Latest-wins coalescing drops the cancelled regeneration's edit claim</h3><span class="tag conf">Claim loss confirmed · wrong bind is a hypothesis</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-core/src/regen/scheduler.rs:504-535</code></dd>
+      <dt>Reproduce</dt><dd><code>request(ToEnd{from:2})</code>, then <code>request(RevertToEnd{from:0})</code>. Test <code>audit_revert_after_toend_keeps_edit_claim</code> in the scratch copy.</dd>
+      <dt>Expected</dt><dd>The second job still carries <code>edited_from = Some(2)</code>.</dd>
+      <dt>Observed</dt><dd>The first job is cancelled and the second has <code>edited_from = None</code>.</dd>
+      <dt>Impact</dt><dd>The schema requires a descriptor-tie veto for references after an upstream content edit. With the claim gone, a stale anchor could decide a tie on moved geometry. That needs congruent-twin geometry and was not demonstrated. Triggers: a worker restart during a content-edit regeneration, or two automation edits in one regeneration.</dd>
+      <dt>Fix</dt><dd>Merge the dirty floor (minimum <code>from</code>) and keep the strongest claim when replacing a pending or in-flight request.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f8">
+    <div class="head"><span class="tag p2">P2 · 8</span><h3>Element promotion during an in-flight regeneration is erased on commit</h3><span class="tag conf">Confirmed</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-app/src/document_runtime.rs:5369-5373</code> (promotion inserts without bumping the revision); commit replaces <code>self.regen</code> with a clone taken before the promotion</dd>
+      <dt>Reproduce</dt><dd><code>begin_regen</code> → <code>promote_selection(snap, body, [f:1])</code> → <code>finish_regen</code>. Test <code>audit4_…</code>.</dd>
+      <dt>Observed</dt><dd><code>persisted_element_count()</code> is 1 before the publish and 0 after.</dd>
+      <dt>Impact</dt><dd>Saved element evidence for face colours, projections and edge preparation is lost. How often the serialized native host reaches this window is not established; automation and restart replays reach it directly.</dd>
+      <dt>Fix</dt><dd>Merge live element entries into the scratch state at commit, or fence promotions on the regeneration.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f9">
+    <div class="head"><span class="tag p2">P2 · 9</span><h3>Shell fails on a body with a through hole</h3><span class="tag conf">Confirmed</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>worker/src/ops/ShellOp.cpp:176</code> (<code>MakeThickSolidByJoin</code>)</dd>
+      <dt>Reproduce</dt><dd>Box 40×20×25, cut a ⌀12 through hole, shell 2 mm opening the bottom face. Script: <code>p9.py</code>.</dd>
+      <dt>Observed</dt><dd><code>GEOMETRY_INVALID</code> with <code>brepValid:false</code>, or generic "Shell operation failed" when a fillet is also present. The same shell on fillet-only or chamfer-only bodies succeeds with exact volume.</dd>
+      <dt>Assessment</dt><dd>A capability gap, honestly refused. The previous body is preserved. It affects a very common part shape.</dd>
+      <dt>Fix</dt><dd>Investigate offset mode and join type for inner cylindrical faces, or add a fallback (offset solid then boolean). Give the failure a specific reason code.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f10">
+    <div class="head"><span class="tag p2">P2 · 10</span><h3>Legacy region path turns arcs into polygons without a diagnostic</h3><span class="tag conf">Confirmed</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>worker/src/loop/FaceBuilder.cpp:483-491</code>, <code>worker/src/loop/LoopDetector.cpp:1548-1606</code></dd>
+      <dt>Reproduce</dt><dd>Stadium profile (two lines, two R5 arcs), extrude 10 through the legacy input <code>&lt;sketch&gt;.region.r0</code> with no <code>regionIdentityVersion</code>. Scripts: <code>p13.py</code>, <code>p14.py</code>.</dd>
+      <dt>Expected</dt><dd>V = 2785.398, 6 faces, two cylindrical walls.</dd>
+      <dt>Observed</dt><dd>V = 2776.457 (0.32% low), 28 planar faces, no diagnostic. The same sketch through <code>regionId</code> with identity version 2 or 3 is exact with 6 faces. A lone circle is exact on both paths.</dd>
+      <dt>Scope</dt><dd>Legacy documents only, if that path is still reachable from files you care about.</dd>
+      <dt>Fix</dt><dd>Surface the builder's "polygon wire" warning as a step diagnostic, or rebuild exact curves for mixed line-and-arc loops.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f11">
+    <div class="head"><span class="tag p2">P2 · 11</span><h3>A stale mesh fetch silently retries at the worker's current head</h3><span class="tag conf">Strong evidence</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-app/src/worker/manager.rs:2903-2925</code>; <code>document_runtime.rs:375-398</code>, <code>:3154-3166</code>; <code>export_threemf.rs:96</code></dd>
+      <dt>Mechanism</dt><dd>On <code>STALE_PREVIEW</code> the fetch re-reads the worker head and returns those bytes without saying which snapshot they belong to. Adoption checks against the requested snapshot id, so bytes from another head are cached under the current generation. The 3MF export resolves face colours against snapshot S and then fetches through the same retry, so a publish mid-export can colour the wrong faces.</dd>
+      <dt>Fix</dt><dd>Return the snapshot id with the bytes and refuse a mismatch; never retry at a fresh head for fenced consumers.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f12">
+    <div class="head"><span class="tag p2">P2 · 12</span><h3>Worker snapshot ids restart at 1 after a worker restart</h3><span class="tag conf">Strong evidence</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>worker/src/session/Session.cpp:166</code>, <code>:193</code>, <code>:391</code>; <code>document_runtime.rs:5492-5494</code>, <code>:5583-5627</code>; <code>document_runtime/staged_elements.rs:51-73</code></dd>
+      <dt>Mechanism</dt><dd>Rust caches and fences that key on the bare snapshot id treat a post-restart snapshot as the pre-restart one with the same number. An exact-key promotion-cache hit can reuse an old element id for a different face. User impact is a hypothesis.</dd>
+      <dt>Fix</dt><dd>Key every snapshot cache and fence on (worker epoch, snapshot id), or clear them in the restart hook.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f13">
+    <div class="head"><span class="tag p2">P2 · 13</span><h3>The host deletes a valid new feature when the regeneration failed for transport reasons</h3><span class="tag conf">Strong evidence</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-ui/src/provisional.rs:198-222</code>; <code>document_runtime.rs:2651-2668</code>; <code>worker/manager.rs:2056-2062</code></dd>
+      <dt>Mechanism</dt><dd>A commit during the restart backoff window fails with <code>NotConnected</code>; a crash gives <code>Crashed</code> or <code>Protocol</code>. The report says <code>failed</code>, and <code>should_rollback</code> does not look at the error class, so it spends the rollback token and undoes the user's feature. Combined with finding 1, a crash-triggering revolve would be removed rather than reported.</dd>
+      <dt>Fix</dt><dd>Classify failures as availability or feature errors; only the latter are eligible for provisional rollback.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f14">
+    <div class="head"><span class="tag p2">P2 · 14</span><h3>Stream reassembly trusts the worker's byte offset</h3><span class="tag conf">Strong evidence · code read directly</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>crates/onecad-app/src/worker/manager.rs:2294-2299</code></dd>
+      <dt>Mechanism</dt><dd><code>StreamAcc::apply</code> resizes its buffer to <code>byteOffset + len</code> with no bound against <code>totalBytes</code> or a cap. A single bad chunk can force a huge allocation, and <code>off + bin.len()</code> can overflow. Either defeats the sidecar's crash isolation by taking the host down.</dd>
+      <dt>Fix</dt><dd>Validate each data chunk against the manifest's <code>totalBytes</code> and the 1 GiB frame cap with checked arithmetic; treat a violation as a protocol error.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f15">
+    <div class="head"><span class="tag p2">P2 · 15</span><h3>STEP import can drop open shells and loose faces without a loss diagnostic</h3><span class="tag conf">Strong evidence · root layout is a hypothesis</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>worker/src/io/StepRead.cpp:295-311</code>, <code>:524-531</code></dd>
+      <dt>Mechanism</dt><dd><code>promote_solids</code> walks solids and shells only. An open-shell flag is reported only when the root produced zero solids, so a surface part next to solid parts in one assembly root disappears silently.</dd>
+      <dt>Fix</dt><dd>Count skipped shells and free faces per root and emit a diagnostic naming them, or quarantine them as bodies.</dd>
+    </dl>
+  </article>
+
+  <article class="finding" id="f16">
+    <div class="head"><span class="tag p2">P2 · 16</span><h3>Picked joint origins sit at the surface's parametric origin and cannot be offset</h3><span class="tag conf">Strong evidence · concrete positions are a hypothesis</span></div>
+    <dl>
+      <dt>Where</dt><dd><code>worker/src/session/ClassifyElement.cpp:115-124</code>; <code>joint_origin.rs:191-192</code></dd>
+      <dt>Mechanism</dt><dd>A plane's origin is <code>gp_Pln::Location()</code> and a cylinder's is its axis location. Neither needs to lie on the face. Rigid and revolute joints put origins together, so in-plane position and axial seating depend on how each body happened to be modelled. Editing a bound origin breaks the exact-frame match and triggers NeedsRepair.</dd>
+      <dt>Fix</dt><dd>Use the face centroid or a user-picked point projected onto the surface, and allow an authored offset.</dd>
+    </dl>
+  </article>
+
+  <h3>P3 — low</h3>
+  <div class="tw"><table>
+    <thead><tr><th>#</th><th>Finding</th><th>Where</th><th>Evidence</th><th>Confidence</th></tr></thead>
+    <tbody>
+      <tr><td class="n">17</td><td>Add or Union with the tool fully inside the target succeeds unchanged. There is no counterpart to <code>CUT_NO_EFFECT</code>; for Union the tool body is consumed.</td><td><code>worker/src/ops/OpCommon.cpp:843-849</code></td><td>2×2×2 prism inside a 20³ box: Ok, V stays 8000</td><td>Confirmed</td></tr>
+      <tr><td class="n">18</td><td>A legacy fused pattern (no <code>resultPolicyVersion</code>) skips the commit-tier sliver and self-interference checks.</td><td><code>worker/src/ops/PatternOp.cpp:127-204</code></td><td>Spacing 1e-6, count 3, fused: published, V=8000.0008, 22 faces</td><td>Confirmed</td></tr>
+      <tr><td class="n">19</td><td>An Add into a legacy multi-solid aggregate deletes the parent body id and mints children.</td><td><code>OpCommon.cpp:999-1013</code></td><td>Events: deleted <code>body_op2</code>, created <code>body_op4:0..2</code></td><td>Confirmed</td></tr>
+      <tr><td class="n">20</td><td>A non-finite number anywhere in a frame (<code>1e400</code>) aborts the worker. Even an ignored argument triggers it. The Rust host cannot emit a non-finite f64 through serde_json, so this is a defence-in-depth gap.</td><td><code>run_dispatch_loop</code> rethrow → <code>std::terminate</code></td><td>SIGABRT, three variants</td><td>Confirmed</td></tr>
+      <tr><td class="n">21</td><td>A counterbore deeper than the hole is accepted; the drill depth is ignored.</td><td><code>worker/src/ops/HoleOp.cpp</code></td><td>depth 10, cbDepth 15: removes π·4.5²·15</td><td>Confirmed</td></tr>
+      <tr><td class="n">22</td><td>A hole wider than its host face removes a slab or breaks out the sides with no warning. The geometry is the correct box∩cylinder.</td><td><code>HoleOp.cpp</code></td><td>⌀60 on a 20×40 face: V=12000, 6 faces</td><td>Confirmed</td></tr>
+      <tr><td class="n">23</td><td>No model-extent cap.</td><td>Extrude, Transform</td><td>Extrude 1e12 mm and translate 1e15 mm accepted</td><td>Confirmed</td></tr>
+      <tr><td class="n">24</td><td>A sketch gap of 1e-5 mm closes silently although the documented node-merge tolerance is 1e-6 mm. A 1e-3 gap is refused.</td><td><code>LoopDetector.cpp</code></td><td>V=500 exact with a 1e-5 gap</td><td>Confirmed</td></tr>
+      <tr><td class="n">25</td><td>Sweep works but <code>op.sweep</code> is missing from the hello capability list.</td><td><code>worker/src/capi/WorkerRuntime.cpp:109</code></td><td>Torus built; capability absent</td><td>Confirmed</td></tr>
+      <tr><td class="n">26</td><td>An exactly antiparallel revolute start (within 1e-9 rad) returns <code>NotConverged</code> at iteration 0. A 1e-6 offset converges.</td><td><code>solver.rs</code></td><td>Residual 2.0, 0 iterations</td><td>Confirmed</td></tr>
+      <tr><td class="n">27</td><td>Sketches at 1e-4 scale (sub-micron) fail with the misleading "no closed region detected".</td><td><code>LoopDetector.cpp</code></td><td>0.4 µm rectangle refused; 4 µm works</td><td>Confirmed</td></tr>
+      <tr><td class="n">28</td><td>Generic failure messages where a specific one is possible: chamfer distance ≥ face width, revolve crossing by less than resolution, boolean with the target as its own tool ("tool body not found").</td><td><code>FilletChamferOp.cpp</code>, <code>RevolveOp.cpp:445</code>, <code>BooleanOp.cpp</code></td><td>Refused, but unnamed</td><td>Confirmed</td></tr>
+      <tr><td class="n">29</td><td>Two real-worker tests fail when the ignored set runs concurrently ("component worker capacity is busy") and pass alone. The six real-worker <code>#[ignore]</code> tests are skipped by the documented gate even with <code>ONECAD_REQUIRE_WORKER=1</code>.</td><td><code>crates/onecad-app/src/api/component_execution/tests.rs:870</code></td><td>See section E</td><td>Confirmed</td></tr>
+      <tr><td class="n">30</td><td>The grounded flag does not block <code>SetPose</code> on an occurrence with no active joints.</td><td><code>crates/onecad-core/src/edit/assembly.rs:118-139</code></td><td>Code read</td><td>Strong evidence</td></tr>
+      <tr><td class="n">31</td><td>Stored poses are not checked against their joints at open, projection or STEP export.</td><td><code>crates/onecad-core/src/document/component.rs:185-294</code></td><td>Code read</td><td>Strong evidence</td></tr>
+      <tr><td class="n">32</td><td>Solver-crate edge cases: a drive on a suppressed joint is ignored; numeric frames are silently orthonormalized; a face pick needs x perpendicular to the normal within 1e-8; the ±π seam is treated inconsistently between limits and values.</td><td><code>solver.rs:240-297</code>, <code>math.rs:451-462</code>, <code>joint.rs:80-82</code></td><td>Code read; the app rejects the first</td><td>Strong evidence</td></tr>
+      <tr><td class="n">33</td><td>The 3MF export indexes mesh bytes after a header-only check, not the full checked decoder.</td><td><code>crates/onecad-app/src/export_threemf.rs:128-257</code></td><td>Code read</td><td>Strong evidence</td></tr>
+      <tr><td class="n">34</td><td>The saved mesh cache is labelled with the current history hash but can hold older geometry. The Rust checkpoint store survives a worker restart. The snapshot watch channel can show a result that is later discarded (no production subscriber found).</td><td><code>crates/onecad-core/src/io/container.rs:754</code>, <code>document_runtime.rs:1271-1274</code>, <code>regen/executor.rs:913-939</code></td><td>Code read</td><td>Strong evidence</td></tr>
+      <tr><td class="n">35</td><td>Exceptions escaping an op outside its local try block turn the whole plan into one error after step events were emitted. No signal handler is installed, so an OCCT fault kills the sidecar.</td><td><code>worker/src/session/PlanExecutor.cpp:882-1112</code></td><td>Code read; finding 1 is an instance</td><td>Strong evidence</td></tr>
+      <tr><td class="n">36</td><td>Tessellation ignores BRepMesh status flags. Boolean warnings are ignored and the fuzzy value has no upper clamp. Shell has no upper thickness guard before the build. STEP export pins only the schema knob. The split-ordinal rank key is quantized below integration noise.</td><td><code>worker/src/tess/Tessellate.cpp:231-265</code>, <code>OpCommon.cpp:715-798</code>, <code>ShellOp.cpp:98-208</code>, <code>io/ExportStep.cpp:163-180</code></td><td>Code read</td><td>Hypothesis</td></tr>
+      <tr><td class="n">37</td><td>Gear integer parameters are coerced (20.9 teeth → 20). Hole readers have no finiteness check.</td><td><code>worker/src/ops/GearOp.cpp:66-97</code>, <code>HoleOp.cpp:81-83</code></td><td>Code read; my Gear probe stopped earlier on a missing recipe</td><td>Strong evidence</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">One reported claim could not be reproduced: that a "clear" publish (rollback to 0) deletes saved element evidence (<code>document_runtime.rs:7029-7031</code>). In my harness the clear regeneration returned <code>Superseded</code> and the element count stayed at 1. Treat it as unverified.</p>
+</section>
+
+<section id="matrix">
+  <h2>C. Modeling operation validation matrix</h2>
+  <p class="note">"Exact" means the result matched the closed-form value in my probes. "Repo tests" refers to what the existing suites assert, as read by the kernel auditor.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Operation</th><th>Status</th><th>Geometric correctness</th><th>Topology</th><th>Boundary cases</th><th>Regeneration</th><th>Evidence and gaps</th></tr></thead>
+    <tbody>
+      <tr><td>Sketch regions</td><td>Implemented</td><td>Rectangle, circle, annulus, bowtie cells exact</td><td>Open, collinear, sliver profiles refused</td><td>Gap 1e-5 closes; 1e-4 scale refused</td><td>Solver repeatability test passes</td><td>Legacy arc path polygonizes (10)</td></tr>
+      <tr><td>Extrude (Blind, Symmetric, two-direction, ThroughAll, draft)</td><td>Implemented</td><td>Exact, including the draft integral 7485.27 at 5°</td><td>1 solid, valid</td><td>0, &lt;1e-3, 1e300 refused; degenerate draft refused</td><td>Deterministic</td><td>Wrong-side ToFace (6); no extent cap (23)</td></tr>
+      <tr><td>Revolve</td><td>Implemented</td><td>Exact at 360, 180, 90, 1, 0.001, −90, −360; tilted axis matches Pappus</td><td>Valid</td><td>0, &gt;360, crossing, zero-length axis refused</td><td>Deterministic</td><td>Crash (1); nano-bore accepted; repo tests are almost all 360°</td></tr>
+      <tr><td>Boolean (Union, Cut, Intersect)</td><td>Implemented</td><td>Algebra exact for overlap, contained, identical, 1e-6 overlap</td><td>Valid; coplanar faces are not merged</td><td>Disjoint, empty, no-effect cut, edge-touch, self-tool refused</td><td>Cut that splits deletes the body and mints two</td><td>No-effect Add silent (17)</td></tr>
+      <tr><td>Fillet</td><td>Implemented</td><td>Exact (1−π/4)r²L; 12-edge rounded box exact, 26 faces</td><td>Valid</td><td>r ≤ 0, r &lt; 1e-3, full-width r refused</td><td>Ambiguous or far anchor → NeedsRepair</td><td>—</td></tr>
+      <tr><td>Chamfer</td><td>Implemented</td><td>Exact d²L/2</td><td>Valid</td><td>d ≤ 0, oversize refused; asymmetric needs a reference face</td><td>NeedsRepair without a reference face</td><td>Oversize message generic (28)</td></tr>
+      <tr><td>Shell</td><td>Implemented</td><td>Exact on plain, filleted, chamfered box; two open faces exact</td><td>Valid</td><td>Too thin, too thick, no opening, all open refused</td><td>Not probed</td><td>Through-hole body fails (9)</td></tr>
+      <tr><td>Hole (simple, counterbore, countersink)</td><td>Implemented</td><td>Exact for all three; through and blind</td><td>Valid</td><td>d, depth floors; off-face and off-plane points refused</td><td>Host-face ref flagged NeedsRepair when split</td><td>cbDepth &gt; depth (21); oversize (22)</td></tr>
+      <tr><td>Mirror</td><td>Implemented</td><td>Volume and centroid exact; fuse through body exact</td><td>Valid</td><td>Zero normal, disjoint fuse refused</td><td>Deterministic</td><td>—</td></tr>
+      <tr><td>Linear and circular pattern</td><td>Implemented</td><td>Fused overlap, touching, self-rotation exact</td><td>Valid</td><td>Count outside 2–128, non-integer, zero spacing, zero vector, angle 0 or &gt;360 refused</td><td>Deterministic</td><td>Legacy tier gap (18, 19)</td></tr>
+      <tr><td>Transform (move, rotate, copy)</td><td>Implemented</td><td>Exact; 360 × 1° about an arbitrary axis returns with zero drift</td><td>Valid</td><td>Zero axis refused</td><td>Deterministic</td><td>Identity transform accepted; no extent cap</td></tr>
+      <tr><td>Loft</td><td>Implemented, parallel sections</td><td>Cylinder, frustum, 3-section exact; oblique 2.4e-9</td><td>Valid</td><td>Coplanar, 1e-6 apart, non-monotone, single profile refused</td><td>Not probed</td><td>Rectangular profiles not probed</td></tr>
+      <tr><td>Sweep</td><td>Implemented, narrow scope</td><td>Torus exact in volume and area</td><td>Valid</td><td>Horn and spindle torus, off-path section refused</td><td>Not probed</td><td>Capability not advertised (25)</td></tr>
+      <tr><td>OffsetFace, Gear, FeaturePattern, Place/Detach component</td><td>Implemented</td><td colspan="4">Not probed by me. Covered by the worker and Rust suites, which pass.</td><td>Gear tests check bounds only</td></tr>
+      <tr><td>STEP export → import</td><td>Implemented</td><td>ΔV/V = 2.5e-14, area and centroid preserved, 16 faces preserved, millimetres</td><td>Valid</td><td>—</td><td>Import replays as a plan step</td><td>Open-shell drop (15); no geometry round-trip test in the repo</td></tr>
+      <tr><td>Split body, standalone draft, thicken</td><td>Not implemented</td><td colspan="5">Reported as unsupported.</td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><strong>Failure atomicity at worker level:</strong> in every probe a failed step left the worker head untouched and the prior bodies queryable after discard.</li>
+    <li><strong>Determinism:</strong> a 7-step model (extrude, fillet, chamfer, shell, cut) gave identical step signatures and bit-identical mass properties across 6 fresh worker processes.</li>
+    <li><strong>Not verified by my probes:</strong> edit → regenerate → reference rebinding, undo/redo and save/reopen equivalence. These rest on the repository's Rust suites.</li>
+  </ul>
+</section>
+
+<section id="assembly">
+  <h2>D. Assembly and solver validation</h2>
+  <div class="cols">
+    <div><h4>Sound, by execution</h4>
+      <ul>
+        <li>Rigid, revolute and slider residuals below 4e-10 at millimetre scale, from scrambled starts.</li>
+        <li>Drive sign is consistent: revolute angle and slider travel match the commanded value across ±π.</li>
+        <li>Limits: a start outside limits is clamped to the nearest bound; a drive outside limits is refused; a value outside limits is invalid.</li>
+        <li>Degrees of freedom: chain of two revolutes and a slider = 3; unanchored revolute pair = 7; free body = 6. Redundant counts are correct (duplicate rigid = 6).</li>
+        <li>Grounded poses are returned bit-exact. Repeat runs are bit-identical; reordered input differs by 1.8e-14 mm.</li>
+        <li>NaN poses, non-unit quaternions, degenerate frames and self-joints are rejected.</li>
+        <li>At crate level a driven planar 4-bar loop closes to 1.3e-10 with the right mobility.</li>
+      </ul></div>
+    <div><h4>Sound, by code reading (not executed)</h4>
+      <ul>
+        <li>Hamilton wxyz quaternions; unit norm enforced at deserialize, insert, solver input and export.</li>
+        <li>Composition is parent∘child; inverse is (q*, −q*·t); frames are right-handed with y = z×x.</li>
+        <li>Commit is fenced on session, generation, revision, epoch, snapshot and base hash.</li>
+        <li>Solved poses are stored and not re-solved at open, so reopening does not move parts.</li>
+        <li>STEP export writes each visible root occurrence once; <code>gp_Trsf = T·R</code> matches <code>RigidTransform</code>; scale is 1; output is flattened as documented.</li>
+      </ul></div>
+  </div>
+  <div class="tw"><table>
+    <thead><tr><th>Category</th><th>Behaviour</th></tr></thead>
+    <tbody>
+      <tr><td>Supported</td><td>Rigid (0 DOF), revolute (1), slider (1). Flat grounded acyclic trees, one ground per connected component, at most 20 occurrences and 20 joints. Several drives on distinct joints. Slider limits in mm; revolute limits within [−π, π].</td></tr>
+      <tr><td>Explicitly rejected by the app</td><td>Loops, two joints between the same pair, more than one ground per component, ungrounded components, nested occurrences, self-joints, drives on rigid or suppressed joints (<code>crates/onecad-app/src/joint_execution.rs:416-487</code>).</td></tr>
+      <tr><td>Absent</td><td>Couplings (gears, rack and pinion), contact, collision, dynamics, cylindrical, planar and ball joints. No edit exists to delete an occurrence or a definition.</td></tr>
+      <tr><td>Silently approximated</td><td>Free degrees of freedom settle by the minimum-norm step from current poses. Limits use one round of nearest-bound clamping. Numeric frames are orthonormalized. Revolute values wrap modulo 2π. Undriven joints' stored values are not tied to the pose.</td></tr>
+      <tr><td>Broken or weak</td><td>Findings 3, 4, 5, 16, 26, 30, 31, 32.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="tests">
+  <h2>E. Test execution results</h2>
+  <p class="note">Rust was built with <code>CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0</code> to save disk (18 GB free; <code>target/</code> is 6.1 GB). The worker binary is <code>worker/build/onecad-worker</code>; <code>cmake --build</code> reported nothing to rebuild. Real-worker runs used <code>ONECAD_REQUIRE_WORKER=1</code>, <code>ONECAD_WORKER_PATH</code> and <code>ONECAD_TEST_ADDON_COMPONENT</code>.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Command</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td><code>ctest --test-dir worker/build -j6 --output-on-failure</code></td><td>247 of 247 passed, 31.7 s</td></tr>
+      <tr><td><code>cargo test --no-fail-fast -p onecad-core -p onecad-assembly -p onecad-protocol -p onecad-app -p onecad-regen -p onecad-kernelbench -p xtask</code></td><td>2655 passed, 0 failed, 13 ignored (205 test binaries)</td></tr>
+      <tr><td>Same, with <code>-- --ignored</code></td><td>6 real-worker tests pass when run alone. 2 of them fail when the ignored set runs concurrently. 7 need external inputs and were not run.</td></tr>
+      <tr><td><code>cargo xtask check-rust-layers</code></td><td>22 packages, no violations</td></tr>
+      <tr><td><code>cargo xtask verify-modeling-coverage</code></td><td>34 rows, 9 corpus cases, 16 CI jobs, 20 registry operations; exit 0</td></tr>
+      <tr><td><code>cargo xtask verify-modeling-contracts</code></td><td>41 rows, 19 operations, 17 tier-checked; exit 0</td></tr>
+      <tr><td><code>cargo test -p onecad-app --test solver_repeatability -- --ignored</code> with a fresh <code>ONECAD_SOLVER_REPLAY_OUT</code></td><td>Passed</td></tr>
+      <tr><td>Direct worker probes (<code>p1.py</code>–<code>p14.py</code>)</td><td>About 250 cases; 1 SIGSEGV, 1 SIGABRT class, the rest matched or were refused</td></tr>
+      <tr><td>Assembly solver probes (<code>asmprobe</code>)</td><td>About 130 cases; see findings 3, 4, 5, 26</td></tr>
+      <tr><td>Reproduction tests in the scratch copy</td><td>Findings 2, 7, 8 reproduced; the clear-publish claim was not</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cols">
+    <div><h4>Not run</h4>
+      <ul>
+        <li>The full <code>cargo test --workspace</code> gate (UI, render, scene, interaction, widgets, iOS crates).</li>
+        <li><code>cargo clippy</code> and <code>cargo fmt --check</code>.</li>
+        <li>Metal/GPU qualification (<code>ONECAD_REQUIRE_GPU=1</code>).</li>
+        <li>Ignored tests needing external directories: iOS simulator artifacts, native GUI capture, From-New capture (2), external mesh fixtures, iOS replay trace.</li>
+        <li>Any workflow through the native UI.</li>
+      </ul></div>
+    <div><h4>Evidence files</h4>
+      <p class="note">All under the session scratchpad:</p>
+      <pre><code>/private/tmp/claude-501/-Users-andrejvysny-workspace-OneCAD/
+  f895475a-1ee6-4cd2-bc6e-bb9baaa3e738/scratchpad/
+    drv.py common.py p1.py … p14.py   worker probes
+    asmprobe/                         solver probes
+    repo/                             scratch copy + 4 tests
+    ctest.log cargo-test.log cargo-ignored.log</code></pre></div>
+  </div>
+  <h4>Selected probe measurements</h4>
+  <div class="tw"><table>
+    <thead><tr><th>Case</th><th>Expected</th><th>Measured</th><th>Rel. error</th></tr></thead>
+    <tbody>
+      <tr><td>Box 40×20×25</td><td class="n">V 20000, A 4600</td><td class="n">20000, 4600</td><td class="n">1.8e-16</td></tr>
+      <tr><td>Box and cylinder at scales 1e-3 … 1e6, and 1e8 mm from origin</td><td class="n">analytic</td><td class="n">match</td><td class="n">≤ 2.2e-16</td></tr>
+      <tr><td>Revolve ring R15/r5, h10, 90°</td><td class="n">1570.796327</td><td class="n">1570.796327</td><td class="n">0</td></tr>
+      <tr><td>Rounded box, 12 edges r=2</td><td class="n">19718.85538</td><td class="n">19718.85538</td><td class="n">0</td></tr>
+      <tr><td>Shell 2 mm, open top</td><td class="n">6752</td><td class="n">6752</td><td class="n">0</td></tr>
+      <tr><td>Countersink 90°, ⌀10/⌀5, depth 20</td><td class="n">19541.85107</td><td class="n">19541.85107</td><td class="n">0</td></tr>
+      <tr><td>Torus R20 r5 (sweep)</td><td class="n">9869.604401</td><td class="n">9869.604401</td><td class="n">1.8e-16</td></tr>
+      <tr><td>Oblique loft, r5, shear 30</td><td class="n">1570.796327</td><td class="n">1570.796331</td><td class="n">2.4e-9</td></tr>
+      <tr><td>STEP round trip of the 7-step model</td><td class="n">6413.215892655152</td><td class="n">6413.215892654994</td><td class="n">2.5e-14</td></tr>
+      <tr><td>Legacy stadium profile</td><td class="n">2785.398163</td><td class="n">2776.457135</td><td class="n">3.2e-3</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="roadmap">
+  <h2>F. Prioritized hardening roadmap</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Group</th><th>Work</th><th>Acceptance criterion</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="3">1. Critical correctness</td><td>Revolve near-axis guard (1)</td><td>A gap sweep from 1e-12 to 1e-2 mm at both signs, at 360° and 90°, never crashes. Sub-resolution gaps give a named refusal or a snapped 3-face solid. No bore below the authoring resolution is published.</td></tr>
+      <tr><td>Metadata edits must not strand a regeneration (2)</td><td>The finding 2 sequence ends with two bodies published. A scheduler test shows a <code>published</code> emit after a rename during a commit. A hard failure is never relabelled <code>Superseded</code> without a successor.</td></tr>
+      <tr><td>Merge floor and claim on coalesce (7)</td><td><code>ToEnd{2}</code> then <code>RevertToEnd{0}</code> yields a job with <code>edited_from == Some(2)</code>.</td></tr>
+      <tr><td rowspan="5">2. Geometric and numerical robustness</td><td>Refuse a wrong-side ToFace leg (6)</td><td>The finding 6 input returns a named refusal; the legal two-direction cases still pass.</td></tr>
+      <tr><td>No-effect detection for Add and Union (17)</td><td>A tool inside the target returns a refusal or a warning diagnostic; the tool body is not consumed.</td></tr>
+      <tr><td>Input validation (21, 22, 23, 37)</td><td><code>cbDepth ≥ depth</code>, non-integer gear counts, non-finite hole params and extents beyond a documented cap are refused by name.</td></tr>
+      <tr><td>Legacy paths (10, 18, 19)</td><td>Polygonized arcs emit a step diagnostic. Legacy fused patterns pass the commit tier or are refused.</td></tr>
+      <tr><td>Host hardening (14, 20, 33)</td><td>A chunk with an out-of-range offset is a protocol error, with no allocation. A non-finite frame gives a protocol error response or clean exit. 3MF export uses the checked decoder.</td></tr>
+      <tr><td rowspan="4">3. Assembly and solver reliability</td><td>Contact option on picked origins (3, 16)</td><td>Top-face to bottom-face rigid, revolute and slider joints converge from identity with the part upright and no interpenetration. The origin lies on the picked face.</td></tr>
+      <tr><td>Closed-form tree solve (4, 26)</td><td>The scale sweep 1 … 1000 converges from far starts in under 10 iterations. Exact-antiparallel starts converge.</td></tr>
+      <tr><td>Drive isolation (5)</td><td>Driving J2 leaves B1 at z=2. Every joint's stored value equals its measured value after commit.</td></tr>
+      <tr><td>Authority checks (30, 31)</td><td><code>SetPose</code> on a grounded occurrence is refused. Opening a document whose poses violate a joint flags NeedsRepair.</td></tr>
+      <tr><td rowspan="2">4. Missing regression tests</td><td>Geometry oracles</td><td>Revolve at non-360° angles and negative angles with analytic volume; boolean identities (A∪B = A + B − A∩B); STEP geometry and unit round trip; mesh watertightness; shell on a through-hole body.</td></tr>
+      <tr><td>Lifecycle</td><td>Promotion during regeneration (8); snapshot-id reuse after restart (12); transport-failure rollback (13). Move the six real-worker <code>#[ignore]</code> tests into the required gate and serialize them (29).</td></tr>
+      <tr><td rowspan="3">5. Architecture and performance</td><td>Snapshot identity</td><td>Every cache and fence keys on (worker epoch, snapshot id); mesh fetch returns its snapshot id (11, 12).</td></tr>
+      <tr><td>Failure classification</td><td>Regeneration errors carry an availability-or-feature class that the host uses before rollback (13).</td></tr>
+      <tr><td>Fault containment</td><td>A catalogue of preflights for known OCCT null dereferences, and a top-level catch around op execution that preserves per-step results (35).</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="verdict">
+  <h2>G. Final verdict</h2>
+  <div class="cols">
+    <div><h4><span class="tag ok">Demonstrably reliable</span></h4>
+      <ul>
+        <li>Extrude, boolean, fillet, chamfer, hole, mirror, patterns and transform on current authoring paths.</li>
+        <li>Shell on bodies without through holes; loft and sweep within their declared scope.</li>
+        <li>Publication gating: invalid, empty, disjoint and no-effect-cut results are refused.</li>
+        <li>Worker-level failure atomicity and cross-process determinism.</li>
+        <li>STEP solid round trip.</li>
+        <li>Joint math at millimetre scale for grounded trees.</li>
+      </ul></div>
+    <div><h4><span class="tag p3">Unverified</span></h4>
+      <ul>
+        <li>Native UI workflows, GPU display and appearance.</li>
+        <li>OffsetFace, Gear, FeaturePattern and components beyond the repository's own tests.</li>
+        <li>Edit-driven reference rebinding, undo/redo and save/reopen equivalence beyond the Rust suites.</li>
+        <li>Crash recovery end to end.</li>
+        <li>Findings 11–16 and 30–37, and the clear-publish claim.</li>
+      </ul></div>
+    <div><h4><span class="tag p1">Unsafe or incomplete</span></h4>
+      <ul>
+        <li>Revolve near the axis.</li>
+        <li>Regeneration scheduling around metadata edits and coalescing.</li>
+        <li>Contact mates from picked faces.</li>
+        <li>Joint solving beyond about 0.3 m lever arms, and multi-joint drive.</li>
+        <li>Shell with through holes.</li>
+        <li>Arcs on the legacy profile path.</li>
+      </ul></div>
+  </div>
+</section>
+
+<section id="open">
+  <h2>Open questions</h2>
+  <ul>
+    <li>Should these findings be recorded in the ONECAD Plane project as work items (3 at P1, 12 at P2)? Nothing has been written there.</li>
+    <li>Is the legacy <code>region.r0</code> profile path still reachable from documents you care about? That decides whether finding 10 is P2 or P3.</li>
+    <li>Should the scratch repository copy and the build artifacts it added to <code>target/</code> be deleted?</li>
+  </ul>
+</section>
+
+<footer>Method: three independent static audits (kernel, assembly, regeneration) whose claims were then executed where possible; direct OCW1 probes against the real worker with closed-form oracles; black-box solver probes; repository test suites. Findings marked Strong evidence or Hypothesis were not executed and should be reproduced before they are scheduled.</footer>
+</div>
